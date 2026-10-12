@@ -1,0 +1,50 @@
+# --- build output / tooling caches ---
+.dart_tool/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+*.iml
+.idea/
+.vscode/
+*.lock
+!pubspec.lock
+coverage/
+
+# --- OS / editor artefacts ---
+.DS_Store
+*.swp
+*~
+
+# --- platform build state ---
+apps/guigo/ios/Pods/
+apps/guigo/ios/.symlinks/
+apps/guigo/ios/Flutter/ephemeral/
+apps/guigo/ios/Runner.xcworkspace/xcuserdata/
+apps/guigo/ios/Runner.xcodeproj/xcuserdata/
+apps/guigo/android/.gradle/
+apps/guigo/android/local.properties
+apps/guigo/android/key.properties
+*.jks
+*.keystore
+*.mobileprovision
+*.p12
+*.cer
+
+# --- never public (see POLICY.md) ---
+# tests and their recorded-session data
+**/test/
+**/integration_test/
+**/testdata/
+**/recordings/
+*.bin
+*.pcap
+*.har
+# local utilities, scratch and reports
+tools/
+**/tool/
+.zcode/
+*audit*.md
+**/failures/
+*.log
+.env*

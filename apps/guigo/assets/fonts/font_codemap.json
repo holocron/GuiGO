@@ -1,0 +1,4953 @@
+{
+  "2L": {
+    "cp": 57344,
+    "name": "ICON_SYSTEM_SAVE"
+  },
+  "0X": {
+    "cp": 57345,
+    "name": "ICON_PRINT"
+  },
+  "0V": {
+    "cp": 57346,
+    "name": "ICON_OKAY"
+  },
+  "0W": {
+    "cp": 57347,
+    "name": "ICON_CANCEL"
+  },
+  "15": {
+    "cp": 57348,
+    "name": "ICON_EXECUTE_OBJECT"
+  },
+  "10": {
+    "cp": 57349,
+    "name": "ICON_DISPLAY"
+  },
+  "0Z": {
+    "cp": 57350,
+    "name": "ICON_CHANGE"
+  },
+  "11": {
+    "cp": 57351,
+    "name": "ICON_DELETE"
+  },
+  "42": {
+    "cp": 57352,
+    "name": "ICON_REFRESH"
+  },
+  "0Y": {
+    "cp": 57353,
+    "name": "ICON_CREATE"
+  },
+  "14": {
+    "cp": 57354,
+    "name": "ICON_COPY_OBJECT"
+  },
+  "13": {
+    "cp": 57355,
+    "name": "ICON_SEARCH"
+  },
+  "38": {
+    "cp": 57356,
+    "name": "ICON_CHECK"
+  },
+  "4E": {
+    "cp": 57357,
+    "name": "ICON_SEARCH_NEXT"
+  },
+  "3X": {
+    "cp": 57358,
+    "name": "ICON_CLOSE"
+  },
+  "37": {
+    "cp": 57359,
+    "name": "ICON_REPLACE"
+  },
+  "4G": {
+    "cp": 57360,
+    "name": "ICON_FILTER"
+  },
+  "3E": {
+    "cp": 57361,
+    "name": "ICON_SORT_UP"
+  },
+  "3F": {
+    "cp": 57362,
+    "name": "ICON_SORT_DOWN"
+  },
+  "3Z": {
+    "cp": 57363,
+    "name": "ICON_SUM"
+  },
+  "0R": {
+    "cp": 57364,
+    "name": "ICON_VARIANTS"
+  },
+  "XC": {
+    "cp": 57365,
+    "name": "ICON_SETTINGS"
+  },
+  "2M": {
+    "cp": 57366,
+    "name": "ICON_SYSTEM_BACK"
+  },
+  "2N": {
+    "cp": 57367,
+    "name": "ICON_SYSTEM_END"
+  },
+  "35": {
+    "cp": 57368,
+    "name": "ICON_SYSTEM_HELP"
+  },
+  "30": {
+    "cp": 57369,
+    "name": "ICON_NEXT_PAGE"
+  },
+  "2Z": {
+    "cp": 57370,
+    "name": "ICON_PREVIOUS_PAGE"
+  },
+  "31": {
+    "cp": 57371,
+    "name": "ICON_LAST_PAGE"
+  },
+  "2Y": {
+    "cp": 57372,
+    "name": "ICON_FIRST_PAGE"
+  },
+  "2S": {
+    "cp": 57373,
+    "name": "ICON_NEXT_OBJECT"
+  },
+  "2R": {
+    "cp": 57374,
+    "name": "ICON_PREVIOUS_OBJECT"
+  },
+  "3S": {
+    "cp": 57375,
+    "name": "ICON_EXPAND"
+  },
+  "49": {
+    "cp": 57376,
+    "name": "ICON_EXPORT"
+  },
+  "48": {
+    "cp": 57377,
+    "name": "ICON_IMPORT"
+  },
+  "FO": {
+    "cp": 57378,
+    "name": "ICON_OPEN_FOLDER"
+  },
+  "IH": {
+    "cp": 57379,
+    "name": "ICON_FOLDER"
+  },
+  "FM": {
+    "cp": 57380,
+    "name": "ICON_ATTACHMENT"
+  },
+  "1S": {
+    "cp": 57381,
+    "name": "ICON_MAIL"
+  },
+  "IT": {
+    "cp": 57382,
+    "name": "ICON_PDF"
+  },
+  "J2": {
+    "cp": 57383,
+    "name": "ICON_XLS"
+  },
+  "08": {
+    "cp": 57384,
+    "name": "ICON_GREEN_LIGHT"
+  },
+  "AH": {
+    "cp": 57385,
+    "name": "ICON_WARNING"
+  },
+  "1B": {
+    "cp": 57386,
+    "name": "ICON_MESSAGE_ERROR"
+  },
+  "0S": {
+    "cp": 57387,
+    "name": "ICON_INFORMATION"
+  },
+  "06": {
+    "cp": 57388,
+    "name": "ICON_LOCKED"
+  },
+  "07": {
+    "cp": 57389,
+    "name": "ICON_UNLOCKED"
+  },
+  "3R": {
+    "cp": 57390,
+    "name": "ICON_DETAIL"
+  },
+  "3T": {
+    "cp": 57391,
+    "name": "ICON_COLLAPSE"
+  },
+  "2W": {
+    "cp": 57392,
+    "name": "ICON_SYSTEM_UNDO"
+  },
+  "4R": {
+    "cp": 57393,
+    "name": "ICON_SYSTEM_REDO"
+  },
+  "7X": {
+    "cp": 57394,
+    "name": "ICON_SELECTION"
+  },
+  "4I": {
+    "cp": 57395,
+    "name": "ICON_PREVIOUS_HIERARCHY_LEVEL"
+  },
+  "4H": {
+    "cp": 57396,
+    "name": "ICON_NEXT_HIERARCHY_LEVEL"
+  },
+  "0M": {
+    "cp": 57397,
+    "name": "ICON_CALCULATION"
+  },
+  "1U": {
+    "cp": 57398,
+    "name": "ICON_DATE"
+  },
+  "1T": {
+    "cp": 57399,
+    "name": "ICON_TIME"
+  },
+  "1Q": {
+    "cp": 57400,
+    "name": "ICON_PHONE"
+  },
+  "0T": {
+    "cp": 57401,
+    "name": "ICON_ADDRESS"
+  },
+  "PD": {
+    "cp": 57402,
+    "name": "ICON_GRID"
+  },
+  "3M": {
+    "cp": 57403,
+    "name": "ICON_TREE"
+  },
+  "3W": {
+    "cp": 57404,
+    "name": "ICON_LIST"
+  },
+  "3P": {
+    "cp": 57405,
+    "name": "ICON_HEADER"
+  },
+  "AR": {
+    "cp": 57406,
+    "name": "ICON_DOCUMENT"
+  },
+  "0N": {
+    "cp": 57407,
+    "name": "ICON_GRAPHICS"
+  },
+  "96": {
+    "cp": 57408,
+    "name": "ICON_HISTORY"
+  },
+  "C1": {
+    "cp": 57409,
+    "name": "ICON_LINK"
+  },
+  "3U": {
+    "cp": 57410,
+    "name": "ICON_BREAKPOINT"
+  },
+  "9Y": {
+    "cp": 57411,
+    "name": "ICON_ACTIVITY"
+  },
+  "6U": {
+    "cp": 57412,
+    "name": "ICON_BIW_REPORT_VIEW"
+  },
+  "M3": {
+    "cp": 57413,
+    "name": "ICON_WORKFLOW_PROCESS"
+  },
+  "KH": {
+    "cp": 57414,
+    "name": "ICON_ADDRESS_LIST"
+  },
+  "39": {
+    "cp": 57415,
+    "name": "ICON_GENERATE"
+  },
+  "3C": {
+    "cp": 57416,
+    "name": "ICON_ACTIVATE"
+  },
+  "12": {
+    "cp": 57417,
+    "name": "ICON_TEST"
+  },
+  "45": {
+    "cp": 57418,
+    "name": "ICON_TOOLS"
+  },
+  "A6": {
+    "cp": 57419,
+    "name": "ICON_MATERIAL"
+  },
+  "A0": {
+    "cp": 57420,
+    "name": "ICON_CUSTOMER"
+  },
+  "5W": {
+    "cp": 57421,
+    "name": "ICON_EMPLOYEE"
+  },
+  "9Z": {
+    "cp": 57422,
+    "name": "ICON_ORDER"
+  },
+  "O4": {
+    "cp": 57423,
+    "name": "ICON_DELIVERY"
+  },
+  "2T": {
+    "cp": 57424,
+    "name": "ICON_SYSTEM_CUT"
+  },
+  "2U": {
+    "cp": 57425,
+    "name": "ICON_SYSTEM_COPY"
+  },
+  "2V": {
+    "cp": 57426,
+    "name": "ICON_SYSTEM_PASTE"
+  },
+  "2X": {
+    "cp": 57427,
+    "name": "ICON_SYSTEM_MARK"
+  },
+  "4C": {
+    "cp": 57428,
+    "name": "ICON_SELECT_BLOCK"
+  },
+  "4J": {
+    "cp": 57429,
+    "name": "ICON_SYSTEM_POSSIBLE_ENTRIES"
+  },
+  "3Q": {
+    "cp": 57430,
+    "name": "ICON_OVERVIEW"
+  },
+  "0B": {
+    "cp": 57431,
+    "name": "ICON_TOTAL_LEFT"
+  },
+  "0C": {
+    "cp": 57432,
+    "name": "ICON_TOTAL_RIGHT"
+  },
+  "0F": {
+    "cp": 57433,
+    "name": "ICON_PAGE_RIGHT"
+  },
+  "0G": {
+    "cp": 57434,
+    "name": "ICON_PAGE_LEFT"
+  },
+  "0H": {
+    "cp": 57435,
+    "name": "ICON_PREVIOUS_VALUE"
+  },
+  "0I": {
+    "cp": 57436,
+    "name": "ICON_NEXT_VALUE"
+  },
+  "B8": {
+    "cp": 57437,
+    "name": "ICON_NEXT_STEP"
+  },
+  "B9": {
+    "cp": 57438,
+    "name": "ICON_PREVIOUS_STEP"
+  },
+  "JH": {
+    "cp": 57439,
+    "name": "ICON_EXTENDED_SEARCH"
+  },
+  "19": {
+    "cp": 57440,
+    "name": "ICON_MESSAGE_INFORMATION"
+  },
+  "1A": {
+    "cp": 57441,
+    "name": "ICON_MESSAGE_WARNING"
+  },
+  "1C": {
+    "cp": 57442,
+    "name": "ICON_MESSAGE_QUESTION"
+  },
+  "1D": {
+    "cp": 57443,
+    "name": "ICON_MESSAGE_CRITICAL"
+  },
+  "8O": {
+    "cp": 57444,
+    "name": "ICON_MESSAGE_ERROR_SMALL"
+  },
+  "01": {
+    "cp": 57445,
+    "name": "ICON_CHECKED"
+  },
+  "02": {
+    "cp": 57446,
+    "name": "ICON_INCOMPLETE"
+  },
+  "03": {
+    "cp": 57447,
+    "name": "ICON_FAILURE"
+  },
+  "04": {
+    "cp": 57448,
+    "name": "ICON_POSITIVE"
+  },
+  "05": {
+    "cp": 57449,
+    "name": "ICON_NEGATIVE"
+  },
+  "5B": {
+    "cp": 57450,
+    "name": "ICON_LED_GREEN"
+  },
+  "5C": {
+    "cp": 57451,
+    "name": "ICON_LED_RED"
+  },
+  "5D": {
+    "cp": 57452,
+    "name": "ICON_LED_YELLOW"
+  },
+  "BZ": {
+    "cp": 57453,
+    "name": "ICON_LED_INACTIVE"
+  },
+  "AG": {
+    "cp": 57454,
+    "name": "ICON_ALERT"
+  },
+  "AI": {
+    "cp": 57455,
+    "name": "ICON_HINT"
+  },
+  "MC": {
+    "cp": 57456,
+    "name": "ICON_TREND_UP"
+  },
+  "M8": {
+    "cp": 57457,
+    "name": "ICON_TREND_DOWN"
+  },
+  "MA": {
+    "cp": 57458,
+    "name": "ICON_TREND_UNCHANGED"
+  },
+  "ME": {
+    "cp": 57459,
+    "name": "ICON_STATUS_OK"
+  },
+  "MF": {
+    "cp": 57460,
+    "name": "ICON_STATUS_BEST"
+  },
+  "MD": {
+    "cp": 57461,
+    "name": "ICON_STATUS_ALERT"
+  },
+  "E1": {
+    "cp": 57462,
+    "name": "ICON_ENVELOPE_OPEN"
+  },
+  "E2": {
+    "cp": 57463,
+    "name": "ICON_ENVELOPE_CLOSED"
+  },
+  "1R": {
+    "cp": 57464,
+    "name": "ICON_FAX"
+  },
+  "1V": {
+    "cp": 57465,
+    "name": "ICON_ALARM"
+  },
+  "1X": {
+    "cp": 57466,
+    "name": "ICON_VIDEO"
+  },
+  "8S": {
+    "cp": 57467,
+    "name": "ICON_URL"
+  },
+  "AZ": {
+    "cp": 57468,
+    "name": "ICON_MONEY"
+  },
+  "B0": {
+    "cp": 57469,
+    "name": "ICON_QUESTION"
+  },
+  "B3": {
+    "cp": 57470,
+    "name": "ICON_STATUS_OPEN"
+  },
+  "B1": {
+    "cp": 57471,
+    "name": "ICON_BOOKING_OK"
+  },
+  "5H": {
+    "cp": 57472,
+    "name": "ICON_WORKFLOW_ACTIVITY"
+  },
+  "5I": {
+    "cp": 57473,
+    "name": "ICON_WORKFLOW_CONDITION"
+  },
+  "5J": {
+    "cp": 57474,
+    "name": "ICON_WORKFLOW_DECISION"
+  },
+  "5O": {
+    "cp": 57475,
+    "name": "ICON_WORKFLOW_FORK"
+  },
+  "5T": {
+    "cp": 57476,
+    "name": "ICON_WORKFLOW_WAIT_FOR_EVENTS"
+  },
+  "5U": {
+    "cp": 57477,
+    "name": "ICON_WORKFLOW_WHILE"
+  },
+  "5S": {
+    "cp": 57478,
+    "name": "ICON_WORKFLOW_UNTIL"
+  },
+  "CS": {
+    "cp": 57479,
+    "name": "ICON_WF_WORKITEM_READY"
+  },
+  "CU": {
+    "cp": 57480,
+    "name": "ICON_WF_WORKITEM_STARTED"
+  },
+  "CX": {
+    "cp": 57481,
+    "name": "ICON_WF_WORKITEM_COMPLETED"
+  },
+  "CY": {
+    "cp": 57482,
+    "name": "ICON_WF_WORKITEM_ERROR"
+  },
+  "CQ": {
+    "cp": 57483,
+    "name": "ICON_WF_LINK"
+  },
+  "3N": {
+    "cp": 57484,
+    "name": "ICON_INSERT_RELATION"
+  },
+  "53": {
+    "cp": 57485,
+    "name": "ICON_CUT_RELATION"
+  },
+  "3K": {
+    "cp": 57486,
+    "name": "ICON_PREVIOUS_NODE"
+  },
+  "3L": {
+    "cp": 57487,
+    "name": "ICON_NEXT_NODE"
+  },
+  "BM": {
+    "cp": 57488,
+    "name": "ICON_MANAGER"
+  },
+  "BN": {
+    "cp": 57489,
+    "name": "ICON_ORG_UNIT"
+  },
+  "CA": {
+    "cp": 57490,
+    "name": "ICON_JOB"
+  },
+  "BK": {
+    "cp": 57491,
+    "name": "ICON_TASK"
+  },
+  "BS": {
+    "cp": 57492,
+    "name": "ICON_WORK_CENTER"
+  },
+  "IR": {
+    "cp": 57493,
+    "name": "ICON_ROLE"
+  },
+  "BF": {
+    "cp": 57494,
+    "name": "ICON_PRESENCE"
+  },
+  "BG": {
+    "cp": 57495,
+    "name": "ICON_ABSENCE"
+  },
+  "IP": {
+    "cp": 57496,
+    "name": "ICON_SICKNESS"
+  },
+  "IQ": {
+    "cp": 57497,
+    "name": "ICON_HOLIDAY"
+  },
+  "L4": {
+    "cp": 57498,
+    "name": "ICON_NEW_EMPLOYEE"
+  },
+  "L5": {
+    "cp": 57499,
+    "name": "ICON_INCOMING_EMPLOYEE"
+  },
+  "L6": {
+    "cp": 57500,
+    "name": "ICON_OUTGOING_EMPLOYEE"
+  },
+  "H5": {
+    "cp": 57501,
+    "name": "ICON_DEPUTY"
+  },
+  "BI": {
+    "cp": 57502,
+    "name": "ICON_POSITION_HR"
+  },
+  "IS": {
+    "cp": 57503,
+    "name": "ICON_PERSONNEL_ADMINISTRATION"
+  },
+  "6A": {
+    "cp": 57504,
+    "name": "ICON_SYSTEM_SAP_MENU"
+  },
+  "6D": {
+    "cp": 57505,
+    "name": "ICON_SYSTEM_FAVORITES"
+  },
+  "44": {
+    "cp": 57506,
+    "name": "ICON_SYSTEM_SETTINGS"
+  },
+  "EI": {
+    "cp": 57507,
+    "name": "ICON_STATUS"
+  },
+  "4M": {
+    "cp": 57508,
+    "name": "ICON_VARIABLE"
+  },
+  "9Q": {
+    "cp": 57509,
+    "name": "ICON_DIMENSION"
+  },
+  "AW": {
+    "cp": 57510,
+    "name": "ICON_CAR"
+  },
+  "AX": {
+    "cp": 57511,
+    "name": "ICON_HOTEL"
+  },
+  "AY": {
+    "cp": 57512,
+    "name": "ICON_RAILWAY"
+  },
+  "JG": {
+    "cp": 57513,
+    "name": "ICON_DISPLAY_TREE"
+  },
+  "JJ": {
+    "cp": 57514,
+    "name": "ICON_OPEN"
+  },
+  "JI": {
+    "cp": 57515,
+    "name": "ICON_CLOSE_OBJECT"
+  },
+  "BQ": {
+    "cp": 57516,
+    "name": "ICON_FAST_ENTRY"
+  },
+  "58": {
+    "cp": 57517,
+    "name": "ICON_PERIOD"
+  },
+  "3O": {
+    "cp": 57518,
+    "name": "ICON_FINAL_DATE"
+  },
+  "H0": {
+    "cp": 57519,
+    "name": "ICON_FINANCING"
+  },
+  "77": {
+    "cp": 57520,
+    "name": "ICON_PARAMETER"
+  },
+  "0P": {
+    "cp": 57521,
+    "name": "ICON_DISPLAY_TEXT"
+  },
+  "HJ": {
+    "cp": 57522,
+    "name": "ICON_READ_FILE"
+  },
+  "HL": {
+    "cp": 57523,
+    "name": "ICON_EDIT_FILE"
+  },
+  "FN": {
+    "cp": 57524,
+    "name": "ICON_CLOSED_FOLDER"
+  },
+  "FP": {
+    "cp": 57525,
+    "name": "ICON_OBJECT_FOLDER"
+  },
+  "HP": {
+    "cp": 57526,
+    "name": "ICON_STRUCTURE"
+  },
+  "S4": {
+    "cp": 57527,
+    "name": "ICON_WD_COMPONENT"
+  },
+  "TM": {
+    "cp": 57528,
+    "name": "ICON_WD_NAVIGATION_LINK"
+  },
+  "TO": {
+    "cp": 57529,
+    "name": "ICON_WD_NAVLINK_OUT"
+  },
+  "EV": {
+    "cp": 57530,
+    "name": "ICON_INSERT_FAVORITES"
+  },
+  "3J": {
+    "cp": 57531,
+    "name": "ICON_SET_STATE"
+  },
+  "1E": {
+    "cp": 57532,
+    "name": "ICON_DISPLAY_MORE"
+  },
+  "1F": {
+    "cp": 57533,
+    "name": "ICON_ENTER_MORE"
+  },
+  "68": {
+    "cp": 57534,
+    "name": "ICON_EXPAND_ALL"
+  },
+  "69": {
+    "cp": 57535,
+    "name": "ICON_COLLAPSE_ALL"
+  },
+  "2K": {
+    "cp": 57536,
+    "name": "ICON_SYSTEM_OKAY"
+  },
+  "2O": {
+    "cp": 57537,
+    "name": "ICON_SYSTEM_CANCEL"
+  },
+  "2P": {
+    "cp": 57538,
+    "name": "ICON_SYSTEM_PRINT"
+  },
+  "2Q": {
+    "cp": 57539,
+    "name": "ICON_OTHER_OBJECT"
+  },
+  "32": {
+    "cp": 57540,
+    "name": "ICON_SYSTEM_MODUS_CREATE"
+  },
+  "33": {
+    "cp": 57541,
+    "name": "ICON_SYSTEM_MODUS_DELETE"
+  },
+  "34": {
+    "cp": 57542,
+    "name": "ICON_SYSTEM_USERMENU"
+  },
+  "4B": {
+    "cp": 57543,
+    "name": "ICON_SELECT_ALL"
+  },
+  "4D": {
+    "cp": 57544,
+    "name": "ICON_DESELECT_ALL"
+  },
+  "4N": {
+    "cp": 57545,
+    "name": "ICON_SYSTEM_LOCAL_CUT"
+  },
+  "4O": {
+    "cp": 57546,
+    "name": "ICON_SYSTEM_LOCAL_COPY"
+  },
+  "4P": {
+    "cp": 57547,
+    "name": "ICON_SYSTEM_LOCAL_PASTE"
+  },
+  "4Q": {
+    "cp": 57548,
+    "name": "ICON_SYSTEM_LOCAL_MARK"
+  },
+  "5E": {
+    "cp": 57549,
+    "name": "ICON_SYSTEM_EXTENDED_HELP"
+  },
+  "6B": {
+    "cp": 57550,
+    "name": "ICON_SYSTEM_COMP_MENU"
+  },
+  "6C": {
+    "cp": 57551,
+    "name": "ICON_SYSTEM_USER_MENU"
+  },
+  "8T": {
+    "cp": 57552,
+    "name": "ICON_SYSTEM_SHORTCUT"
+  },
+  "8J": {
+    "cp": 57553,
+    "name": "ICON_DESELECT_BLOCK"
+  },
+  "8K": {
+    "cp": 57554,
+    "name": "ICON_INVERT_COLUMN"
+  },
+  "8L": {
+    "cp": 57555,
+    "name": "ICON_INVERT_LINE"
+  },
+  "0D": {
+    "cp": 57556,
+    "name": "ICON_COLUMN_LEFT"
+  },
+  "0E": {
+    "cp": 57557,
+    "name": "ICON_COLUMN_RIGHT"
+  },
+  "GE": {
+    "cp": 57558,
+    "name": "ICON_SET_SUM_UNDO"
+  },
+  "GG": {
+    "cp": 57559,
+    "name": "ICON_SORT_UNDO"
+  },
+  "HF": {
+    "cp": 57560,
+    "name": "ICON_TOTAL_UP"
+  },
+  "HG": {
+    "cp": 57561,
+    "name": "ICON_TOTAL_DOWN"
+  },
+  "HH": {
+    "cp": 57562,
+    "name": "ICON_PAGE_UP"
+  },
+  "HI": {
+    "cp": 57563,
+    "name": "ICON_PAGE_DOWN"
+  },
+  "YA": {
+    "cp": 57564,
+    "name": "ICON_ALV_COLLAPSE"
+  },
+  "5F": {
+    "cp": 57565,
+    "name": "ICON_SPACE"
+  },
+  "TR": {
+    "cp": 57566,
+    "name": "ICON_CONTEXT_MENU"
+  },
+  "Y2": {
+    "cp": 57567,
+    "name": "ICON_START_VIEWER"
+  },
+  "OF": {
+    "cp": 57568,
+    "name": "ICON_HELPASSISTENT_ON"
+  },
+  "OG": {
+    "cp": 57569,
+    "name": "ICON_HELPASSISTENT_OFF"
+  },
+  "OH": {
+    "cp": 57570,
+    "name": "ICON_DIALGHELP"
+  },
+  "OI": {
+    "cp": 57571,
+    "name": "ICON_DIALOGHELPACTIV"
+  },
+  "OK": {
+    "cp": 57572,
+    "name": "ICON_SYSTEM_SERVICE_FILLED"
+  },
+  "OL": {
+    "cp": 57573,
+    "name": "ICON_SYSTEM_SERVICE_OFF"
+  },
+  "OM": {
+    "cp": 57574,
+    "name": "ICON_SYSTEM_SERVICE_EMPTY"
+  },
+  "5G": {
+    "cp": 57575,
+    "name": "ICON_BUSINAV_VALUE_CHAIN"
+  },
+  "4S": {
+    "cp": 57576,
+    "name": "ICON_BUSINAV_PROCESS"
+  },
+  "4T": {
+    "cp": 57577,
+    "name": "ICON_BUSINAV_PROCESSMATRIX"
+  },
+  "4U": {
+    "cp": 57578,
+    "name": "ICON_BUSINAV_SYSORGI"
+  },
+  "4V": {
+    "cp": 57579,
+    "name": "ICON_BUSINAV_SZENARIO"
+  },
+  "4W": {
+    "cp": 57580,
+    "name": "ICON_BUSINAV_OBJECTS"
+  },
+  "4X": {
+    "cp": 57581,
+    "name": "ICON_BUSINAV_INFODIAG"
+  },
+  "4Y": {
+    "cp": 57582,
+    "name": "ICON_BUSINAV_ENTITY"
+  },
+  "4Z": {
+    "cp": 57583,
+    "name": "ICON_BUSINAV_PROC_EXIST"
+  },
+  "50": {
+    "cp": 57584,
+    "name": "ICON_BUSINAV_COMMDIAG"
+  },
+  "51": {
+    "cp": 57585,
+    "name": "ICON_BUSINAV_DATAMODEL"
+  },
+  "5K": {
+    "cp": 57586,
+    "name": "ICON_WORKFLOW_CONT_OPERATION"
+  },
+  "5L": {
+    "cp": 57587,
+    "name": "ICON_WORKFLOW_EXTERNAL_EVENT"
+  },
+  "5M": {
+    "cp": 57588,
+    "name": "ICON_WORKFLOW_INTERNAL_EVENT"
+  },
+  "5N": {
+    "cp": 57589,
+    "name": "ICON_WORKFLOW_MULT_CONDITION"
+  },
+  "5P": {
+    "cp": 57590,
+    "name": "ICON_WORKFLOW_EVENT_PRODUCER"
+  },
+  "5Q": {
+    "cp": 57591,
+    "name": "ICON_WORKFLOW_FLOW_OF_CONTROL"
+  },
+  "5R": {
+    "cp": 57592,
+    "name": "ICON_WORKFLOW_INDEFINITE_STEP"
+  },
+  "87": {
+    "cp": 57593,
+    "name": "ICON_WORKFLOW_INT_EVENT_DATE"
+  },
+  "CP": {
+    "cp": 57594,
+    "name": "ICON_WORKFLOW_DOC_CREATE"
+  },
+  "CR": {
+    "cp": 57595,
+    "name": "ICON_WF_UNLINK"
+  },
+  "CT": {
+    "cp": 57596,
+    "name": "ICON_WF_WORKITEM_RESERVED"
+  },
+  "CV": {
+    "cp": 57597,
+    "name": "ICON_WF_WORKITEM_COMMITTED"
+  },
+  "CW": {
+    "cp": 57598,
+    "name": "ICON_WF_WORKITEM_WAITING"
+  },
+  "CZ": {
+    "cp": 57599,
+    "name": "ICON_WF_WORKITEM_CANCEL"
+  },
+  "D0": {
+    "cp": 57600,
+    "name": "ICON_WF_RESERVE_WORKITEM"
+  },
+  "D1": {
+    "cp": 57601,
+    "name": "ICON_WF_REPLACE_WORKITEM"
+  },
+  "D3": {
+    "cp": 57602,
+    "name": "ICON_WF_RULE_SYSTEM"
+  },
+  "D4": {
+    "cp": 57603,
+    "name": "ICON_WF_PARAMETER"
+  },
+  "E5": {
+    "cp": 57604,
+    "name": "ICON_WF_WORKITEM_OL"
+  },
+  "M2": {
+    "cp": 57605,
+    "name": "ICON_WORKFLOW_JOIN"
+  },
+  "OQ": {
+    "cp": 57606,
+    "name": "ICON_WORKFLOW"
+  },
+  "PA": {
+    "cp": 57607,
+    "name": "ICON_WORKFLOW_WEB_ACTIVITY"
+  },
+  "Q5": {
+    "cp": 57608,
+    "name": "ICON_WORKFLOW_ADHOC_ANCHOR"
+  },
+  "PH": {
+    "cp": 57609,
+    "name": "ICON_PPE_LBAL"
+  },
+  "PI": {
+    "cp": 57610,
+    "name": "ICON_PPE_ENTOBJ"
+  },
+  "VB": {
+    "cp": 57611,
+    "name": "ICON_USER_BREAKPOINT"
+  },
+  "VC": {
+    "cp": 57612,
+    "name": "ICON_USER_BREAKPOINT_DISABLED"
+  },
+  "VD": {
+    "cp": 57613,
+    "name": "ICON_CLIENT_BREAKPOINT"
+  },
+  "VE": {
+    "cp": 57614,
+    "name": "ICON_CLIENT_BREAKPOINT_DIS"
+  },
+  "UT": {
+    "cp": 57615,
+    "name": "ICON_WD_CUSTOM_CONTROLLERS"
+  },
+  "E6": {
+    "cp": 57616,
+    "name": "ICON_NEW_HANDLING_UNIT"
+  },
+  "E7": {
+    "cp": 57617,
+    "name": "ICON_NEW_HANDLING_IF_FULL"
+  },
+  "FI": {
+    "cp": 57618,
+    "name": "ICON_PLANNING_SITUATION"
+  },
+  "FJ": {
+    "cp": 57619,
+    "name": "ICON_CHANGE_ORDER"
+  },
+  "FK": {
+    "cp": 57620,
+    "name": "ICON_PRODUCT_REQUIREMENTS"
+  },
+  "FL": {
+    "cp": 57621,
+    "name": "ICON_PRODUCT_RECEIPTS"
+  },
+  "Y0": {
+    "cp": 57622,
+    "name": "ICON_REBATE"
+  },
+  "Y7": {
+    "cp": 57623,
+    "name": "ICON_ADD_SHOPPINGCART"
+  },
+  "JX": {
+    "cp": 57624,
+    "name": "ICON_BW_PROCESS"
+  },
+  "JY": {
+    "cp": 57625,
+    "name": "ICON_BW_SIMULATE"
+  },
+  "FH": {
+    "cp": 57626,
+    "name": "ICON_CLAIM"
+  },
+  "JK": {
+    "cp": 57627,
+    "name": "ICON_POLICY"
+  },
+  "JM": {
+    "cp": 57628,
+    "name": "ICON_CATASTROPHE"
+  },
+  "JN": {
+    "cp": 57629,
+    "name": "ICON_AGGREGATE"
+  },
+  "JO": {
+    "cp": 57630,
+    "name": "ICON_SUBCLAIM_PERSONAL_INJURY"
+  },
+  "JP": {
+    "cp": 57631,
+    "name": "ICON_SUB_INTELLECTUAL_PROPERTY"
+  },
+  "JQ": {
+    "cp": 57632,
+    "name": "ICON_SUBCLAIM_VEHICLE"
+  },
+  "JR": {
+    "cp": 57633,
+    "name": "ICON_SUB_PERSONAL_PROPERTY"
+  },
+  "JS": {
+    "cp": 57634,
+    "name": "ICON_SUBCLAIM_BUILDING"
+  },
+  "JT": {
+    "cp": 57635,
+    "name": "ICON_SUB_BODILY_INJURY_TREAT"
+  },
+  "JU": {
+    "cp": 57636,
+    "name": "ICON_SUBCLAIM_BODILY_INJURY"
+  },
+  "JV": {
+    "cp": 57637,
+    "name": "ICON_SUB_ENVRONMENTAL_SITE"
+  },
+  "JW": {
+    "cp": 57638,
+    "name": "ICON_SUB_FINANCIAL_IMPAIRMENT"
+  },
+  "JL": {
+    "cp": 57639,
+    "name": "ICON_PAYMENT"
+  },
+  "JZ": {
+    "cp": 57640,
+    "name": "ICON_BW_PROCESS_CANCEL"
+  },
+  "K0": {
+    "cp": 57641,
+    "name": "ICON_BW_SIMULATE_CANCEL"
+  },
+  "L1": {
+    "cp": 57642,
+    "name": "ICON_HR_MANAGER"
+  },
+  "LC": {
+    "cp": 57643,
+    "name": "ICON_HR_POSITION"
+  },
+  "LE": {
+    "cp": 57644,
+    "name": "ICON_HR_ORG_UNIT"
+  },
+  "MX": {
+    "cp": 57645,
+    "name": "ICON_PPE_BHNODE"
+  },
+  "MY": {
+    "cp": 57646,
+    "name": "ICON_PPE_AENODE"
+  },
+  "MZ": {
+    "cp": 57647,
+    "name": "ICON_PPE_ANODE"
+  },
+  "N0": {
+    "cp": 57648,
+    "name": "ICON_PPE_CVNODE"
+  },
+  "N1": {
+    "cp": 57649,
+    "name": "ICON_PPE_SNODE"
+  },
+  "N2": {
+    "cp": 57650,
+    "name": "ICON_PPE_ENODE"
+  },
+  "N3": {
+    "cp": 57651,
+    "name": "ICON_PPE_APNODE"
+  },
+  "N4": {
+    "cp": 57652,
+    "name": "ICON_PPE_VNODE"
+  },
+  "N5": {
+    "cp": 57653,
+    "name": "ICON_PPE_MODNODE"
+  },
+  "N6": {
+    "cp": 57654,
+    "name": "ICON_PPE_AANODE"
+  },
+  "N7": {
+    "cp": 57655,
+    "name": "ICON_PPE_AAEXPNODE"
+  },
+  "N8": {
+    "cp": 57656,
+    "name": "ICON_PPE_OPNODE"
+  },
+  "N9": {
+    "cp": 57657,
+    "name": "ICON_PPE_ACTNODE"
+  },
+  "NA": {
+    "cp": 57658,
+    "name": "ICON_PPE_VACTNODE"
+  },
+  "NB": {
+    "cp": 57659,
+    "name": "ICON_PPE_VANODE"
+  },
+  "NC": {
+    "cp": 57660,
+    "name": "ICON_PPE_LSEG"
+  },
+  "ND": {
+    "cp": 57661,
+    "name": "ICON_PPE_PLINE"
+  },
+  "NE": {
+    "cp": 57662,
+    "name": "ICON_PPE_BPNODE"
+  },
+  "O5": {
+    "cp": 57663,
+    "name": "ICON_PPE_ASSY_POS"
+  },
+  "O6": {
+    "cp": 57664,
+    "name": "ICON_PPE_ASSY_HEAD"
+  },
+  "O7": {
+    "cp": 57665,
+    "name": "ICON_PPE_PARTOF_ALT_ACT"
+  },
+  "B4": {
+    "cp": 57666,
+    "name": "ICON_STATUS_BOOKED"
+  },
+  "B5": {
+    "cp": 57667,
+    "name": "ICON_STATUS_PARTLY_BOOKED"
+  },
+  "B6": {
+    "cp": 57668,
+    "name": "ICON_STATUS_REVERSE"
+  },
+  "OJ": {
+    "cp": 57669,
+    "name": "ICON_STATUS_CRITICAL"
+  },
+  "MG": {
+    "cp": 57670,
+    "name": "ICON_NO_STATUS"
+  },
+  "Q3": {
+    "cp": 57671,
+    "name": "ICON_INITIAL"
+  },
+  "9O": {
+    "cp": 57672,
+    "name": "ICON_ACTION_FAULT"
+  },
+  "9P": {
+    "cp": 57673,
+    "name": "ICON_ACTION_SUCCESS"
+  },
+  "E4": {
+    "cp": 57674,
+    "name": "ICON_INCLUDE_IN_SELECTION"
+  },
+  "GI": {
+    "cp": 57675,
+    "name": "ICON_REMOVE_FROM_SELECTION"
+  },
+  "M9": {
+    "cp": 57676,
+    "name": "ICON_TREND_DECREASING"
+  },
+  "MB": {
+    "cp": 57677,
+    "name": "ICON_TREND_RISING"
+  },
+  "P5": {
+    "cp": 57678,
+    "name": "ICON_RATING_MINUSMINUS"
+  },
+  "P6": {
+    "cp": 57679,
+    "name": "ICON_RATING_MINUS"
+  },
+  "P7": {
+    "cp": 57680,
+    "name": "ICON_RATING_NEUTRAL"
+  },
+  "P8": {
+    "cp": 57681,
+    "name": "ICON_RATING_POSITIVE"
+  },
+  "P9": {
+    "cp": 57682,
+    "name": "ICON_RATING_POSITIVEPOSITIVE"
+  },
+  "P3": {
+    "cp": 57683,
+    "name": "ICON_MC_CONTENTINDICATOR"
+  },
+  "P4": {
+    "cp": 57684,
+    "name": "ICON_BSC_CONTENTINDICATOR"
+  },
+  "UR": {
+    "cp": 57685,
+    "name": "ICON_BREAKPOINT_DISABLE"
+  },
+  "V9": {
+    "cp": 57686,
+    "name": "ICON_WEBBREAKPOINT"
+  },
+  "VA": {
+    "cp": 57687,
+    "name": "ICON_WEBBREAKPOINT_DISABLED"
+  },
+  "WW": {
+    "cp": 57688,
+    "name": "ICON_CONDITION_BREAKPOINT"
+  },
+  "WX": {
+    "cp": 57689,
+    "name": "ICON_CONDITION_BREAKPOINT_DIS"
+  },
+  "VG": {
+    "cp": 57690,
+    "name": "ICON_RED_DASH"
+  },
+  "VH": {
+    "cp": 57691,
+    "name": "ICON_RED_SLASH"
+  },
+  "VI": {
+    "cp": 57692,
+    "name": "ICON_RED_XCIRCLE"
+  },
+  "VX": {
+    "cp": 57693,
+    "name": "ICON_CHECKED_OUT"
+  },
+  "VY": {
+    "cp": 57694,
+    "name": "ICON_CHECKIN_REQUESTED"
+  },
+  "VZ": {
+    "cp": 57695,
+    "name": "ICON_CHECKOUT_REQUESTED"
+  },
+  "9B": {
+    "cp": 57696,
+    "name": "ICON_ACTIVE_INACTIVE"
+  },
+  "B7": {
+    "cp": 57697,
+    "name": "ICON_PREFERENCE"
+  },
+  "90": {
+    "cp": 57698,
+    "name": "ICON_TE_RECEIPTS"
+  },
+  "91": {
+    "cp": 57699,
+    "name": "ICON_TE_STOPOVER"
+  },
+  "92": {
+    "cp": 57700,
+    "name": "ICON_TE_KM_DIVISION"
+  },
+  "93": {
+    "cp": 57701,
+    "name": "ICON_TE_ADVANCE_PAYMENT"
+  },
+  "94": {
+    "cp": 57702,
+    "name": "ICON_TE_DEDUCTION"
+  },
+  "95": {
+    "cp": 57703,
+    "name": "ICON_TE_COSTS_ASSIGN"
+  },
+  "M0": {
+    "cp": 57704,
+    "name": "ICON_TE_FLAT_RATE"
+  },
+  "7U": {
+    "cp": 57705,
+    "name": "ICON_WS_POST"
+  },
+  "AV": {
+    "cp": 57706,
+    "name": "ICON_FLIGHT"
+  },
+  "B2": {
+    "cp": 57707,
+    "name": "ICON_BOOKING_STOP"
+  },
+  "1W": {
+    "cp": 57708,
+    "name": "ICON_PROSHARE"
+  },
+  "1Y": {
+    "cp": 57709,
+    "name": "ICON_VOICE_INPUT"
+  },
+  "1Z": {
+    "cp": 57710,
+    "name": "ICON_VOICE_OUTPUT"
+  },
+  "8M": {
+    "cp": 57711,
+    "name": "ICON_FOREIGN_TRADE"
+  },
+  "9C": {
+    "cp": 57712,
+    "name": "ICON_BEN_OFFER"
+  },
+  "9D": {
+    "cp": 57713,
+    "name": "ICON_BEN_OFFER_DEFAULT"
+  },
+  "9E": {
+    "cp": 57714,
+    "name": "ICON_BEN_OFFER_EVENT"
+  },
+  "9F": {
+    "cp": 57715,
+    "name": "ICON_BEN_OFFER_OPEN"
+  },
+  "9G": {
+    "cp": 57716,
+    "name": "ICON_BEN_WAIVE_COVERAGE"
+  },
+  "9H": {
+    "cp": 57717,
+    "name": "ICON_DEPENDENTS"
+  },
+  "9I": {
+    "cp": 57718,
+    "name": "ICON_BEN_CURRENT_BENEFITS"
+  },
+  "9J": {
+    "cp": 57719,
+    "name": "ICON_BEN_TERMINATION"
+  },
+  "9V": {
+    "cp": 57720,
+    "name": "ICON_ABAP_LOCAL"
+  },
+  "GZ": {
+    "cp": 57721,
+    "name": "ICON_BUDGET_STRUCTURE_ELEMENT"
+  },
+  "H1": {
+    "cp": 57722,
+    "name": "ICON_RECLASSIFICATION_RULE"
+  },
+  "H2": {
+    "cp": 57723,
+    "name": "ICON_RECLASSIFICATION"
+  },
+  "H3": {
+    "cp": 57724,
+    "name": "ICON_REMOVE"
+  },
+  "H4": {
+    "cp": 57725,
+    "name": "ICON_SPECIAL_PURPOSE"
+  },
+  "H6": {
+    "cp": 57726,
+    "name": "ICON_BUDGET_UPDATE"
+  },
+  "H7": {
+    "cp": 57727,
+    "name": "ICON_BUDGET_TRANSFER"
+  },
+  "L2": {
+    "cp": 57728,
+    "name": "ICON_TBH"
+  },
+  "L3": {
+    "cp": 57729,
+    "name": "ICON_TBH_HOLD"
+  },
+  "L7": {
+    "cp": 57730,
+    "name": "ICON_OBSOLETE_POSITION"
+  },
+  "L8": {
+    "cp": 57731,
+    "name": "ICON_TERMINATED_POSITION"
+  },
+  "L9": {
+    "cp": 57732,
+    "name": "ICON_SHARED_POSITION"
+  },
+  "LA": {
+    "cp": 57733,
+    "name": "ICON_OBSOLETE_SHARED_POSITION"
+  },
+  "LB": {
+    "cp": 57734,
+    "name": "ICON_TERMINATED_SHARED_POSITIO"
+  },
+  "LD": {
+    "cp": 57735,
+    "name": "ICON_CREATE_POSITION"
+  },
+  "LF": {
+    "cp": 57736,
+    "name": "ICON_TERMINATED_ORG_UNIT"
+  },
+  "LG": {
+    "cp": 57737,
+    "name": "ICON_NEW_ORG_UNIT"
+  },
+  "LH": {
+    "cp": 57738,
+    "name": "ICON_OUTGOING_ORG_UNIT"
+  },
+  "LI": {
+    "cp": 57739,
+    "name": "ICON_INCOMING_ORG_UNIT"
+  },
+  "BC": {
+    "cp": 57740,
+    "name": "ICON_CASHING_UP"
+  },
+  "BD": {
+    "cp": 57741,
+    "name": "ICON_WORKLOAD"
+  },
+  "BE": {
+    "cp": 57742,
+    "name": "ICON_PROPOSITION"
+  },
+  "BH": {
+    "cp": 57743,
+    "name": "ICON_TIME_CONTROL"
+  },
+  "LJ": {
+    "cp": 57744,
+    "name": "ICON_NEW_TASK"
+  },
+  "LK": {
+    "cp": 57745,
+    "name": "ICON_TERMINATED_TASK"
+  },
+  "LL": {
+    "cp": 57746,
+    "name": "ICON_OUTGOING_TASK"
+  },
+  "LM": {
+    "cp": 57747,
+    "name": "ICON_INCOMING_TASK"
+  },
+  "LN": {
+    "cp": 57748,
+    "name": "ICON_OUTGOING_JOB"
+  },
+  "LO": {
+    "cp": 57749,
+    "name": "ICON_INCOMING_JOB"
+  },
+  "LP": {
+    "cp": 57750,
+    "name": "ICON_NEW_JOB"
+  },
+  "LQ": {
+    "cp": 57751,
+    "name": "ICON_TERMINATED_JOB"
+  },
+  "LR": {
+    "cp": 57752,
+    "name": "ICON_INCOMING_OBJECT"
+  },
+  "LS": {
+    "cp": 57753,
+    "name": "ICON_OUTGOING_OBJECT"
+  },
+  "BR": {
+    "cp": 57754,
+    "name": "ICON_LIFE_EVENTS"
+  },
+  "KP": {
+    "cp": 57755,
+    "name": "ICON_OPERATOR"
+  },
+  "KQ": {
+    "cp": 57756,
+    "name": "ICON_SYSTEM_ADMINISTRATOR"
+  },
+  "KR": {
+    "cp": 57757,
+    "name": "ICON_SAP"
+  },
+  "KS": {
+    "cp": 57758,
+    "name": "ICON_PUBLIC"
+  },
+  "EC": {
+    "cp": 57759,
+    "name": "ICON_PS_PROJECT_DEFINITION"
+  },
+  "ED": {
+    "cp": 57760,
+    "name": "ICON_PS_WBS_ELEMENT"
+  },
+  "EE": {
+    "cp": 57761,
+    "name": "ICON_PS_NETWORK_HEADER"
+  },
+  "EF": {
+    "cp": 57762,
+    "name": "ICON_PS_NETWORK_ACTIVITY"
+  },
+  "EG": {
+    "cp": 57763,
+    "name": "ICON_PS_ACTIVITY_ELEMENT"
+  },
+  "EH": {
+    "cp": 57764,
+    "name": "ICON_PS_RELATIONSHIP"
+  },
+  "HM": {
+    "cp": 57765,
+    "name": "ICON_PS_MILESTONE"
+  },
+  "HN": {
+    "cp": 57766,
+    "name": "ICON_PS_PROJECT_TEXT"
+  },
+  "EQ": {
+    "cp": 57767,
+    "name": "ICON_SPOOL_REQUEST"
+  },
+  "ER": {
+    "cp": 57768,
+    "name": "ICON_OUTPUT_REQUEST"
+  },
+  "EU": {
+    "cp": 57769,
+    "name": "ICON_SPOOL_STATUS"
+  },
+  "EW": {
+    "cp": 57770,
+    "name": "ICON_PRINT_WITH_PARAMETERS"
+  },
+  "G7": {
+    "cp": 57771,
+    "name": "ICON_SYM_SPOOL_SERVER"
+  },
+  "G8": {
+    "cp": 57772,
+    "name": "ICON_SYM_REAL_SERVER"
+  },
+  "G9": {
+    "cp": 57773,
+    "name": "ICON_SYM_LOG_SERVER"
+  },
+  "GA": {
+    "cp": 57774,
+    "name": "ICON_SYM_ALT_SERVER"
+  },
+  "O8": {
+    "cp": 57775,
+    "name": "ICON_BINARY_DOCUMENT"
+  },
+  "O9": {
+    "cp": 57776,
+    "name": "ICON_ANY_DOCUMENT"
+  },
+  "OA": {
+    "cp": 57777,
+    "name": "ICON_OTF_DOCUMENT"
+  },
+  "LX": {
+    "cp": 57778,
+    "name": "ICON_HOLD"
+  },
+  "LY": {
+    "cp": 57779,
+    "name": "ICON_HOLD_UNDO"
+  },
+  "NP": {
+    "cp": 57780,
+    "name": "ICON_CALL_ANSWER"
+  },
+  "NQ": {
+    "cp": 57781,
+    "name": "ICON_CALL_ALTERNATE"
+  },
+  "NR": {
+    "cp": 57782,
+    "name": "ICON_CALL_HOLD"
+  },
+  "NS": {
+    "cp": 57783,
+    "name": "ICON_CALL_DEFLECT"
+  },
+  "NT": {
+    "cp": 57784,
+    "name": "ICON_CALL_CONSULT"
+  },
+  "NU": {
+    "cp": 57785,
+    "name": "ICON_CALL_CONFERENCE"
+  },
+  "NV": {
+    "cp": 57786,
+    "name": "ICON_CALL_BLIND_TRANSFER"
+  },
+  "NW": {
+    "cp": 57787,
+    "name": "ICON_CALL_RECONNECT"
+  },
+  "NX": {
+    "cp": 57788,
+    "name": "ICON_CALL_RETRIEVE"
+  },
+  "NY": {
+    "cp": 57789,
+    "name": "ICON_CALL_WARM_TRANSFER"
+  },
+  "NZ": {
+    "cp": 57790,
+    "name": "ICON_CREATE_CALLBACK"
+  },
+  "O0": {
+    "cp": 57791,
+    "name": "ICON_PROCESS_CALLBACK"
+  },
+  "00": {
+    "cp": 57792,
+    "name": "ICON_DUMMY"
+  },
+  "0J": {
+    "cp": 57793,
+    "name": "ICON_ANNOTATION"
+  },
+  "0K": {
+    "cp": 57794,
+    "name": "ICON_CREATE_NOTE"
+  },
+  "0L": {
+    "cp": 57795,
+    "name": "ICON_DISPLAY_NOTE"
+  },
+  "0O": {
+    "cp": 57796,
+    "name": "ICON_CREATE_TEXT"
+  },
+  "0Q": {
+    "cp": 57797,
+    "name": "ICON_CHANGE_TEXT"
+  },
+  "0U": {
+    "cp": 57798,
+    "name": "ICON_VIEWER_OPTICAL_ARCHIVE"
+  },
+  "16": {
+    "cp": 57799,
+    "name": "ICON_SELECT_DETAIL"
+  },
+  "17": {
+    "cp": 57800,
+    "name": "ICON_INSERT_ROW"
+  },
+  "18": {
+    "cp": 57801,
+    "name": "ICON_DELETE_ROW"
+  },
+  "1G": {
+    "cp": 57802,
+    "name": "ICON_EQUAL"
+  },
+  "1H": {
+    "cp": 57803,
+    "name": "ICON_NOT_EQUAL"
+  },
+  "1I": {
+    "cp": 57804,
+    "name": "ICON_GREATER"
+  },
+  "1J": {
+    "cp": 57805,
+    "name": "ICON_LESS"
+  },
+  "1K": {
+    "cp": 57806,
+    "name": "ICON_GREATER_EQUAL"
+  },
+  "1L": {
+    "cp": 57807,
+    "name": "ICON_LESS_EQUAL"
+  },
+  "1M": {
+    "cp": 57808,
+    "name": "ICON_INTERVAL_INCLUDE"
+  },
+  "1N": {
+    "cp": 57809,
+    "name": "ICON_INTERVAL_EXCLUDE"
+  },
+  "1O": {
+    "cp": 57810,
+    "name": "ICON_PATTERN_INCLUDE"
+  },
+  "1P": {
+    "cp": 57811,
+    "name": "ICON_PATTERN_EXCLUDE"
+  },
+  "20": {
+    "cp": 57812,
+    "name": "ICON_EQUAL_GREEN"
+  },
+  "21": {
+    "cp": 57813,
+    "name": "ICON_NOT_EQUAL_GREEN"
+  },
+  "22": {
+    "cp": 57814,
+    "name": "ICON_GREATER_GREEN"
+  },
+  "23": {
+    "cp": 57815,
+    "name": "ICON_LESS_GREEN"
+  },
+  "24": {
+    "cp": 57816,
+    "name": "ICON_GREATER_EQUAL_GREEN"
+  },
+  "25": {
+    "cp": 57817,
+    "name": "ICON_LESS_EQUAL_GREEN"
+  },
+  "26": {
+    "cp": 57818,
+    "name": "ICON_INTERVAL_INCLUDE_GREEN"
+  },
+  "27": {
+    "cp": 57819,
+    "name": "ICON_INTERVAL_EXCLUDE_GREEN"
+  },
+  "28": {
+    "cp": 57820,
+    "name": "ICON_PATTERN_INCLUDE_GREEN"
+  },
+  "29": {
+    "cp": 57821,
+    "name": "ICON_PATTERN_EXCLUDE_GREEN"
+  },
+  "2A": {
+    "cp": 57822,
+    "name": "ICON_EQUAL_RED"
+  },
+  "2B": {
+    "cp": 57823,
+    "name": "ICON_NOT_EQUAL_RED"
+  },
+  "2C": {
+    "cp": 57824,
+    "name": "ICON_GREATER_RED"
+  },
+  "2D": {
+    "cp": 57825,
+    "name": "ICON_LESS_RED"
+  },
+  "2E": {
+    "cp": 57826,
+    "name": "ICON_GREATER_EQUAL_RED"
+  },
+  "2F": {
+    "cp": 57827,
+    "name": "ICON_LESS_EQUAL_RED"
+  },
+  "2G": {
+    "cp": 57828,
+    "name": "ICON_INTERVAL_INCLUDE_RED"
+  },
+  "2H": {
+    "cp": 57829,
+    "name": "ICON_INTERVAL_EXCLUDE_RED"
+  },
+  "2I": {
+    "cp": 57830,
+    "name": "ICON_PATTERN_INCLUDE_RED"
+  },
+  "2J": {
+    "cp": 57831,
+    "name": "ICON_PATTERN_EXCLUDE_RED"
+  },
+  "36": {
+    "cp": 57832,
+    "name": "ICON_TABLE_SETTINGS"
+  },
+  "3A": {
+    "cp": 57833,
+    "name": "ICON_REFERENCE_LIST"
+  },
+  "3B": {
+    "cp": 57834,
+    "name": "ICON_STACK"
+  },
+  "3D": {
+    "cp": 57835,
+    "name": "ICON_ICON_LIST"
+  },
+  "3G": {
+    "cp": 57836,
+    "name": "ICON_LAYOUT_CONTROL"
+  },
+  "3H": {
+    "cp": 57837,
+    "name": "ICON_CONVERT"
+  },
+  "3I": {
+    "cp": 57838,
+    "name": "ICON_TOGGLE_DISPLAY_CHANGE"
+  },
+  "3V": {
+    "cp": 57839,
+    "name": "ICON_FOREIGN_KEY"
+  },
+  "3Y": {
+    "cp": 57840,
+    "name": "ICON_POSITION"
+  },
+  "40": {
+    "cp": 57841,
+    "name": "ICON_MOVE"
+  },
+  "41": {
+    "cp": 57842,
+    "name": "ICON_RETRIEVE"
+  },
+  "43": {
+    "cp": 57843,
+    "name": "ICON_SKIP"
+  },
+  "46": {
+    "cp": 57844,
+    "name": "ICON_COMPARE"
+  },
+  "47": {
+    "cp": 57845,
+    "name": "ICON_SHORT_MESSAGE"
+  },
+  "4A": {
+    "cp": 57846,
+    "name": "ICON_TRANSPORT"
+  },
+  "4F": {
+    "cp": 57847,
+    "name": "ICON_RENAME"
+  },
+  "4K": {
+    "cp": 57848,
+    "name": "ICON_INTENSIFY"
+  },
+  "4L": {
+    "cp": 57849,
+    "name": "ICON_PERSONAL_HELP"
+  },
+  "52": {
+    "cp": 57850,
+    "name": "ICON_ALIGN"
+  },
+  "54": {
+    "cp": 57851,
+    "name": "ICON_FIX_COLUMN"
+  },
+  "55": {
+    "cp": 57852,
+    "name": "ICON_RELEASE_COLUMN"
+  },
+  "56": {
+    "cp": 57853,
+    "name": "ICON_NET_GRAPHIC"
+  },
+  "57": {
+    "cp": 57854,
+    "name": "ICON_PLANNING_TABLE"
+  },
+  "59": {
+    "cp": 57855,
+    "name": "ICON_ZOOM_IN"
+  },
+  "5A": {
+    "cp": 57856,
+    "name": "ICON_ZOOM_OUT"
+  },
+  "5V": {
+    "cp": 57857,
+    "name": "ICON_INTERMEDIATE_SUM"
+  },
+  "5X": {
+    "cp": 57858,
+    "name": "ICON_TIME_ZONE"
+  },
+  "5Y": {
+    "cp": 57859,
+    "name": "ICON_RELEASE"
+  },
+  "5Z": {
+    "cp": 57860,
+    "name": "ICON_QUALIFY"
+  },
+  "60": {
+    "cp": 57861,
+    "name": "ICON_ISO_CODE"
+  },
+  "61": {
+    "cp": 57862,
+    "name": "ICON_MODIFY"
+  },
+  "62": {
+    "cp": 57863,
+    "name": "ICON_GET_AREA"
+  },
+  "63": {
+    "cp": 57864,
+    "name": "ICON_INTERFACE"
+  },
+  "64": {
+    "cp": 57865,
+    "name": "ICON_ROUTING_OPERATION"
+  },
+  "65": {
+    "cp": 57866,
+    "name": "ICON_ROUTING_REF_OPERATION"
+  },
+  "66": {
+    "cp": 57867,
+    "name": "ICON_ROUTING_TASK"
+  },
+  "67": {
+    "cp": 57868,
+    "name": "ICON_ROUTING_TODO"
+  },
+  "6E": {
+    "cp": 57869,
+    "name": "ICON_BIW_INFO_SOURCE"
+  },
+  "6F": {
+    "cp": 57870,
+    "name": "ICON_BIW_APPLICATION"
+  },
+  "6G": {
+    "cp": 57871,
+    "name": "ICON_BIW_INFO_AREA"
+  },
+  "6H": {
+    "cp": 57872,
+    "name": "ICON_BIW_INFO_CUBE"
+  },
+  "6I": {
+    "cp": 57873,
+    "name": "ICON_BIW_RULES_INA"
+  },
+  "6J": {
+    "cp": 57874,
+    "name": "ICON_BIW_SOURCE_SYS_GEN"
+  },
+  "6K": {
+    "cp": 57875,
+    "name": "ICON_BIW_SOURCE_SYS_R3"
+  },
+  "6L": {
+    "cp": 57876,
+    "name": "ICON_BIW_SOURCE_SYS_EXT"
+  },
+  "6M": {
+    "cp": 57877,
+    "name": "ICON_BIW_SOURCE_SYS_FILE"
+  },
+  "6N": {
+    "cp": 57878,
+    "name": "ICON_BIW_INFO_CATALOG"
+  },
+  "6O": {
+    "cp": 57879,
+    "name": "ICON_BIW_INFO_OBJECT"
+  },
+  "6P": {
+    "cp": 57880,
+    "name": "ICON_BIW_MONITOR"
+  },
+  "6Q": {
+    "cp": 57881,
+    "name": "ICON_BIW_SCHEDULER"
+  },
+  "6R": {
+    "cp": 57882,
+    "name": "ICON_BIW_FORMULA"
+  },
+  "6S": {
+    "cp": 57883,
+    "name": "ICON_BIW_REF_STRUCTURE"
+  },
+  "6T": {
+    "cp": 57884,
+    "name": "ICON_BIW_REPORT"
+  },
+  "6V": {
+    "cp": 57885,
+    "name": "ICON_MASTER_DATA_ACT"
+  },
+  "6W": {
+    "cp": 57886,
+    "name": "ICON_MASTER_DATA_INA"
+  },
+  "6X": {
+    "cp": 57887,
+    "name": "ICON_TEXT_ACT"
+  },
+  "6Y": {
+    "cp": 57888,
+    "name": "ICON_TEXT_INA"
+  },
+  "6Z": {
+    "cp": 57889,
+    "name": "ICON_HIERARCHY_ACT"
+  },
+  "70": {
+    "cp": 57890,
+    "name": "ICON_HIERARCHY_INA"
+  },
+  "71": {
+    "cp": 57891,
+    "name": "ICON_MOVING_DATA_ACT"
+  },
+  "72": {
+    "cp": 57892,
+    "name": "ICON_MOVING_DATA_INA"
+  },
+  "73": {
+    "cp": 57893,
+    "name": "ICON_DEBUGGER_STEP_INTO"
+  },
+  "74": {
+    "cp": 57894,
+    "name": "ICON_DEBUGGER_STEP_OVER"
+  },
+  "75": {
+    "cp": 57895,
+    "name": "ICON_DEBUGGER_STEP_OUT"
+  },
+  "76": {
+    "cp": 57896,
+    "name": "ICON_DEBUGGER_CONTINUE"
+  },
+  "78": {
+    "cp": 57897,
+    "name": "ICON_PARAMETER_IMPORT"
+  },
+  "79": {
+    "cp": 57898,
+    "name": "ICON_PARAMETER_EXPORT"
+  },
+  "7A": {
+    "cp": 57899,
+    "name": "ICON_PARAMETER_CHANGING"
+  },
+  "7B": {
+    "cp": 57900,
+    "name": "ICON_PARAMETER_RESULT"
+  },
+  "7C": {
+    "cp": 57901,
+    "name": "ICON_OO_CLASS"
+  },
+  "7D": {
+    "cp": 57902,
+    "name": "ICON_OO_INTERFACE"
+  },
+  "7E": {
+    "cp": 57903,
+    "name": "ICON_OO_ATTRIBUTE"
+  },
+  "7F": {
+    "cp": 57904,
+    "name": "ICON_OO_CLASS_ATTRIBUTE"
+  },
+  "7G": {
+    "cp": 57905,
+    "name": "ICON_OO_INST_ATTRIBUTE"
+  },
+  "7H": {
+    "cp": 57906,
+    "name": "ICON_OO_METHOD"
+  },
+  "7I": {
+    "cp": 57907,
+    "name": "ICON_OO_CLASS_METHOD"
+  },
+  "7J": {
+    "cp": 57908,
+    "name": "ICON_OO_INST_METHOD"
+  },
+  "7K": {
+    "cp": 57909,
+    "name": "ICON_OO_EVENT"
+  },
+  "7L": {
+    "cp": 57910,
+    "name": "ICON_OO_CONSTANT"
+  },
+  "7M": {
+    "cp": 57911,
+    "name": "ICON_OO_OVERWRITE"
+  },
+  "7N": {
+    "cp": 57912,
+    "name": "ICON_OO_CONNECTION"
+  },
+  "7O": {
+    "cp": 57913,
+    "name": "ICON_OO_INHERITANCE"
+  },
+  "7P": {
+    "cp": 57914,
+    "name": "ICON_OO_INTERFACE_IC"
+  },
+  "7Q": {
+    "cp": 57915,
+    "name": "ICON_WS_TRUCK"
+  },
+  "7R": {
+    "cp": 57916,
+    "name": "ICON_WS_RAIL"
+  },
+  "7S": {
+    "cp": 57917,
+    "name": "ICON_WS_SHIP"
+  },
+  "7T": {
+    "cp": 57918,
+    "name": "ICON_WS_PLANE"
+  },
+  "7V": {
+    "cp": 57919,
+    "name": "ICON_WS_TRANSFER"
+  },
+  "7W": {
+    "cp": 57920,
+    "name": "ICON_WS_DOUANE"
+  },
+  "7Y": {
+    "cp": 57921,
+    "name": "ICON_SYSTEM_STOP_RECORDING"
+  },
+  "7Z": {
+    "cp": 57922,
+    "name": "ICON_FENCING"
+  },
+  "80": {
+    "cp": 57923,
+    "name": "ICON_BIW_RULES_ACT"
+  },
+  "81": {
+    "cp": 57924,
+    "name": "ICON_CHARACTERISTICS_ACT"
+  },
+  "82": {
+    "cp": 57925,
+    "name": "ICON_CHARACTERISTICS_INA"
+  },
+  "83": {
+    "cp": 57926,
+    "name": "ICON_KEYFIGURE_ACT"
+  },
+  "84": {
+    "cp": 57927,
+    "name": "ICON_KEYFIGURE_INA"
+  },
+  "85": {
+    "cp": 57928,
+    "name": "ICON_BIW_INFO_OBJECT_UNITS_ACT"
+  },
+  "86": {
+    "cp": 57929,
+    "name": "ICON_BIW_INFO_OBJECT_UNITS_INA"
+  },
+  "88": {
+    "cp": 57930,
+    "name": "ICON_BIW_INFO_OBJECT_CATALOGUE"
+  },
+  "89": {
+    "cp": 57931,
+    "name": "ICON_SET_A"
+  },
+  "8A": {
+    "cp": 57932,
+    "name": "ICON_SET_B"
+  },
+  "8B": {
+    "cp": 57933,
+    "name": "ICON_SET_SUM"
+  },
+  "8C": {
+    "cp": 57934,
+    "name": "ICON_SET_INTERSECTION"
+  },
+  "8D": {
+    "cp": 57935,
+    "name": "ICON_SET_A_MINUS_B"
+  },
+  "8E": {
+    "cp": 57936,
+    "name": "ICON_SET_B_MINUS_A"
+  },
+  "8F": {
+    "cp": 57937,
+    "name": "ICON_SET_COPY_IN_A"
+  },
+  "8G": {
+    "cp": 57938,
+    "name": "ICON_SET_COPY_IN_B"
+  },
+  "8H": {
+    "cp": 57939,
+    "name": "ICON_DANGEROUS_GOODS"
+  },
+  "8I": {
+    "cp": 57940,
+    "name": "ICON_DEACTIVATE"
+  },
+  "8U": {
+    "cp": 57941,
+    "name": "ICON_PLANNING_IN"
+  },
+  "8V": {
+    "cp": 57942,
+    "name": "ICON_PLANNING_OUT"
+  },
+  "8W": {
+    "cp": 57943,
+    "name": "ICON_SUBMIT"
+  },
+  "8X": {
+    "cp": 57944,
+    "name": "ICON_ALLOW"
+  },
+  "8Y": {
+    "cp": 57945,
+    "name": "ICON_REJECT"
+  },
+  "8Z": {
+    "cp": 57946,
+    "name": "ICON_SIMULATE"
+  },
+  "97": {
+    "cp": 57947,
+    "name": "ICON_MODIFICATION_CREATE"
+  },
+  "98": {
+    "cp": 57948,
+    "name": "ICON_MODIFICATION_OVERVIEW"
+  },
+  "99": {
+    "cp": 57949,
+    "name": "ICON_MODIFICATION_ORIGINAL"
+  },
+  "9A": {
+    "cp": 57950,
+    "name": "ICON_MODIFICATION_RESET"
+  },
+  "9K": {
+    "cp": 57951,
+    "name": "ICON_WS_TRANSPORT"
+  },
+  "9L": {
+    "cp": 57952,
+    "name": "ICON_ODS_ACT"
+  },
+  "9M": {
+    "cp": 57953,
+    "name": "ICON_ODS_INA"
+  },
+  "9N": {
+    "cp": 57954,
+    "name": "ICON_BIW_INFO_PACKAGE"
+  },
+  "9R": {
+    "cp": 57955,
+    "name": "ICON_TIME_INA"
+  },
+  "9S": {
+    "cp": 57956,
+    "name": "ICON_ARROW_LEFT"
+  },
+  "9T": {
+    "cp": 57957,
+    "name": "ICON_ARROW_RIGHT"
+  },
+  "9U": {
+    "cp": 57958,
+    "name": "ICON_ABAP"
+  },
+  "9W": {
+    "cp": 57959,
+    "name": "ICON_TRANSFER_STRUCTURE"
+  },
+  "9X": {
+    "cp": 57960,
+    "name": "ICON_OPERATION"
+  },
+  "A1": {
+    "cp": 57961,
+    "name": "ICON_WAREHOUSE"
+  },
+  "A2": {
+    "cp": 57962,
+    "name": "ICON_DISPO_LEVEL"
+  },
+  "A3": {
+    "cp": 57963,
+    "name": "ICON_DISTRIBUTION"
+  },
+  "A4": {
+    "cp": 57964,
+    "name": "ICON_CUSTOMER_WAREHOUSE"
+  },
+  "A5": {
+    "cp": 57965,
+    "name": "ICON_TRANSPORT_POINT"
+  },
+  "A7": {
+    "cp": 57966,
+    "name": "ICON_MODEL"
+  },
+  "A8": {
+    "cp": 57967,
+    "name": "ICON_PLANT"
+  },
+  "A9": {
+    "cp": 57968,
+    "name": "ICON_PRODUCT_GROUP"
+  },
+  "AA": {
+    "cp": 57969,
+    "name": "ICON_RELATIONSHIP"
+  },
+  "AB": {
+    "cp": 57970,
+    "name": "ICON_RESOURCE"
+  },
+  "AC": {
+    "cp": 57971,
+    "name": "ICON_STORE_LOCATION"
+  },
+  "AD": {
+    "cp": 57972,
+    "name": "ICON_SUPPLIER"
+  },
+  "AE": {
+    "cp": 57973,
+    "name": "ICON_TRANSPORTATION_MODE"
+  },
+  "AF": {
+    "cp": 57974,
+    "name": "ICON_LOCATION"
+  },
+  "AJ": {
+    "cp": 57975,
+    "name": "ICON_WORKING_PLAN"
+  },
+  "AK": {
+    "cp": 57976,
+    "name": "ICON_MAINTENANCE_PLAN"
+  },
+  "AL": {
+    "cp": 57977,
+    "name": "ICON_REPORT"
+  },
+  "AM": {
+    "cp": 57978,
+    "name": "ICON_WORKPLACE"
+  },
+  "AN": {
+    "cp": 57979,
+    "name": "ICON_EQUIPMENT"
+  },
+  "AO": {
+    "cp": 57980,
+    "name": "ICON_TECHNICAL_PLACE"
+  },
+  "AP": {
+    "cp": 57981,
+    "name": "ICON_BOM"
+  },
+  "AQ": {
+    "cp": 57982,
+    "name": "ICON_BOM_ITEM"
+  },
+  "AS": {
+    "cp": 57983,
+    "name": "ICON_DOCUMENT_REVISION"
+  },
+  "AT": {
+    "cp": 57984,
+    "name": "ICON_MATERIAL_REVISION"
+  },
+  "AU": {
+    "cp": 57985,
+    "name": "ICON_CHANGE_NUMBER"
+  },
+  "BA": {
+    "cp": 57986,
+    "name": "ICON_STORNO"
+  },
+  "BB": {
+    "cp": 57987,
+    "name": "ICON_INTERCHANGE"
+  },
+  "BJ": {
+    "cp": 57988,
+    "name": "ICON_PARAMETER_TABLE"
+  },
+  "BL": {
+    "cp": 57989,
+    "name": "ICON_COST_CENTER"
+  },
+  "BO": {
+    "cp": 57990,
+    "name": "ICON_QUERY"
+  },
+  "BP": {
+    "cp": 57991,
+    "name": "ICON_WORKFLOW_INBOX"
+  },
+  "BT": {
+    "cp": 57992,
+    "name": "ICON_GRADUATE"
+  },
+  "BU": {
+    "cp": 57993,
+    "name": "ICON_EXTRA"
+  },
+  "BV": {
+    "cp": 57994,
+    "name": "ICON_CONVERT_ALL"
+  },
+  "BW": {
+    "cp": 57995,
+    "name": "ICON_RELATION"
+  },
+  "BX": {
+    "cp": 57996,
+    "name": "ICON_CONFIGURATION"
+  },
+  "BY": {
+    "cp": 57997,
+    "name": "ICON_WIZARD"
+  },
+  "C0": {
+    "cp": 57998,
+    "name": "ICON_STORE"
+  },
+  "C2": {
+    "cp": 57999,
+    "name": "ICON_LATE_STORE"
+  },
+  "C3": {
+    "cp": 58000,
+    "name": "ICON_LATE_LINK"
+  },
+  "C4": {
+    "cp": 58001,
+    "name": "ICON_EARLY_STORE"
+  },
+  "C5": {
+    "cp": 58002,
+    "name": "ICON_EARLY_LINK"
+  },
+  "C6": {
+    "cp": 58003,
+    "name": "ICON_OO_CLASS_EVENT"
+  },
+  "C7": {
+    "cp": 58004,
+    "name": "ICON_OO_INST_EVENT"
+  },
+  "C8": {
+    "cp": 58005,
+    "name": "ICON_OO_ALIAS"
+  },
+  "C9": {
+    "cp": 58006,
+    "name": "ICON_OO_OBJECT"
+  },
+  "CB": {
+    "cp": 58007,
+    "name": "ICON_DELIVERY_DATE"
+  },
+  "CC": {
+    "cp": 58008,
+    "name": "ICON_DELIVERY_COMPLETE"
+  },
+  "CD": {
+    "cp": 58009,
+    "name": "ICON_DELIVERY_PROPOSAL"
+  },
+  "CE": {
+    "cp": 58010,
+    "name": "ICON_PDIR_BACK_SWITCH"
+  },
+  "CF": {
+    "cp": 58011,
+    "name": "ICON_PDIR_BACK"
+  },
+  "CG": {
+    "cp": 58012,
+    "name": "ICON_PDIR_FOREWARD"
+  },
+  "CH": {
+    "cp": 58013,
+    "name": "ICON_PDIR_FOREWARD_SWITCH"
+  },
+  "CI": {
+    "cp": 58014,
+    "name": "ICON_FINITE"
+  },
+  "CJ": {
+    "cp": 58015,
+    "name": "ICON_NONWORK"
+  },
+  "CK": {
+    "cp": 58016,
+    "name": "ICON_PM_FREE"
+  },
+  "CL": {
+    "cp": 58017,
+    "name": "ICON_PM_INSERT"
+  },
+  "CM": {
+    "cp": 58018,
+    "name": "ICON_PM_PRESS"
+  },
+  "CN": {
+    "cp": 58019,
+    "name": "ICON_PM_ORDER"
+  },
+  "CO": {
+    "cp": 58020,
+    "name": "ICON_DANGEROUS_GOOD_CHECK"
+  },
+  "D2": {
+    "cp": 58021,
+    "name": "ICON_PROFIT_CENTER"
+  },
+  "D5": {
+    "cp": 58022,
+    "name": "ICON_JAPAN"
+  },
+  "D6": {
+    "cp": 58023,
+    "name": "ICON_SLS"
+  },
+  "D7": {
+    "cp": 58024,
+    "name": "ICON_CUSTOMS"
+  },
+  "D8": {
+    "cp": 58025,
+    "name": "ICON_LEGAL_REG"
+  },
+  "D9": {
+    "cp": 58026,
+    "name": "ICON_COMPANY_CODE"
+  },
+  "DA": {
+    "cp": 58027,
+    "name": "ICON_UNIT_COSTING"
+  },
+  "DB": {
+    "cp": 58028,
+    "name": "ICON_BASE_PLANNING_OBJECT"
+  },
+  "DC": {
+    "cp": 58029,
+    "name": "ICON_ACTIVITY_TYPE"
+  },
+  "DD": {
+    "cp": 58030,
+    "name": "ICON_RENTAL_AGREEMENT"
+  },
+  "DE": {
+    "cp": 58031,
+    "name": "ICON_REAL_ESTATE_OBJECT"
+  },
+  "DF": {
+    "cp": 58032,
+    "name": "ICON_COMPLETE"
+  },
+  "DG": {
+    "cp": 58033,
+    "name": "ICON_PARTNER"
+  },
+  "DH": {
+    "cp": 58034,
+    "name": "ICON_PROTOCOL"
+  },
+  "DI": {
+    "cp": 58035,
+    "name": "ICON_MAINTENANCE_OBJECT_LIST"
+  },
+  "DJ": {
+    "cp": 58036,
+    "name": "ICON_XXL"
+  },
+  "DK": {
+    "cp": 58037,
+    "name": "ICON_WORD_PROCESSING"
+  },
+  "DL": {
+    "cp": 58038,
+    "name": "ICON_ABC"
+  },
+  "DM": {
+    "cp": 58039,
+    "name": "ICON_ALV_VARIANT_CHOOSE"
+  },
+  "DN": {
+    "cp": 58040,
+    "name": "ICON_ALV_VARIANT_SAVE"
+  },
+  "DO": {
+    "cp": 58041,
+    "name": "ICON_EXCLUDED_CORRESPONDENCE"
+  },
+  "DP": {
+    "cp": 58042,
+    "name": "ICON_INCREASE_DECIMAL"
+  },
+  "DQ": {
+    "cp": 58043,
+    "name": "ICON_DECREASE_DECIMAL"
+  },
+  "DR": {
+    "cp": 58044,
+    "name": "ICON_ERROR_PROTOCOL"
+  },
+  "DS": {
+    "cp": 58045,
+    "name": "ICON_PARTNER_SALES_ACTIVITY"
+  },
+  "DT": {
+    "cp": 58046,
+    "name": "ICON_PHONE_CALL_IN"
+  },
+  "DU": {
+    "cp": 58047,
+    "name": "ICON_NAFTA"
+  },
+  "DV": {
+    "cp": 58048,
+    "name": "ICON_EU"
+  },
+  "DW": {
+    "cp": 58049,
+    "name": "ICON_PHONE_CALL_OUT"
+  },
+  "DX": {
+    "cp": 58050,
+    "name": "ICON_CONTROLLING_AREA"
+  },
+  "DY": {
+    "cp": 58051,
+    "name": "ICON_DISTRIBUTION_LIST"
+  },
+  "DZ": {
+    "cp": 58052,
+    "name": "ICON_MAIL_SAP_UNREAD"
+  },
+  "E0": {
+    "cp": 58053,
+    "name": "ICON_MAIL_SAP_READ"
+  },
+  "E3": {
+    "cp": 58054,
+    "name": "ICON_OFFICE_DOCUMENT"
+  },
+  "E8": {
+    "cp": 58055,
+    "name": "ICON_PACKING"
+  },
+  "E9": {
+    "cp": 58056,
+    "name": "ICON_UNPACK"
+  },
+  "EA": {
+    "cp": 58057,
+    "name": "ICON_EMPTY_HANDLING_UNIT"
+  },
+  "EJ": {
+    "cp": 58058,
+    "name": "ICON_BATCH"
+  },
+  "EK": {
+    "cp": 58059,
+    "name": "ICON_ADMINISTRATIVE_DATA"
+  },
+  "EL": {
+    "cp": 58060,
+    "name": "ICON_STOCK"
+  },
+  "EM": {
+    "cp": 58061,
+    "name": "ICON_ACCOUNT_ASSIGNMENT"
+  },
+  "EN": {
+    "cp": 58062,
+    "name": "ICON_LOT_ORIGIN"
+  },
+  "EO": {
+    "cp": 58063,
+    "name": "ICON_INSPECTION_LOT"
+  },
+  "EP": {
+    "cp": 58064,
+    "name": "ICON_SHOW_EXTERNAL_JOBS"
+  },
+  "ES": {
+    "cp": 58065,
+    "name": "ICON_DELETE_FAVORITES"
+  },
+  "ET": {
+    "cp": 58066,
+    "name": "ICON_SHOW_EVENTS"
+  },
+  "EX": {
+    "cp": 58067,
+    "name": "ICON_USED_RELATION"
+  },
+  "EY": {
+    "cp": 58068,
+    "name": "ICON_MAPPED_RELATION"
+  },
+  "EZ": {
+    "cp": 58069,
+    "name": "ICON_CREATE_COPY"
+  },
+  "F0": {
+    "cp": 58070,
+    "name": "ICON_FLUSH"
+  },
+  "F1": {
+    "cp": 58071,
+    "name": "ICON_DEFECT"
+  },
+  "F2": {
+    "cp": 58072,
+    "name": "ICON_BW_GIS"
+  },
+  "F3": {
+    "cp": 58073,
+    "name": "ICON_BW_INFO_CUBE_SAP"
+  },
+  "F4": {
+    "cp": 58074,
+    "name": "ICON_BW_INFO_CUBE_INA"
+  },
+  "F5": {
+    "cp": 58075,
+    "name": "ICON_BW_INFO_OBJECT_CATALOGUE"
+  },
+  "F6": {
+    "cp": 58076,
+    "name": "ICON_BW_SUGGEST_VALUE"
+  },
+  "F7": {
+    "cp": 58077,
+    "name": "ICON_DOC_POSITION_PROPOSAL"
+  },
+  "F8": {
+    "cp": 58078,
+    "name": "ICON_CUSTOMER_MASTER_DATA_LIST"
+  },
+  "F9": {
+    "cp": 58079,
+    "name": "ICON_STATUS_OVERVIEW"
+  },
+  "FA": {
+    "cp": 58080,
+    "name": "ICON_DOC_HEADER_DETAIL"
+  },
+  "FB": {
+    "cp": 58081,
+    "name": "ICON_DOC_ITEM_DETAIL"
+  },
+  "FC": {
+    "cp": 58082,
+    "name": "ICON_AVAILABILITY_CHECK"
+  },
+  "FD": {
+    "cp": 58083,
+    "name": "ICON_PRICE"
+  },
+  "FE": {
+    "cp": 58084,
+    "name": "ICON_SCHEDULE_LINE"
+  },
+  "FF": {
+    "cp": 58085,
+    "name": "ICON_AVAILABILITY_DISPLAY"
+  },
+  "FG": {
+    "cp": 58086,
+    "name": "ICON_STATISTICS"
+  },
+  "FQ": {
+    "cp": 58087,
+    "name": "ICON_OUTBOX"
+  },
+  "FR": {
+    "cp": 58088,
+    "name": "ICON_RESUBMISSION"
+  },
+  "FS": {
+    "cp": 58089,
+    "name": "ICON_PRIVATE_FILES"
+  },
+  "FT": {
+    "cp": 58090,
+    "name": "ICON_PUBLIC_FILES"
+  },
+  "FU": {
+    "cp": 58091,
+    "name": "ICON_SUBSCRIPTION"
+  },
+  "FV": {
+    "cp": 58092,
+    "name": "ICON_AVERAGE"
+  },
+  "FW": {
+    "cp": 58093,
+    "name": "ICON_BOLD"
+  },
+  "FX": {
+    "cp": 58094,
+    "name": "ICON_ITALIC"
+  },
+  "FY": {
+    "cp": 58095,
+    "name": "ICON_UNDERLINE"
+  },
+  "FZ": {
+    "cp": 58096,
+    "name": "ICON_ALIGN_LEFT"
+  },
+  "G0": {
+    "cp": 58097,
+    "name": "ICON_ALIGN_RIGHT"
+  },
+  "G1": {
+    "cp": 58098,
+    "name": "ICON_ALIGN_CENTER"
+  },
+  "G2": {
+    "cp": 58099,
+    "name": "ICON_JUSTIFIED"
+  },
+  "G3": {
+    "cp": 58100,
+    "name": "ICON_COLOR"
+  },
+  "G4": {
+    "cp": 58101,
+    "name": "ICON_DELETE_ALL_ATTRIBUTES"
+  },
+  "G5": {
+    "cp": 58102,
+    "name": "ICON_IDOC"
+  },
+  "G6": {
+    "cp": 58103,
+    "name": "ICON_HOST"
+  },
+  "GB": {
+    "cp": 58104,
+    "name": "ICON_CONNECT"
+  },
+  "GC": {
+    "cp": 58105,
+    "name": "ICON_DISCONNECT"
+  },
+  "GD": {
+    "cp": 58106,
+    "name": "ICON_FILTER_UNDO"
+  },
+  "GF": {
+    "cp": 58107,
+    "name": "ICON_INTENSIFY_UNDO"
+  },
+  "GH": {
+    "cp": 58108,
+    "name": "ICON_BW_DATA_MARTS"
+  },
+  "GJ": {
+    "cp": 58109,
+    "name": "ICON_BW_CHARACTERISTICS_SAP"
+  },
+  "GK": {
+    "cp": 58110,
+    "name": "ICON_BW_KEYFIGURE_SAP"
+  },
+  "GL": {
+    "cp": 58111,
+    "name": "ICON_BW_INFO_OBJECT_UNITS_SAP"
+  },
+  "GM": {
+    "cp": 58112,
+    "name": "ICON_BW_TIME_SAP"
+  },
+  "GN": {
+    "cp": 58113,
+    "name": "ICON_BW_RULES_SAP"
+  },
+  "GO": {
+    "cp": 58114,
+    "name": "ICON_BW_REPORT_SAP"
+  },
+  "GP": {
+    "cp": 58115,
+    "name": "ICON_BW_VARIABLE_SAP"
+  },
+  "GQ": {
+    "cp": 58116,
+    "name": "ICON_BW_REF_STRUCTURE_SAP"
+  },
+  "GR": {
+    "cp": 58117,
+    "name": "ICON_BW_SELECTION_SAP"
+  },
+  "GS": {
+    "cp": 58118,
+    "name": "ICON_INSPECTION_METHOD"
+  },
+  "GT": {
+    "cp": 58119,
+    "name": "ICON_CATALOG"
+  },
+  "GU": {
+    "cp": 58120,
+    "name": "ICON_INSERT_MULTIPLE_LINES"
+  },
+  "GV": {
+    "cp": 58121,
+    "name": "ICON_INSPECTION_CHARACTERISTIC"
+  },
+  "GW": {
+    "cp": 58122,
+    "name": "ICON_PHYSICAL_SAMPLE"
+  },
+  "GX": {
+    "cp": 58123,
+    "name": "ICON_BW_FORMULA_SAP"
+  },
+  "GY": {
+    "cp": 58124,
+    "name": "ICON_BW_INFO_CATALOGUE_SAP"
+  },
+  "H8": {
+    "cp": 58125,
+    "name": "ICON_BW_SEGMENT_ACT"
+  },
+  "H9": {
+    "cp": 58126,
+    "name": "ICON_BW_SEGMENT_INA"
+  },
+  "HA": {
+    "cp": 58127,
+    "name": "ICON_BW_SEGMENT_SAP"
+  },
+  "HB": {
+    "cp": 58128,
+    "name": "ICON_MASS_CHANGE"
+  },
+  "HC": {
+    "cp": 58129,
+    "name": "ICON_INTENSIFY_CRITICAL"
+  },
+  "HD": {
+    "cp": 58130,
+    "name": "ICON_INTENSIFY_UNCRITICAL"
+  },
+  "HE": {
+    "cp": 58131,
+    "name": "ICON_CHOOSE_COLUMNS"
+  },
+  "HK": {
+    "cp": 58132,
+    "name": "ICON_WRITE_FILE"
+  },
+  "HO": {
+    "cp": 58133,
+    "name": "ICON_ELEMENT"
+  },
+  "HQ": {
+    "cp": 58134,
+    "name": "ICON_WS_WHSE_STOCK"
+  },
+  "HR": {
+    "cp": 58135,
+    "name": "ICON_ROUTING"
+  },
+  "HS": {
+    "cp": 58136,
+    "name": "ICON_MATERIAL_ROUTING_ALLOC"
+  },
+  "HT": {
+    "cp": 58137,
+    "name": "ICON_ROUTING_SUB_OPERATION"
+  },
+  "HU": {
+    "cp": 58138,
+    "name": "ICON_ROUTING_REF_SUB_OPERATION"
+  },
+  "HV": {
+    "cp": 58139,
+    "name": "ICON_ROUTING_SEQUENCE"
+  },
+  "HW": {
+    "cp": 58140,
+    "name": "ICON_BOM_SUB_ITEM"
+  },
+  "HX": {
+    "cp": 58141,
+    "name": "ICON_EFFECTIVITY_PERIOD"
+  },
+  "HY": {
+    "cp": 58142,
+    "name": "ICON_KEY_DATE"
+  },
+  "HZ": {
+    "cp": 58143,
+    "name": "ICON_SELECTION_PERIOD"
+  },
+  "I0": {
+    "cp": 58144,
+    "name": "ICON_EFF"
+  },
+  "I1": {
+    "cp": 58145,
+    "name": "ICON_SUPPLY_AREA"
+  },
+  "I2": {
+    "cp": 58146,
+    "name": "ICON_REPORT_CALL"
+  },
+  "I3": {
+    "cp": 58147,
+    "name": "ICON_ASSIGN"
+  },
+  "I4": {
+    "cp": 58148,
+    "name": "ICON_UNASSIGN"
+  },
+  "I5": {
+    "cp": 58149,
+    "name": "ICON_SYSTEM_START_RECORDING"
+  },
+  "I6": {
+    "cp": 58150,
+    "name": "ICON_SYSTEM_PLAY"
+  },
+  "I7": {
+    "cp": 58151,
+    "name": "ICON_TRANSLATION"
+  },
+  "I8": {
+    "cp": 58152,
+    "name": "ICON_TRANSLATION_SHOW"
+  },
+  "I9": {
+    "cp": 58153,
+    "name": "ICON_CHANGE_PASSWORD"
+  },
+  "IA": {
+    "cp": 58154,
+    "name": "ICON_DISTRIBUTE"
+  },
+  "IB": {
+    "cp": 58155,
+    "name": "ICON_SYSTEMS"
+  },
+  "IC": {
+    "cp": 58156,
+    "name": "ICON_ACTIVITY_GROUP"
+  },
+  "ID": {
+    "cp": 58157,
+    "name": "ICON_USERGROUP"
+  },
+  "IE": {
+    "cp": 58158,
+    "name": "ICON_UNLINK"
+  },
+  "IF": {
+    "cp": 58159,
+    "name": "ICON_CONTENT_OBJECT"
+  },
+  "IG": {
+    "cp": 58160,
+    "name": "ICON_OBJECT_LIST"
+  },
+  "II": {
+    "cp": 58161,
+    "name": "ICON_DIFFERENCE"
+  },
+  "IJ": {
+    "cp": 58162,
+    "name": "ICON_DIFFERENCE_BACK"
+  },
+  "IK": {
+    "cp": 58163,
+    "name": "ICON_SYSTEM_DESELECT"
+  },
+  "IL": {
+    "cp": 58164,
+    "name": "ICON_ADOPT"
+  },
+  "IM": {
+    "cp": 58165,
+    "name": "ICON_TERMINOLOGY"
+  },
+  "IN": {
+    "cp": 58166,
+    "name": "ICON_TRIANGULAR_RELATIONSHIP"
+  },
+  "IO": {
+    "cp": 58167,
+    "name": "ICON_AEW_PROJECT"
+  },
+  "IU": {
+    "cp": 58168,
+    "name": "ICON_BMP"
+  },
+  "IV": {
+    "cp": 58169,
+    "name": "ICON_FAX_DOC"
+  },
+  "IW": {
+    "cp": 58170,
+    "name": "ICON_GIF"
+  },
+  "IX": {
+    "cp": 58171,
+    "name": "ICON_HLP"
+  },
+  "IY": {
+    "cp": 58172,
+    "name": "ICON_HTT"
+  },
+  "IZ": {
+    "cp": 58173,
+    "name": "ICON_ITS"
+  },
+  "J0": {
+    "cp": 58174,
+    "name": "ICON_JPG"
+  },
+  "J1": {
+    "cp": 58175,
+    "name": "ICON_MSG"
+  },
+  "J3": {
+    "cp": 58176,
+    "name": "ICON_XLV"
+  },
+  "J4": {
+    "cp": 58177,
+    "name": "ICON_HTM"
+  },
+  "J5": {
+    "cp": 58178,
+    "name": "ICON_PPT"
+  },
+  "J6": {
+    "cp": 58179,
+    "name": "ICON_DOT"
+  },
+  "J7": {
+    "cp": 58180,
+    "name": "ICON_DOC"
+  },
+  "J8": {
+    "cp": 58181,
+    "name": "ICON_EML"
+  },
+  "J9": {
+    "cp": 58182,
+    "name": "ICON_RTF"
+  },
+  "JA": {
+    "cp": 58183,
+    "name": "ICON_TIF"
+  },
+  "JB": {
+    "cp": 58184,
+    "name": "ICON_WRI"
+  },
+  "JC": {
+    "cp": 58185,
+    "name": "ICON_LWP"
+  },
+  "JD": {
+    "cp": 58186,
+    "name": "ICON_LOTUS"
+  },
+  "JE": {
+    "cp": 58187,
+    "name": "ICON_VSD"
+  },
+  "JF": {
+    "cp": 58188,
+    "name": "ICON_DEFAULT_WINDOWS"
+  },
+  "K1": {
+    "cp": 58189,
+    "name": "ICON_DATA_AREA_EXPAND"
+  },
+  "K2": {
+    "cp": 58190,
+    "name": "ICON_DATA_AREA_COLLAPSE"
+  },
+  "K3": {
+    "cp": 58191,
+    "name": "ICON_SCRAP"
+  },
+  "K4": {
+    "cp": 58192,
+    "name": "ICON_IMPORT_ALL_REQUESTS"
+  },
+  "K5": {
+    "cp": 58193,
+    "name": "ICON_IMPORT_TRANSPORT_REQUEST"
+  },
+  "K6": {
+    "cp": 58194,
+    "name": "ICON_TOGGLE_DISPLAY"
+  },
+  "K7": {
+    "cp": 58195,
+    "name": "ICON_TOGGLE_FUNCTION"
+  },
+  "K8": {
+    "cp": 58196,
+    "name": "ICON_PERSONAL_SETTINGS"
+  },
+  "K9": {
+    "cp": 58197,
+    "name": "ICON_PROJECT"
+  },
+  "KA": {
+    "cp": 58198,
+    "name": "ICON_INCLUDE_OBJECTS"
+  },
+  "KB": {
+    "cp": 58199,
+    "name": "ICON_TRANSFER"
+  },
+  "KC": {
+    "cp": 58200,
+    "name": "ICON_DISTRIBUTE_CONFIGURATION"
+  },
+  "KD": {
+    "cp": 58201,
+    "name": "ICON_ADJUST_CONFIGURATION"
+  },
+  "KE": {
+    "cp": 58202,
+    "name": "ICON_STANDARD_CONFIGURATION"
+  },
+  "KF": {
+    "cp": 58203,
+    "name": "ICON_MODIFIED_OBJECT"
+  },
+  "KG": {
+    "cp": 58204,
+    "name": "ICON_SELECT_WITH_CONDITION"
+  },
+  "KI": {
+    "cp": 58205,
+    "name": "ICON_APPOINTMENT_COMPARISON"
+  },
+  "KJ": {
+    "cp": 58206,
+    "name": "ICON_BUSINESS_PARTNER_MASTER_D"
+  },
+  "KK": {
+    "cp": 58207,
+    "name": "ICON_INCOMPLETION_LOG"
+  },
+  "KL": {
+    "cp": 58208,
+    "name": "ICON_MESSAGE"
+  },
+  "KM": {
+    "cp": 58209,
+    "name": "ICON_TELEPHONE_CALL"
+  },
+  "KN": {
+    "cp": 58210,
+    "name": "ICON_VISIT"
+  },
+  "KO": {
+    "cp": 58211,
+    "name": "ICON_LETTER"
+  },
+  "KT": {
+    "cp": 58212,
+    "name": "ICON_SUMMARIZE"
+  },
+  "KU": {
+    "cp": 58213,
+    "name": "ICON_SUMMARIZE_UNDO"
+  },
+  "KV": {
+    "cp": 58214,
+    "name": "ICON_SUM_RED"
+  },
+  "KW": {
+    "cp": 58215,
+    "name": "ICON_UNSPECIFIED_ONE"
+  },
+  "KX": {
+    "cp": 58216,
+    "name": "ICON_UNSPECIFIED_TWO"
+  },
+  "KY": {
+    "cp": 58217,
+    "name": "ICON_UNSPECIFIED_THREE"
+  },
+  "KZ": {
+    "cp": 58218,
+    "name": "ICON_UNSPECIFIED_FOUR"
+  },
+  "L0": {
+    "cp": 58219,
+    "name": "ICON_UNSPECIFIED_FIVE"
+  },
+  "LT": {
+    "cp": 58220,
+    "name": "ICON_WS_START_WHSE_PROC_BACKGR"
+  },
+  "LU": {
+    "cp": 58221,
+    "name": "ICON_WS_START_WHSE_PROC_FOREGR"
+  },
+  "LV": {
+    "cp": 58222,
+    "name": "ICON_WS_CONFIRM_WHSE_PROC_BACK"
+  },
+  "LW": {
+    "cp": 58223,
+    "name": "ICON_WS_CONFIRM_WHSE_PROC_FORE"
+  },
+  "LZ": {
+    "cp": 58224,
+    "name": "ICON_ALV_VARIANTS"
+  },
+  "M1": {
+    "cp": 58225,
+    "name": "ICON_BIW_SOURCE_SYS_OWN"
+  },
+  "M4": {
+    "cp": 58226,
+    "name": "ICON_BACKGROUND_JOB"
+  },
+  "M5": {
+    "cp": 58227,
+    "name": "ICON_JOB_DETAIL"
+  },
+  "M6": {
+    "cp": 58228,
+    "name": "ICON_SYSTEMTYPE"
+  },
+  "M7": {
+    "cp": 58229,
+    "name": "ICON_COMPOSITE_ACTIVITYGROUP"
+  },
+  "MH": {
+    "cp": 58230,
+    "name": "ICON_DRAW_SELECT"
+  },
+  "MI": {
+    "cp": 58231,
+    "name": "ICON_DRAW_FREEHAND"
+  },
+  "MJ": {
+    "cp": 58232,
+    "name": "ICON_DRAW_ARROW"
+  },
+  "MK": {
+    "cp": 58233,
+    "name": "ICON_DRAW_LINE"
+  },
+  "ML": {
+    "cp": 58234,
+    "name": "ICON_DRAW_POLYLINE"
+  },
+  "MM": {
+    "cp": 58235,
+    "name": "ICON_DRAW_ELLIPSE"
+  },
+  "MN": {
+    "cp": 58236,
+    "name": "ICON_DRAW_POLYGON"
+  },
+  "MO": {
+    "cp": 58237,
+    "name": "ICON_DRAW_RECTANGLE"
+  },
+  "MP": {
+    "cp": 58238,
+    "name": "ICON_DRAW_ANGULAR"
+  },
+  "MQ": {
+    "cp": 58239,
+    "name": "ICON_DRAW_LINEAR"
+  },
+  "MR": {
+    "cp": 58240,
+    "name": "ICON_DRAW_RADIAL"
+  },
+  "MS": {
+    "cp": 58241,
+    "name": "ICON_BW_EXCEPTION_MONITOR"
+  },
+  "MT": {
+    "cp": 58242,
+    "name": "ICON_BOOKMARK"
+  },
+  "MU": {
+    "cp": 58243,
+    "name": "ICON_TRANSFER_STRUCTURE_INA"
+  },
+  "MV": {
+    "cp": 58244,
+    "name": "ICON_EXCEPTION"
+  },
+  "MW": {
+    "cp": 58245,
+    "name": "ICON_RANKING"
+  },
+  "NF": {
+    "cp": 58246,
+    "name": "ICON_GIS_BAR"
+  },
+  "NG": {
+    "cp": 58247,
+    "name": "ICON_GIS_COLOR_SHADING"
+  },
+  "NH": {
+    "cp": 58248,
+    "name": "ICON_GIS_DEMOTE"
+  },
+  "NI": {
+    "cp": 58249,
+    "name": "ICON_GIS_DOT_DENSITY"
+  },
+  "NJ": {
+    "cp": 58250,
+    "name": "ICON_GIS_LAYER_PROPERTIES"
+  },
+  "NK": {
+    "cp": 58251,
+    "name": "ICON_GIS_PAN"
+  },
+  "NL": {
+    "cp": 58252,
+    "name": "ICON_GIS_PIE"
+  },
+  "NM": {
+    "cp": 58253,
+    "name": "ICON_GIS_PROMOTE"
+  },
+  "NN": {
+    "cp": 58254,
+    "name": "ICON_GIS_SPATIAL_SELECT"
+  },
+  "NO": {
+    "cp": 58255,
+    "name": "ICON_GIS_SYMBOL"
+  },
+  "O1": {
+    "cp": 58256,
+    "name": "ICON_BW_RA_SETTING_ACTIVE"
+  },
+  "O2": {
+    "cp": 58257,
+    "name": "ICON_BW_RA_SETTING_INACTIVE"
+  },
+  "O3": {
+    "cp": 58258,
+    "name": "ICON_SNC_INFO"
+  },
+  "OB": {
+    "cp": 58259,
+    "name": "ICON_TEXT_FIELD"
+  },
+  "OC": {
+    "cp": 58260,
+    "name": "ICON_FIELD_WITH_TEXT"
+  },
+  "OD": {
+    "cp": 58261,
+    "name": "ICON_SIMPLE_FIELD"
+  },
+  "OE": {
+    "cp": 58262,
+    "name": "ICON_TRANSPORT_PROPOSAL"
+  },
+  "ON": {
+    "cp": 58263,
+    "name": "ICON_CONSUMPTION_ALTERNATIVE"
+  },
+  "OO": {
+    "cp": 58264,
+    "name": "ICON_PROCUREMENT_ALTERNATIVE"
+  },
+  "OP": {
+    "cp": 58265,
+    "name": "ICON_PROCUREMENT_PROCESS"
+  },
+  "OR": {
+    "cp": 58266,
+    "name": "ICON_DOCUMENT_MODEL_SPACE"
+  },
+  "OS": {
+    "cp": 58267,
+    "name": "ICON_RELATION_CLASS"
+  },
+  "OT": {
+    "cp": 58268,
+    "name": "ICON_IO_ATTRIBUTE"
+  },
+  "OU": {
+    "cp": 58269,
+    "name": "ICON_VIRTUAL_RELATION_CLASS"
+  },
+  "OV": {
+    "cp": 58270,
+    "name": "ICON_CLASS_CONNECTION_SPACE"
+  },
+  "OW": {
+    "cp": 58271,
+    "name": "ICON_IO_PREDEFINED_VALUE"
+  },
+  "OX": {
+    "cp": 58272,
+    "name": "ICON_CONTEXT_CLASS"
+  },
+  "OY": {
+    "cp": 58273,
+    "name": "ICON_LOIO_CLASS"
+  },
+  "OZ": {
+    "cp": 58274,
+    "name": "ICON_VIRTUAL_LOIO_CLASS"
+  },
+  "P0": {
+    "cp": 58275,
+    "name": "ICON_PHIO_CLASS"
+  },
+  "P1": {
+    "cp": 58276,
+    "name": "ICON_VIRTUAL_PHIO_CLASS"
+  },
+  "P2": {
+    "cp": 58277,
+    "name": "ICON_PARAGRAPH"
+  },
+  "PB": {
+    "cp": 58278,
+    "name": "ICON_DELIVERY_NO_CONFIRMATION"
+  },
+  "PC": {
+    "cp": 58279,
+    "name": "ICON_SNAP_TO_GRID"
+  },
+  "PE": {
+    "cp": 58280,
+    "name": "ICON_MAIN_GRID"
+  },
+  "PF": {
+    "cp": 58281,
+    "name": "ICON_TARGET_GROUP"
+  },
+  "PG": {
+    "cp": 58282,
+    "name": "ICON_DELIVERY_INBOUND"
+  },
+  "PJ": {
+    "cp": 58283,
+    "name": "ICON_PAW_TEST"
+  },
+  "PK": {
+    "cp": 58284,
+    "name": "ICON_PAW_SUBTEST"
+  },
+  "PL": {
+    "cp": 58285,
+    "name": "ICON_PAW_PU"
+  },
+  "PM": {
+    "cp": 58286,
+    "name": "ICON_PAW_ITEM"
+  },
+  "PN": {
+    "cp": 58287,
+    "name": "ICON_BUSINESS_AREA"
+  },
+  "PO": {
+    "cp": 58288,
+    "name": "ICON_DATABASE_TABLE"
+  },
+  "PP": {
+    "cp": 58289,
+    "name": "ICON_DATABASE_TABLE_INA"
+  },
+  "PQ": {
+    "cp": 58290,
+    "name": "ICON_CONNECTION_OBJECT"
+  },
+  "PR": {
+    "cp": 58291,
+    "name": "ICON_CONTRACT_ACCOUNT"
+  },
+  "PS": {
+    "cp": 58292,
+    "name": "ICON_REGISTER"
+  },
+  "PT": {
+    "cp": 58293,
+    "name": "ICON_INSTALLATION"
+  },
+  "PU": {
+    "cp": 58294,
+    "name": "ICON_BORDER_TOP"
+  },
+  "PV": {
+    "cp": 58295,
+    "name": "ICON_BORDER_RIGHT"
+  },
+  "PW": {
+    "cp": 58296,
+    "name": "ICON_BORDER_OUTSIDE"
+  },
+  "PX": {
+    "cp": 58297,
+    "name": "ICON_BORDER_LEFT"
+  },
+  "PY": {
+    "cp": 58298,
+    "name": "ICON_BORDER_BOTTOM"
+  },
+  "PZ": {
+    "cp": 58299,
+    "name": "ICON_BORDER_INSIDE"
+  },
+  "Q0": {
+    "cp": 58300,
+    "name": "ICON_DELETE_TEMPLATE"
+  },
+  "Q1": {
+    "cp": 58301,
+    "name": "ICON_SAVE_AS_TEMPLATE"
+  },
+  "Q2": {
+    "cp": 58302,
+    "name": "ICON_PATIENT_SMARTCARD"
+  },
+  "Q4": {
+    "cp": 58303,
+    "name": "ICON_GENERAL_RECIPE"
+  },
+  "Q6": {
+    "cp": 58304,
+    "name": "ICON_PRICE_ANALYSIS"
+  },
+  "Q7": {
+    "cp": 58305,
+    "name": "ICON_COST_COMPONENTS"
+  },
+  "Q8": {
+    "cp": 58306,
+    "name": "ICON_VAL_QUANTITY_STRUCTURE"
+  },
+  "Q9": {
+    "cp": 58307,
+    "name": "ICON_REVALUATED_CONS_ALTERNAT"
+  },
+  "QA": {
+    "cp": 58308,
+    "name": "ICON_PACKAGE_QUERY"
+  },
+  "QB": {
+    "cp": 58309,
+    "name": "ICON_PACKAGE_DYNAMIC"
+  },
+  "QC": {
+    "cp": 58310,
+    "name": "ICON_PACKAGE_STANDARD"
+  },
+  "QD": {
+    "cp": 58311,
+    "name": "ICON_PACKAGE_APPLICATION"
+  },
+  "QE": {
+    "cp": 58312,
+    "name": "ICON_LINKED_DOCUMENT"
+  },
+  "QF": {
+    "cp": 58313,
+    "name": "ICON_CLOSED_LINKED_FOLDER"
+  },
+  "QG": {
+    "cp": 58314,
+    "name": "ICON_OPEN_LINKED_FOLDER"
+  },
+  "QH": {
+    "cp": 58315,
+    "name": "ICON_REPORT_TEMPLATE"
+  },
+  "QI": {
+    "cp": 58316,
+    "name": "ICON_INFOSET_ACT"
+  },
+  "QJ": {
+    "cp": 58317,
+    "name": "ICON_INFOSET_INA"
+  },
+  "QK": {
+    "cp": 58318,
+    "name": "ICON_CHARACTERISTICS_FML"
+  },
+  "QL": {
+    "cp": 58319,
+    "name": "ICON_CHARACTERISTICS_HIER"
+  },
+  "QM": {
+    "cp": 58320,
+    "name": "ICON_HIERARCHY_RED"
+  },
+  "QN": {
+    "cp": 58321,
+    "name": "ICON_HIERARCHY_VAR_GREEN"
+  },
+  "QO": {
+    "cp": 58322,
+    "name": "ICON_HIERARCHY_VAR_RED"
+  },
+  "QP": {
+    "cp": 58323,
+    "name": "ICON_KEYFIGURE_FML"
+  },
+  "QQ": {
+    "cp": 58324,
+    "name": "ICON_VAR_EQUAL_GREEN"
+  },
+  "QR": {
+    "cp": 58325,
+    "name": "ICON_VAR_EQUAL_RED"
+  },
+  "QS": {
+    "cp": 58326,
+    "name": "ICON_VAR_GR_EQUAL_GREEN"
+  },
+  "QT": {
+    "cp": 58327,
+    "name": "ICON_VAR_GREATER_GREEN"
+  },
+  "QU": {
+    "cp": 58328,
+    "name": "ICON_VAR_LESS_EQUAL_GREEN"
+  },
+  "QV": {
+    "cp": 58329,
+    "name": "ICON_VAR_LESS_GREEN"
+  },
+  "QW": {
+    "cp": 58330,
+    "name": "ICON_VAR_INT_INCLUDE_GREEN"
+  },
+  "QX": {
+    "cp": 58331,
+    "name": "ICON_VAR_INT_INCLUDE_RED"
+  },
+  "QY": {
+    "cp": 58332,
+    "name": "ICON_MULTI_DATA_PROVIDER"
+  },
+  "QZ": {
+    "cp": 58333,
+    "name": "ICON_MULTI_DATA_PROVIDER_INA"
+  },
+  "R0": {
+    "cp": 58334,
+    "name": "ICON_BW_SOURCE_SYS_DB"
+  },
+  "R1": {
+    "cp": 58335,
+    "name": "ICON_BW_SOURCE_SYS_WEB"
+  },
+  "R2": {
+    "cp": 58336,
+    "name": "ICON_BW_DATASOURCE"
+  },
+  "R3": {
+    "cp": 58337,
+    "name": "ICON_BW_WEB_REPORT"
+  },
+  "R4": {
+    "cp": 58338,
+    "name": "ICON_XML_DOC"
+  },
+  "R5": {
+    "cp": 58339,
+    "name": "ICON_DROPDOWNLIST"
+  },
+  "R6": {
+    "cp": 58340,
+    "name": "ICON_RADIOBUTTON"
+  },
+  "R7": {
+    "cp": 58341,
+    "name": "ICON_CHECKBOX"
+  },
+  "R8": {
+    "cp": 58342,
+    "name": "ICON_GEO_CHARACTERISTIC"
+  },
+  "R9": {
+    "cp": 58343,
+    "name": "ICON_GEO_CHARACTERISTIC_INA"
+  },
+  "RA": {
+    "cp": 58344,
+    "name": "ICON_MANIKIN_FEMALE"
+  },
+  "RB": {
+    "cp": 58345,
+    "name": "ICON_MANIKIN_MALE"
+  },
+  "RC": {
+    "cp": 58346,
+    "name": "ICON_MANIKIN_UNKNOWN_GENDER"
+  },
+  "RD": {
+    "cp": 58347,
+    "name": "ICON_SYMBOL_FEMALE"
+  },
+  "RE": {
+    "cp": 58348,
+    "name": "ICON_SYMBOL_MALE"
+  },
+  "RF": {
+    "cp": 58349,
+    "name": "ICON_DECEASED_PATIENT"
+  },
+  "RG": {
+    "cp": 58350,
+    "name": "ICON_WD_APPL_COMPONENT"
+  },
+  "RH": {
+    "cp": 58351,
+    "name": "ICON_WD_TAG_LIBRARY"
+  },
+  "RI": {
+    "cp": 58352,
+    "name": "ICON_WD_TAB_LIBRARY_REF"
+  },
+  "RJ": {
+    "cp": 58353,
+    "name": "ICON_WD_WEB_PROJECT"
+  },
+  "RK": {
+    "cp": 58354,
+    "name": "ICON_WD_WEB_APPL_PROJECT"
+  },
+  "RL": {
+    "cp": 58355,
+    "name": "ICON_WD_INBOUND_PLUG"
+  },
+  "RM": {
+    "cp": 58356,
+    "name": "ICON_WD_OUTBOUND_PLUG"
+  },
+  "RN": {
+    "cp": 58357,
+    "name": "ICON_WD_VIEW"
+  },
+  "RO": {
+    "cp": 58358,
+    "name": "ICON_WD_VIEWS"
+  },
+  "RP": {
+    "cp": 58359,
+    "name": "ICON_WD_INTERFACE_VIEW"
+  },
+  "RQ": {
+    "cp": 58360,
+    "name": "ICON_WD_INTERFACE_VIEWS"
+  },
+  "RR": {
+    "cp": 58361,
+    "name": "ICON_WD_VIEW_AREA"
+  },
+  "RS": {
+    "cp": 58362,
+    "name": "ICON_WD_VIEW_SET_T_LAYOUT"
+  },
+  "RT": {
+    "cp": 58363,
+    "name": "ICON_WD_VIEW_SET_T_LAYOUT_REV"
+  },
+  "RU": {
+    "cp": 58364,
+    "name": "ICON_WD_VIEW_SET_T_LAYOUT_270"
+  },
+  "RV": {
+    "cp": 58365,
+    "name": "ICON_WD_VIEW_SET_T_LAYOUT_90"
+  },
+  "RW": {
+    "cp": 58366,
+    "name": "ICON_WD_VIEW_SET_TAB_LAYOUT"
+  },
+  "RX": {
+    "cp": 58367,
+    "name": "ICON_WD_VIEW_SET_GRID"
+  },
+  "RY": {
+    "cp": 58368,
+    "name": "ICON_WD_VIEW_CONTAINER"
+  },
+  "RZ": {
+    "cp": 58369,
+    "name": "ICON_WD_WINDOWS_COLLECTION"
+  },
+  "S0": {
+    "cp": 58370,
+    "name": "ICON_WD_WINDOW"
+  },
+  "S1": {
+    "cp": 58371,
+    "name": "ICON_WD_BUILD_ALL"
+  },
+  "S2": {
+    "cp": 58372,
+    "name": "ICON_WD_BUILD_INCREMENTAL"
+  },
+  "S3": {
+    "cp": 58373,
+    "name": "ICON_WD_COMPONENTS"
+  },
+  "S5": {
+    "cp": 58374,
+    "name": "ICON_WD_COMPONENT_INTERFACE"
+  },
+  "S6": {
+    "cp": 58375,
+    "name": "ICON_WD_APPLICATION"
+  },
+  "S7": {
+    "cp": 58376,
+    "name": "ICON_WD_APPLICATIONS"
+  },
+  "S8": {
+    "cp": 58377,
+    "name": "ICON_WD_CONTEXT"
+  },
+  "S9": {
+    "cp": 58378,
+    "name": "ICON_WD_VALUE_NODE"
+  },
+  "SA": {
+    "cp": 58379,
+    "name": "ICON_WD_VALUE_ATTR"
+  },
+  "SB": {
+    "cp": 58380,
+    "name": "ICON_WD_MAPPED_VALUE_NODE"
+  },
+  "SC": {
+    "cp": 58381,
+    "name": "ICON_WD_MAPPED_VALUE_ATTR"
+  },
+  "SD": {
+    "cp": 58382,
+    "name": "ICON_WD_MODEL_NODE"
+  },
+  "SE": {
+    "cp": 58383,
+    "name": "ICON_WD_MODEL_ATTRIBUTE"
+  },
+  "SF": {
+    "cp": 58384,
+    "name": "ICON_WD_MAPPED_MODEL_NODE"
+  },
+  "SG": {
+    "cp": 58385,
+    "name": "ICON_WD_MAPPED_MODEL_ATTR"
+  },
+  "SH": {
+    "cp": 58386,
+    "name": "ICON_WD_RECURSION_NODE"
+  },
+  "SI": {
+    "cp": 58387,
+    "name": "ICON_WD_IMAGE"
+  },
+  "SJ": {
+    "cp": 58388,
+    "name": "ICON_WD_CAPTION"
+  },
+  "SK": {
+    "cp": 58389,
+    "name": "ICON_WD_BUSINESS_GRAPHICS"
+  },
+  "SL": {
+    "cp": 58390,
+    "name": "ICON_WD_LABEL"
+  },
+  "SM": {
+    "cp": 58391,
+    "name": "ICON_WD_INPUT_FIELD"
+  },
+  "SN": {
+    "cp": 58392,
+    "name": "ICON_WD_NUMERIC_VALUE"
+  },
+  "SO": {
+    "cp": 58393,
+    "name": "ICON_WD_TIME_VALUE"
+  },
+  "SP": {
+    "cp": 58394,
+    "name": "ICON_WD_CHECK_BOX_INDEXED"
+  },
+  "SQ": {
+    "cp": 58395,
+    "name": "ICON_WD_CHECK_BOX_GROUP"
+  },
+  "SR": {
+    "cp": 58396,
+    "name": "ICON_WD_RADIO_BUTTON_EMPTY"
+  },
+  "SS": {
+    "cp": 58397,
+    "name": "ICON_WD_RADIO_BUTTON_INDEX"
+  },
+  "ST": {
+    "cp": 58398,
+    "name": "ICON_WD_RADIO_BUTTON_KEY"
+  },
+  "SU": {
+    "cp": 58399,
+    "name": "ICON_WD_DROPDOWN_INDEX"
+  },
+  "SV": {
+    "cp": 58400,
+    "name": "ICON_WD_DROPDOWN_KEY"
+  },
+  "SW": {
+    "cp": 58401,
+    "name": "ICON_WD_LINK_TO_ACTION"
+  },
+  "SX": {
+    "cp": 58402,
+    "name": "ICON_WD_LINK_TO_URL"
+  },
+  "SY": {
+    "cp": 58403,
+    "name": "ICON_WD_TOOLBAR_BUTTON"
+  },
+  "SZ": {
+    "cp": 58404,
+    "name": "ICON_WD_TOOLBAR_DROPDOWN_IDX"
+  },
+  "T0": {
+    "cp": 58405,
+    "name": "ICON_WD_TOOLBAR_DROPDOWN_KEY"
+  },
+  "T1": {
+    "cp": 58406,
+    "name": "ICON_WD_TOOLBAR_INPUT_FIELD"
+  },
+  "T2": {
+    "cp": 58407,
+    "name": "ICON_WD_TOOLBAR_SEPARATOR"
+  },
+  "T3": {
+    "cp": 58408,
+    "name": "ICON_WD_TOOLBAR_CAPTION"
+  },
+  "T4": {
+    "cp": 58409,
+    "name": "ICON_WD_TABLE"
+  },
+  "T5": {
+    "cp": 58410,
+    "name": "ICON_WD_TABLE_COLUMN"
+  },
+  "T6": {
+    "cp": 58411,
+    "name": "ICON_WD_TREE"
+  },
+  "T7": {
+    "cp": 58412,
+    "name": "ICON_WD_TREE_NODE"
+  },
+  "T8": {
+    "cp": 58413,
+    "name": "ICON_WD_TREE_ITEM"
+  },
+  "T9": {
+    "cp": 58414,
+    "name": "ICON_WD_IFRAME"
+  },
+  "TA": {
+    "cp": 58415,
+    "name": "ICON_WD_CHECK_BOX"
+  },
+  "TB": {
+    "cp": 58416,
+    "name": "ICON_WD_RADIO_BUTTON"
+  },
+  "TC": {
+    "cp": 58417,
+    "name": "ICON_WD_BUTTON"
+  },
+  "TD": {
+    "cp": 58418,
+    "name": "ICON_WD_TEXT_VIEW"
+  },
+  "TE": {
+    "cp": 58419,
+    "name": "ICON_WD_TEXT_EDIT"
+  },
+  "TF": {
+    "cp": 58420,
+    "name": "ICON_WD_TOOLBAR"
+  },
+  "TG": {
+    "cp": 58421,
+    "name": "ICON_WD_TABSTRIP"
+  },
+  "TH": {
+    "cp": 58422,
+    "name": "ICON_WD_TAB"
+  },
+  "TI": {
+    "cp": 58423,
+    "name": "ICON_WD_GROUP"
+  },
+  "TJ": {
+    "cp": 58424,
+    "name": "ICON_WD_TRAY"
+  },
+  "TK": {
+    "cp": 58425,
+    "name": "ICON_WD_TRANSPARENT_CONTAINER"
+  },
+  "TL": {
+    "cp": 58426,
+    "name": "ICON_WD_SCROLL_CONTAINER"
+  },
+  "TN": {
+    "cp": 58427,
+    "name": "ICON_WD_NAVLINK_BIDIRECTIONAL"
+  },
+  "TP": {
+    "cp": 58428,
+    "name": "ICON_WD_NAVLINK_IN"
+  },
+  "TQ": {
+    "cp": 58429,
+    "name": "ICON_WD_CONTROLLER"
+  },
+  "TS": {
+    "cp": 58430,
+    "name": "ICON_ERASE"
+  },
+  "TT": {
+    "cp": 58431,
+    "name": "ICON_RETAIL_PRODUCT"
+  },
+  "TU": {
+    "cp": 58432,
+    "name": "ICON_RETAIL_STORE"
+  },
+  "TV": {
+    "cp": 58433,
+    "name": "ICON_HANDLING_UNIT"
+  },
+  "TW": {
+    "cp": 58434,
+    "name": "ICON_BW_DM"
+  },
+  "TX": {
+    "cp": 58435,
+    "name": "ICON_BW_APD_VISUALIZATION"
+  },
+  "TY": {
+    "cp": 58436,
+    "name": "ICON_BW_APD_TARGET"
+  },
+  "TZ": {
+    "cp": 58437,
+    "name": "ICON_BW_APD_TRANSFORMATION"
+  },
+  "U0": {
+    "cp": 58438,
+    "name": "ICON_BW_APD_SOURCE"
+  },
+  "U1": {
+    "cp": 58439,
+    "name": "ICON_BW_APD_COLUMN_TO_ROW"
+  },
+  "U2": {
+    "cp": 58440,
+    "name": "ICON_BW_APD_ROW_TO_COLUMN"
+  },
+  "U3": {
+    "cp": 58441,
+    "name": "ICON_BW_APD_DB"
+  },
+  "U4": {
+    "cp": 58442,
+    "name": "ICON_BW_APD"
+  },
+  "U5": {
+    "cp": 58443,
+    "name": "ICON_BW_DM_3RD"
+  },
+  "U6": {
+    "cp": 58444,
+    "name": "ICON_BW_DM_WST"
+  },
+  "U7": {
+    "cp": 58445,
+    "name": "ICON_BW_APD_REGRESSION"
+  },
+  "U8": {
+    "cp": 58446,
+    "name": "ICON_BW_DM_CLUS"
+  },
+  "U9": {
+    "cp": 58447,
+    "name": "ICON_BW_DM_AA"
+  },
+  "UA": {
+    "cp": 58448,
+    "name": "ICON_BW_DM_DT"
+  },
+  "UB": {
+    "cp": 58449,
+    "name": "ICON_BW_CONVERT_UNIT"
+  },
+  "UC": {
+    "cp": 58450,
+    "name": "ICON_BW_PLANNING_LAYER"
+  },
+  "UD": {
+    "cp": 58451,
+    "name": "ICON_BW_PLANNING_LAYER_INA"
+  },
+  "UE": {
+    "cp": 58452,
+    "name": "ICON_BW_OPEN_HUB_DESTINATION"
+  },
+  "UF": {
+    "cp": 58453,
+    "name": "ICON_BW_ROTATE_RIGHT"
+  },
+  "UG": {
+    "cp": 58454,
+    "name": "ICON_BW_ROTATE_LEFT"
+  },
+  "UH": {
+    "cp": 58455,
+    "name": "ICON_VIEW_FORM"
+  },
+  "UI": {
+    "cp": 58456,
+    "name": "ICON_VIEW_LIST"
+  },
+  "UJ": {
+    "cp": 58457,
+    "name": "ICON_MEDIUM"
+  },
+  "UK": {
+    "cp": 58458,
+    "name": "ICON_VIEW_MAXIMIZE"
+  },
+  "UL": {
+    "cp": 58459,
+    "name": "ICON_VIEW_EXPAND_VERTICAL"
+  },
+  "UM": {
+    "cp": 58460,
+    "name": "ICON_VIEW_EXPAND_HORIZONTAL"
+  },
+  "UN": {
+    "cp": 58461,
+    "name": "ICON_VIEW_REFRESH"
+  },
+  "UO": {
+    "cp": 58462,
+    "name": "ICON_VIEW_CREATE"
+  },
+  "UP": {
+    "cp": 58463,
+    "name": "ICON_VIEW_CLOSE"
+  },
+  "UQ": {
+    "cp": 58464,
+    "name": "ICON_VIEW_SWITCH"
+  },
+  "US": {
+    "cp": 58465,
+    "name": "ICON_WD_CUSTOM_CONTROLLER"
+  },
+  "UU": {
+    "cp": 58466,
+    "name": "ICON_WD_INPUT_MODEL_ATT"
+  },
+  "UV": {
+    "cp": 58467,
+    "name": "ICON_WD_INPUT_MODEL_NODE"
+  },
+  "UW": {
+    "cp": 58468,
+    "name": "ICON_WD_INPUT_VAL_ATT"
+  },
+  "UX": {
+    "cp": 58469,
+    "name": "ICON_WD_INPUT_VAL_NODE"
+  },
+  "UY": {
+    "cp": 58470,
+    "name": "ICON_WD_MAPPED_INPUT_MODEL_ATT"
+  },
+  "UZ": {
+    "cp": 58471,
+    "name": "ICON_WD_MAPPED_INPUT_MODEL_NOD"
+  },
+  "V0": {
+    "cp": 58472,
+    "name": "ICON_WD_MAPPED_INPUT_VAL_ATT"
+  },
+  "V1": {
+    "cp": 58473,
+    "name": "ICON_WD_MAPPED_INPUT_VAL_NODE"
+  },
+  "V2": {
+    "cp": 58474,
+    "name": "ICON_WD_COMPONENT_CTRL"
+  },
+  "V3": {
+    "cp": 58475,
+    "name": "ICON_WD_COMPONENT_CTRL_USAGE"
+  },
+  "V4": {
+    "cp": 58476,
+    "name": "ICON_WD_COMPONENT_IF_CTRL"
+  },
+  "V5": {
+    "cp": 58477,
+    "name": "ICON_COMPONENT_IF_DEF"
+  },
+  "V6": {
+    "cp": 58478,
+    "name": "ICON_COMPONENT_IF_DEFS"
+  },
+  "V7": {
+    "cp": 58479,
+    "name": "ICON_WD_COMPONENT_USAGE"
+  },
+  "V8": {
+    "cp": 58480,
+    "name": "ICON_WD_COMPONENT_USAGES"
+  },
+  "VF": {
+    "cp": 58481,
+    "name": "ICON_ES_REPOSITORY"
+  },
+  "VJ": {
+    "cp": 58482,
+    "name": "ICON_VALUE_HELP"
+  },
+  "VK": {
+    "cp": 58483,
+    "name": "ICON_BW_DTP_ACTIVE"
+  },
+  "VL": {
+    "cp": 58484,
+    "name": "ICON_BW_DTP_INACTIVE"
+  },
+  "VM": {
+    "cp": 58485,
+    "name": "ICON_BW_OPEN_HUB_INACTIVE"
+  },
+  "VN": {
+    "cp": 58486,
+    "name": "ICON_OO_INTERFACE_MSGTP"
+  },
+  "VO": {
+    "cp": 58487,
+    "name": "ICON_OO_INTERFACE_FAULT_MSGTP"
+  },
+  "VP": {
+    "cp": 58488,
+    "name": "ICON_SEGMENTED_DATA_ACT"
+  },
+  "VQ": {
+    "cp": 58489,
+    "name": "ICON_SEGMENTED_DATA_INA"
+  },
+  "VR": {
+    "cp": 58490,
+    "name": "ICON_BIW_VIRTUAL_INFO_PROVIDER"
+  },
+  "VS": {
+    "cp": 58491,
+    "name": "ICON_BIW_VIRTUAL_INFO_PROV_INA"
+  },
+  "VT": {
+    "cp": 58492,
+    "name": "ICON_ALL_GREEN"
+  },
+  "VU": {
+    "cp": 58493,
+    "name": "ICON_BW_SOURCE_SYS_UDC"
+  },
+  "VV": {
+    "cp": 58494,
+    "name": "ICON_AGENT"
+  },
+  "VW": {
+    "cp": 58495,
+    "name": "ICON_BIW_INFO_SOURCE_INA"
+  },
+  "W0": {
+    "cp": 58496,
+    "name": "ICON_MESSAGE_TYPE"
+  },
+  "W1": {
+    "cp": 58497,
+    "name": "ICON_MESSAGE_FAULTY"
+  },
+  "W2": {
+    "cp": 58498,
+    "name": "ICON_BUSINAV_OBJECTS_UPTODATE"
+  },
+  "W3": {
+    "cp": 58499,
+    "name": "ICON_BUSINAV_OBJECTS_OUTDATE"
+  },
+  "W4": {
+    "cp": 58500,
+    "name": "ICON_BUSINAV_OBJECTS_ORPHAN"
+  },
+  "W5": {
+    "cp": 58501,
+    "name": "ICON_CLOSED_FOLDER_UPTODATE"
+  },
+  "W6": {
+    "cp": 58502,
+    "name": "ICON_CLOSED_FOLDER_OUTDATE"
+  },
+  "W7": {
+    "cp": 58503,
+    "name": "ICON_CLOSED_FOLDER_ORPHANED"
+  },
+  "W8": {
+    "cp": 58504,
+    "name": "ICON_MESSAGE_UPTODATE"
+  },
+  "W9": {
+    "cp": 58505,
+    "name": "ICON_MESSAGE_OUTOFDATE"
+  },
+  "WA": {
+    "cp": 58506,
+    "name": "ICON_MESSAGE_ORPHANED"
+  },
+  "WB": {
+    "cp": 58507,
+    "name": "ICON_MESSAGE_FAULTY_UPTODATE"
+  },
+  "WC": {
+    "cp": 58508,
+    "name": "ICON_MESSAGE_FAULTY_OUTDATE"
+  },
+  "WD": {
+    "cp": 58509,
+    "name": "ICON_MESSAGE_FAULTY_ORPHAN"
+  },
+  "WE": {
+    "cp": 58510,
+    "name": "ICON_OO_INTERFACE_UPTODATE"
+  },
+  "WF": {
+    "cp": 58511,
+    "name": "ICON_OO_INTERFACE_OUTDATE"
+  },
+  "WG": {
+    "cp": 58512,
+    "name": "ICON_OO_INTERFACE_ORPHAN"
+  },
+  "WH": {
+    "cp": 58513,
+    "name": "ICON_DATATYPES_UPTODATE"
+  },
+  "WI": {
+    "cp": 58514,
+    "name": "ICON_DATATYPES_OUTDATE"
+  },
+  "WJ": {
+    "cp": 58515,
+    "name": "ICON_DATATYPES_ORPHAN"
+  },
+  "WK": {
+    "cp": 58516,
+    "name": "ICON_DATATYPES_ENH_UPTODATE"
+  },
+  "WL": {
+    "cp": 58517,
+    "name": "ICON_DATATYPES_ENH_OUTDATE"
+  },
+  "WM": {
+    "cp": 58518,
+    "name": "ICON_DATATYPES_ENH_ORPHAN"
+  },
+  "WN": {
+    "cp": 58519,
+    "name": "ICON_AGENT_UPTODATE"
+  },
+  "WO": {
+    "cp": 58520,
+    "name": "ICON_AGENT_OUTDATE"
+  },
+  "WP": {
+    "cp": 58521,
+    "name": "ICON_AGENT_ORPHAN"
+  },
+  "WQ": {
+    "cp": 58522,
+    "name": "ICON_ENHANCED_BO"
+  },
+  "WR": {
+    "cp": 58523,
+    "name": "ICON_ENHANCED_BO_UPTODATE"
+  },
+  "WS": {
+    "cp": 58524,
+    "name": "ICON_ENHANCED_BO_OUTDATE"
+  },
+  "WT": {
+    "cp": 58525,
+    "name": "ICON_ENHANCED_BO_ORPHAN"
+  },
+  "WU": {
+    "cp": 58526,
+    "name": "ICON_STORES"
+  },
+  "WV": {
+    "cp": 58527,
+    "name": "ICON_WAREHOUSES"
+  },
+  "WY": {
+    "cp": 58528,
+    "name": "ICON_JOB_FAMILY"
+  },
+  "WZ": {
+    "cp": 58529,
+    "name": "ICON_INTELLECTUAL_PROPERTY"
+  },
+  "X0": {
+    "cp": 58530,
+    "name": "ICON_PROPRIETARY"
+  },
+  "X1": {
+    "cp": 58531,
+    "name": "ICON_INSTALL_PACKAGE"
+  },
+  "X2": {
+    "cp": 58532,
+    "name": "ICON_SAP_LOGON"
+  },
+  "X3": {
+    "cp": 58533,
+    "name": "ICON_SAP_SHORTCUT"
+  },
+  "X4": {
+    "cp": 58534,
+    "name": "ICON_SAP_GUI_SESSION"
+  },
+  "X5": {
+    "cp": 58535,
+    "name": "ICON_SAP_SERVER"
+  },
+  "X6": {
+    "cp": 58536,
+    "name": "ICON_SAP_LOGON_SERVER_SSO"
+  },
+  "X7": {
+    "cp": 58537,
+    "name": "ICON_SAP_LOGON_USERDEFINED"
+  },
+  "X8": {
+    "cp": 58538,
+    "name": "ICON_SAP_LOGON_USERDEFINED_SSO"
+  },
+  "X9": {
+    "cp": 58539,
+    "name": "ICON_SAP_LOGON_GROUP"
+  },
+  "XA": {
+    "cp": 58540,
+    "name": "ICON_SAP_LOGON_GROUP_SSO"
+  },
+  "XB": {
+    "cp": 58541,
+    "name": "ICON_SAP_LOGON_GROUP_USER"
+  },
+  "XD": {
+    "cp": 58542,
+    "name": "ICON_VIEW_TABLE"
+  },
+  "XE": {
+    "cp": 58543,
+    "name": "ICON_VIEW_HIER_LIST"
+  },
+  "XF": {
+    "cp": 58544,
+    "name": "ICON_VIEW_TREE"
+  },
+  "XG": {
+    "cp": 58545,
+    "name": "ICON_VIEW_THUMBNAILS"
+  },
+  "XH": {
+    "cp": 58546,
+    "name": "ICON_SAP_LOGON_GROUP_CERT"
+  },
+  "XI": {
+    "cp": 58547,
+    "name": "ICON_SAP_LOGON_GROUP_CERT_SSO"
+  },
+  "XJ": {
+    "cp": 58548,
+    "name": "ICON_SAP_LOGON_GROUP_CERT_USER"
+  },
+  "XK": {
+    "cp": 58549,
+    "name": "ICON_LOGON_GROUP_CERT_SSO_USR"
+  },
+  "XL": {
+    "cp": 58550,
+    "name": "ICON_SAP_LOGON_SRV_CERT"
+  },
+  "XM": {
+    "cp": 58551,
+    "name": "ICON_SAP_LOGON_SRV_CERT_SSO"
+  },
+  "XN": {
+    "cp": 58552,
+    "name": "ICON_SAP_LOGON_SRV_CERT_USER"
+  },
+  "XO": {
+    "cp": 58553,
+    "name": "ICON_LOGON_SRV_CERT_SSO_USER"
+  },
+  "XP": {
+    "cp": 58554,
+    "name": "ICON_MASS_CHANGE_DONE"
+  },
+  "XQ": {
+    "cp": 58555,
+    "name": "ICON_REMOVE_ROW"
+  },
+  "XR": {
+    "cp": 58556,
+    "name": "ICON_ADD_ROW"
+  },
+  "XS": {
+    "cp": 58557,
+    "name": "ICON_SAP_LOGON_GROUP_SSO_USR"
+  },
+  "XT": {
+    "cp": 58558,
+    "name": "ICON_APPLE_KEYNOTE"
+  },
+  "XU": {
+    "cp": 58559,
+    "name": "ICON_APPLE_NUMBERS"
+  },
+  "XV": {
+    "cp": 58560,
+    "name": "ICON_APPLE_PAGES"
+  },
+  "XW": {
+    "cp": 58561,
+    "name": "ICON_GOS_SERVICES"
+  },
+  "XX": {
+    "cp": 58562,
+    "name": "ICON_GOS_SERVICES_ATTACHMENT"
+  },
+  "XY": {
+    "cp": 58563,
+    "name": "ICON_GOS_SERVICES_RELATIONS"
+  },
+  "XZ": {
+    "cp": 58564,
+    "name": "ICON_GOS_SERVICES_ATT_REL"
+  },
+  "Y1": {
+    "cp": 58565,
+    "name": "ICON_CHARGE"
+  },
+  "Y3": {
+    "cp": 58566,
+    "name": "ICON_CLOUD"
+  },
+  "Y4": {
+    "cp": 58567,
+    "name": "ICON_CLOUD_DOWNLOAD"
+  },
+  "Y5": {
+    "cp": 58568,
+    "name": "ICON_CLOUD_UPLOAD"
+  },
+  "Y6": {
+    "cp": 58569,
+    "name": "ICON_SHOPPINGCART"
+  },
+  "Y8": {
+    "cp": 58570,
+    "name": "ICON_REMOVE_SHOPPINGCART"
+  },
+  "Y9": {
+    "cp": 58571,
+    "name": "ICON_DELETE_SHOPPINGCART"
+  },
+  "YB": {
+    "cp": 58572,
+    "name": "ICON_ALV_EXPAND"
+  },
+  "09": {
+    "cp": 57384,
+    "name": "ICON_YELLOW_LIGHT",
+    "alias_of": "08"
+  },
+  "0A": {
+    "cp": 57384,
+    "name": "ICON_RED_LIGHT",
+    "alias_of": "08"
+  },
+  "EB": {
+    "cp": 57453,
+    "name": "ICON_LIGHT_OUT",
+    "alias_of": "BZ"
+  },
+  "8N": {
+    "cp": 57443,
+    "name": "ICON_MESSAGE_CRITICAL_SMALL",
+    "alias_of": "1D"
+  },
+  "8P": {
+    "cp": 57440,
+    "name": "ICON_MESSAGE_INFORMATION_SMALL",
+    "alias_of": "19"
+  },
+  "8Q": {
+    "cp": 57442,
+    "name": "ICON_MESSAGE_QUESTION_SMALL",
+    "alias_of": "1C"
+  },
+  "8R": {
+    "cp": 57441,
+    "name": "ICON_MESSAGE_WARNING_SMALL",
+    "alias_of": "1A"
+  }
+}

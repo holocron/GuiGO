@@ -1,0 +1,497 @@
+import 'package:flutter/gestures.dart';
+import 'package:flutter/material.dart';
+
+/// One block of a converted HTML document: a heading, a paragraph, a list
+/// item or a table row, as styled runs.
+class HtmlBlock {
+  HtmlBlock(this.kind, this.runs, {this.level = 0});
+
+  /// 'h' (heading, [level] 1..6), 'p', 'li', 'tr', 'pre', 'frame' (a frame
+  /// whose document was not pushed).
+  final String kind;
+  final int level;
+  final List<HtmlRun> runs;
+
+  String get text => runs.map((r) => r.text).join();
+}
+
+/// A run of text with its inline style and, for an anchor, its target. A
+/// form control's run is drawn as a control ([control]); a button of a
+/// `SAPEVENT:` form (a dynamic document's `A1F2B3NAME:BT_SELECTDT`) carries
+/// its id in [button].
+class HtmlRun {
+  HtmlRun(
+    this.text, {
+    this.bold = false,
+    this.italic = false,
+    this.mono = false,
+    this.href,
+    this.button,
+    this.control = false,
+  });
+  final String text;
+  final bool bold, italic, mono;
+  final String? href;
+  final String? button;
+  final bool control;
+
+  /// A tap does something: a link, or a form button.
+  bool get tappable => href != null || button != null;
+
+  HtmlRun withText(String t) =>
+      HtmlRun(t, bold: bold, italic: italic, mono: mono, href: href, button: button, control: control);
+}
+
+/// HTML's collapsible whitespace (not U+00A0, which Dart's \s includes).
+final _htmlSpace = RegExp(r'[ \t\r\n\f]+');
+
+const _entities = {
+  'amp': '&', 'lt': '<', 'gt': '>', 'quot': '"', 'apos': "'", 'nbsp': '\u00A0',
+  'eacute': 'é', 'egrave': 'è', 'ecirc': 'ê', 'agrave': 'à', 'acirc': 'â',
+  'ccedil': 'ç', 'ocirc': 'ô', 'ucirc': 'û', 'ugrave': 'ù', 'icirc': 'î',
+  'iuml': 'ï', 'euml': 'ë', 'auml': 'ä', 'ouml': 'ö', 'uuml': 'ü', 'szlig': 'ß',
+  'Eacute': 'É', 'laquo': '«', 'raquo': '»', 'hellip': '…', 'ndash': '–',
+  'mdash': '—', 'rsquo': '’', 'lsquo': '‘', 'rdquo': '”', 'ldquo': '“',
+  'copy': '©', 'reg': '®', 'deg': '°', 'euro': '€', 'middot': '·', 'bull': '•',
+};
+
+String _decodeEntities(String s) => s.replaceAllMapped(
+      RegExp(r'&(#x[0-9a-fA-F]+|#\d+|[A-Za-z]+);'),
+      (m) {
+        final e = m.group(1)!;
+        if (e.startsWith('#x')) return String.fromCharCode(int.parse(e.substring(2), radix: 16));
+        if (e.startsWith('#')) return String.fromCharCode(int.parse(e.substring(1)));
+        return _entities[e] ?? m.group(0)!;
+      },
+    );
+
+final _attrRx = RegExp(r'''([A-Za-z_:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))''');
+
+/// A tag's attributes, names lower-cased, values entity-decoded and trimmed.
+Map<String, String> _attrs(String raw) => {
+      for (final a in _attrRx.allMatches(raw))
+        a.group(1)!.toLowerCase(): _decodeEntities(a.group(2) ?? a.group(3) ?? a.group(4) ?? '').trim(),
+      // a bare boolean attribute (`checked`, `selected`)
+      for (final b in RegExp(r'(?:^|\s)(checked|selected|disabled)(?=\s|/|$)', caseSensitive: false)
+          .allMatches(raw))
+        b.group(1)!.toLowerCase(): '',
+    };
+
+String? _nonEmpty(String? s) => s == null || s.isEmpty ? null : s;
+
+/// A readable label for a link without text: the last part of its target
+/// (`SAPEVENT:QUICKLINK?ID=USER_ACCESS` -> `USER_ACCESS`, `…/help.htm` ->
+/// `help.htm`).
+String hrefLabel(String href) {
+  final parts = href.split(RegExp(r'[/\\?:=&#]')).where((p) => p.trim().isNotEmpty).toList();
+  return parts.isEmpty ? href : parts.last.trim();
+}
+
+/// The `sapevent:` url an inline handler navigates to (`onclick=
+/// "location.href='SAPEVENT:X'"`), or null.
+String? _sapeventIn(String? js) =>
+    js == null ? null : RegExp(r'''sapevent:[^'"\s)]+''', caseSensitive: false).firstMatch(js)?.group(0);
+
+/// The SAP control name of a dynamic document control id
+/// (`A1F2B3NAME:BT_SELECTDT` -> `BT_SELECTDT`).
+String _controlName(String id) => id.substring(id.indexOf(':') + 1);
+
+/// Convert an HTML document (SAP's F1 documentation, a viewer page) into
+/// blocks of styled runs: scripts, styles, the head and `<!…>` markup (a
+/// dynamic document's `<!%_BODYSTART>`, SBWP's `<!MESSAGE!>`) dropped,
+/// block tags break paragraphs, b/strong/i/em/code/tt style runs, a href
+/// becomes a link run — labelled by its image's alt / title, else the last
+/// part of its target, when it has no text — and whitespace collapses
+/// outside <pre>. Form controls read as controls: a button (`<button>`, an
+/// input of type button / submit / image) is a run with its id
+/// ([HtmlRun.button]) and its form's SAPEVENT, labelled by its text, value,
+/// image alt or title; a text input shows its value, a check box / radio
+/// its state, a select its chosen option. A frame left in the page (its
+/// document was not pushed) is a 'frame' block naming its src.
+List<HtmlBlock> htmlToBlocks(String html) {
+  final s = html
+      .replaceAll(RegExp(r'<!--.*?-->', dotAll: true), '')
+      .replaceAll(
+          RegExp(r'<(script|style|head|title|noscript)\b.*?</\1\s*>', caseSensitive: false, dotAll: true), '')
+      .replaceAll(RegExp(r'<![^>]*>|<\?[^>]*>'), '');
+  final blocks = <HtmlBlock>[];
+  var runs = <HtmlRun>[];
+  var kind = 'p';
+  var level = 0;
+  var bold = 0, italic = 0, mono = 0, pre = 0;
+  String? href;
+  var anchorAt = -1; // the run index the open <a> started at
+  String? anchorLabel; // its image's alt / title, else its own title
+  String? formAction; // the open SAPEVENT form's action
+  // the open <button>: its id, its sapevent, its first run, its label
+  String? buttonId, buttonHref, buttonLabel;
+  var buttonAt = -1;
+  // the open <select>: its options (text, selected)
+  List<(String, bool)>? options;
+  var optionText = StringBuffer();
+  var optionSelected = false;
+  var inOption = false;
+
+  String runsText([int from = 0]) => runs.skip(from < 0 ? 0 : from).map((r) => r.text).join();
+
+  void flush() {
+    if (runsText().trim().isNotEmpty) {
+      // trim the block's outer whitespace, keep inner runs
+      while (runs.first.text.trim().isEmpty && !runs.first.control) {
+        runs.removeAt(0);
+      }
+      while (runs.last.text.trim().isEmpty && !runs.last.control) {
+        runs.removeLast();
+      }
+      runs[0] = runs[0].withText(runs[0].text.replaceFirst(RegExp(r'^[ \t\r\n\f]+'), ''));
+      final l = runs.length - 1;
+      runs[l] = runs[l].withText(runs[l].text.replaceFirst(RegExp(r'[ \t\r\n\f]+$'), ''));
+      blocks.add(HtmlBlock(kind, runs, level: level));
+    }
+    runs = <HtmlRun>[];
+    kind = 'p';
+    level = 0;
+    if (anchorAt >= 0) anchorAt = 0;
+    if (buttonAt >= 0) buttonAt = 0;
+  }
+
+  void gap() {
+    if (runsText().trim().isNotEmpty && !runs.last.text.endsWith(' ')) runs.add(HtmlRun(' '));
+  }
+
+  void control(String label, {String? button, String? link}) {
+    gap();
+    runs.add(HtmlRun(label, bold: bold > 0, href: link, button: button, control: true));
+    runs.add(HtmlRun(' '));
+  }
+
+  void text(String t) {
+    // collapsed whitespace after a control's own gap
+    if (pre == 0 && runs.isNotEmpty && runs.last.text.endsWith(' ')) t = t.replaceFirst(RegExp(r'^ +'), '');
+    if (t.isEmpty) return;
+    if (options != null) {
+      if (inOption) optionText.write(t);
+      return;
+    }
+    final inButton = buttonAt >= 0;
+    runs.add(HtmlRun(t,
+        bold: bold > 0 || kind == 'h',
+        italic: italic > 0,
+        mono: mono > 0 || pre > 0,
+        href: inButton ? buttonHref : href,
+        button: inButton ? buttonId : null,
+        control: inButton && t.trim().isNotEmpty));
+  }
+
+  void endOption() {
+    if (inOption) options?.add((optionText.toString().replaceAll(_htmlSpace, ' ').trim(), optionSelected));
+    inOption = false;
+    optionText = StringBuffer();
+  }
+
+  final tagRx = RegExp(r'<(/?)([A-Za-z][A-Za-z0-9]*)([^>]*)>');
+  var at = 0;
+  for (final m in tagRx.allMatches(s)) {
+    if (m.start > at) {
+      var t = _decodeEntities(s.substring(at, m.start));
+      if (pre == 0) t = t.replaceAll(_htmlSpace, ' ');
+      text(t);
+    }
+    at = m.end;
+    final closing = m.group(1) == '/';
+    final tag = m.group(2)!.toLowerCase();
+    final raw = m.group(3) ?? '';
+    switch (tag) {
+      case 'br':
+        runs.add(HtmlRun('\n'));
+      case 'p' || 'div' || 'table' || 'tbody' || 'ul' || 'ol' || 'blockquote' || 'center' || 'body' || 'html' ||
+            'form' || 'fieldset' || 'dl' || 'dt' || 'dd' || 'hr' || 'caption' || 'section' || 'article' ||
+            'nav' || 'header' || 'footer':
+        flush();
+        if (tag == 'form') {
+          final action = closing ? null : _attrs(raw)['action'];
+          formAction = action != null && action.toLowerCase().startsWith('sapevent:') ? action : null;
+        }
+      case 'h1' || 'h2' || 'h3' || 'h4' || 'h5' || 'h6':
+        flush();
+        if (!closing) {
+          kind = 'h';
+          level = int.parse(tag.substring(1));
+        }
+      case 'li':
+        flush();
+        if (!closing) kind = 'li';
+      case 'tr':
+        flush();
+        if (!closing) kind = 'tr';
+      case 'td' || 'th':
+        // a cell after a non-empty one: a gap (empty spacer cells add none)
+        if (!closing && runsText().trim().isNotEmpty && !runsText().endsWith('   ')) {
+          runs.add(HtmlRun('   '));
+        }
+        if (tag == 'th') closing ? bold-- : bold++;
+      case 'pre':
+        flush();
+        closing ? pre-- : pre++;
+        if (!closing) kind = 'pre';
+      case 'b' || 'strong':
+        closing ? bold-- : bold++;
+      case 'i' || 'em':
+        closing ? italic-- : italic++;
+      case 'code' || 'tt' || 'kbd' || 'samp':
+        closing ? mono-- : mono++;
+      case 'a':
+        if (closing) {
+          final h = href;
+          if (h != null && anchorAt >= 0 && runsText(anchorAt).trim().isEmpty) {
+            gap();
+            runs.add(HtmlRun(anchorLabel ?? hrefLabel(h), bold: bold > 0, href: h));
+          }
+          href = null;
+          anchorAt = -1;
+          anchorLabel = null;
+        } else {
+          final a = _attrs(raw);
+          href = _nonEmpty(a['href']) ?? _sapeventIn(a['onclick']);
+          anchorAt = runs.length;
+          anchorLabel = _nonEmpty(a['title']);
+        }
+      case 'img':
+        final a = _attrs(raw);
+        final label = _nonEmpty(a['alt']) ?? _nonEmpty(a['title']);
+        if (buttonAt >= 0) {
+          buttonLabel ??= label;
+        } else if (href != null && label != null) {
+          anchorLabel = label;
+        }
+      case 'area':
+        final a = _attrs(raw);
+        final h = _nonEmpty(a['href']);
+        if (h != null) control(_nonEmpty(a['alt']) ?? _nonEmpty(a['title']) ?? hrefLabel(h), link: h);
+      case 'button':
+        if (closing) {
+          if (buttonAt >= 0 && runsText(buttonAt).trim().isEmpty) {
+            final id = buttonId;
+            control(buttonLabel ?? (id == null ? 'Button' : _controlName(id)), button: id, link: buttonHref);
+          }
+          buttonAt = -1;
+          buttonId = buttonHref = buttonLabel = null;
+        } else {
+          final a = _attrs(raw);
+          buttonId = _nonEmpty(a['id']);
+          buttonHref = _sapeventIn(a['onclick']) ?? (buttonId == null ? null : formAction);
+          buttonLabel = _nonEmpty(a['title']);
+          gap();
+          buttonAt = runs.length;
+        }
+      case 'input':
+        final a = _attrs(raw);
+        final type = (a['type'] ?? 'text').toLowerCase();
+        final id = _nonEmpty(a['id']);
+        switch (type) {
+          case 'hidden':
+            break;
+          case 'button' || 'submit' || 'reset' || 'image':
+            final label = _nonEmpty(a['value']) ??
+                _nonEmpty(a['alt']) ??
+                _nonEmpty(a['title']) ??
+                _nonEmpty(a['name']) ??
+                (id == null ? type : _controlName(id));
+            control(label, button: id, link: _sapeventIn(a['onclick']) ?? (id == null ? null : formAction));
+          case 'checkbox':
+            control(a.containsKey('checked') ? '☑' : '☐');
+          case 'radio':
+            control(a.containsKey('checked') ? '◉' : '○');
+          case 'password':
+            control('[${'•' * (a['value'] ?? '').length}]');
+          default:
+            control('[${a['value'] ?? ''}]');
+        }
+      case 'select':
+        if (closing) {
+          endOption();
+          final o = options ?? const <(String, bool)>[];
+          options = null;
+          final chosen = o.where((x) => x.$2).firstOrNull ?? o.firstOrNull;
+          control('[${chosen?.$1 ?? ''} ▾]');
+        } else {
+          options = [];
+        }
+      case 'option':
+        endOption();
+        if (!closing && options != null) {
+          inOption = true;
+          optionSelected = _attrs(raw).containsKey('selected');
+        }
+      case 'frame' || 'iframe':
+        if (!closing) {
+          final src = _attrs(raw)['src'] ?? '';
+          flush();
+          blocks.add(HtmlBlock('frame', [HtmlRun('[frame: ${src.isEmpty ? '(no source)' : src}]', italic: true)]));
+        }
+      default:
+        break;
+    }
+    bold = bold.clamp(0, 99);
+    italic = italic.clamp(0, 99);
+    mono = mono.clamp(0, 99);
+    pre = pre.clamp(0, 99);
+  }
+  if (at < s.length) {
+    var t = _decodeEntities(s.substring(at));
+    if (pre == 0) t = t.replaceAll(_htmlSpace, ' ');
+    text(t);
+  }
+  flush();
+  return blocks;
+}
+
+/// An HTML viewer control's document as readable text: headings, paragraphs,
+/// list items, table rows, form controls; a link tap is reported through
+/// [onLink] (SAP's `sapevent:` links go back to the server as the viewer's
+/// event), a form button's through [onFormButton] with its id (the form's
+/// SAPEVENT submit), else — no [onFormButton] — through [onLink] with its
+/// form's action. A page without readable text shows its source.
+class SapHtmlView extends StatefulWidget {
+  const SapHtmlView({super.key, required this.html, this.onLink, this.onFormButton});
+
+  final String html;
+  final void Function(String href)? onLink;
+  final void Function(String buttonId)? onFormButton;
+
+  @override
+  State<SapHtmlView> createState() => _SapHtmlViewState();
+}
+
+class _SapHtmlViewState extends State<SapHtmlView> {
+  /// The document [_blocks] were parsed from: a rebuild of the same page
+  /// (every server turn rebuilds the screen) does not parse it again.
+  String? _parsed;
+  List<HtmlBlock> _blocks = const [];
+
+  /// One tap recognizer per tappable run of the current document, made on
+  /// first build and disposed with the document / the view. A tap reads
+  /// the CURRENT callbacks, so a recognizer outlives a busy toggle.
+  final Map<HtmlRun, TapGestureRecognizer> _taps = {};
+
+  List<HtmlBlock> _blocksOf(String html) {
+    if (!identical(html, _parsed) && html != _parsed) {
+      _disposeTaps();
+      _parsed = html;
+      _blocks = htmlToBlocks(html);
+    }
+    return _blocks;
+  }
+
+  void _disposeTaps() {
+    for (final t in _taps.values) {
+      t.dispose();
+    }
+    _taps.clear();
+  }
+
+  @override
+  void dispose() {
+    _disposeTaps();
+    super.dispose();
+  }
+
+  TapGestureRecognizer? _tapFor(HtmlRun r) {
+    final button = r.button, href = r.href;
+    final form = button != null && widget.onFormButton != null;
+    if (!form && !(href != null && widget.onLink != null)) return null;
+    return _taps.putIfAbsent(
+      r,
+      () => TapGestureRecognizer()
+        ..onTap = () {
+          // a form button goes to onFormButton when one is set, a link to
+          // onLink — as the run reads at tap time
+          final b = r.button, h = r.href;
+          if (b != null && widget.onFormButton != null) {
+            widget.onFormButton!(b);
+          } else if (h != null) {
+            widget.onLink?.call(h);
+          }
+        },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final html = widget.html;
+    final scheme = Theme.of(context).colorScheme;
+    final base = Theme.of(context).textTheme.bodyMedium ?? const TextStyle(fontSize: 14);
+    final blocks = _blocksOf(html);
+    if (blocks.isEmpty) return _source(context, base);
+    InlineSpan span(HtmlRun r, TextStyle style) {
+      var st = style.copyWith(
+        fontWeight: r.bold ? FontWeight.w600 : null,
+        fontStyle: r.italic ? FontStyle.italic : null,
+        fontFamily: r.mono ? 'Menlo' : null,
+      );
+      if (r.control) {
+        st = st.copyWith(
+          color: r.tappable ? scheme.onSecondaryContainer : scheme.onSurfaceVariant,
+          backgroundColor: r.tappable ? scheme.secondaryContainer : scheme.surfaceContainerHighest,
+          fontWeight: r.tappable ? FontWeight.w600 : null,
+        );
+      } else if (r.tappable) {
+        st = st.copyWith(color: scheme.primary, decoration: TextDecoration.underline);
+      }
+      return TextSpan(
+        text: r.control ? ' ${r.text.trim()} ' : r.text,
+        style: st,
+        recognizer: _tapFor(r),
+      );
+    }
+
+    Widget block(HtmlBlock b) => Padding(
+          padding: EdgeInsets.only(
+              top: b.kind == 'h' ? 10 : 2, bottom: b.kind == 'h' ? 4 : 6,
+              left: b.kind == 'li' ? 16 : 0),
+          child: Text.rich(
+            TextSpan(children: [
+              if (b.kind == 'li') const TextSpan(text: '•  '),
+              for (final r in b.runs)
+                if (!r.control || r.text.trim().isNotEmpty)
+                  span(
+                    r,
+                    b.kind == 'h'
+                        ? base.copyWith(
+                            fontSize: (base.fontSize ?? 14) + (7 - b.level.clamp(1, 6)) * 1.5,
+                            fontWeight: FontWeight.w600)
+                        : b.kind == 'frame'
+                            ? base.copyWith(color: scheme.onSurfaceVariant)
+                            : base,
+                  ),
+            ]),
+          ),
+        );
+
+    // the blocks built as they scroll into view (an F1 document runs to
+    // hundreds of blocks)
+    return SelectionArea(
+      child: ListView.builder(
+        padding: const EdgeInsets.all(12),
+        itemCount: blocks.length,
+        itemBuilder: (context, i) => block(blocks[i]),
+      ),
+    );
+  }
+
+  /// No readable text: what arrived, as source.
+  Widget _source(BuildContext context, TextStyle base) {
+    final html = widget.html;
+    final scheme = Theme.of(context).colorScheme;
+    if (html.trim().isEmpty) return const Center(child: Text('(empty document)'));
+    return ListView(
+      padding: const EdgeInsets.all(12),
+      children: [
+        Text('No readable text in this page. View source (${html.length} characters):',
+            style: base.copyWith(color: scheme.onSurfaceVariant, fontStyle: FontStyle.italic)),
+        const SizedBox(height: 8),
+        SelectableText(html, style: base.copyWith(fontFamily: 'Menlo', fontSize: (base.fontSize ?? 14) - 2)),
+      ],
+    );
+  }
+}

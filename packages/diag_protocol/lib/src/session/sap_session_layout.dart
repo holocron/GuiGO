@@ -1,0 +1,782 @@
+part of 'sap_session.dart';
+
+/// The window composition side of a [SapSession]: the control registry the
+/// layout reads (screen_layout.dart — a port of the reference client screenshot
+/// renderer's layout decisions), every live tree / grid by shell, and the
+/// current base window's [regions].
+extension SapSessionLayout on SapSession {
+  _LayoutState get _layoutState =>
+      _layoutStates[_w] ??= _LayoutState(_modes.home);
+
+  /// A new window keeps the session's layout knobs ([layoutRoundEnabled],
+  /// [dockFraction]); everything else of its layout starts fresh.
+  void _inheritLayoutKnobs(_WindowState from, _WindowState to) {
+    final f = _layoutStates[from];
+    if (f == null) return;
+    _layoutStates[to] = _LayoutState(_modes.home)
+      ..layoutRoundEnabled = f.layoutRoundEnabled
+      ..dockFraction = f.dockFraction;
+  }
+
+  int? get _actionStartStep => _layoutState.actionStartStep;
+  set _actionStartStep(int? v) => _layoutState.actionStartStep = v;
+  int? get _progSinceStep => _layoutState.progSinceStep;
+  set _progSinceStep(int? v) => _layoutState.progSinceStep = v;
+
+  bool _live(String shell) => !_ea.destroyedControls.contains(shell);
+
+  /// Whether [shell] was created in a LIVE internal mode that is not the
+  /// current one (imode_scope.dart [IModeScope.inOtherIMode], the jar's
+  /// `checkShellIModeContext` false; reference client shell_in_other_imode): the
+  /// control is HIDDEN but kept — its content, bindings and registry facts
+  /// stay, and it is on screen again when its imode is current again. The
+  /// real GUI's returns re-send nothing for it (a recorded session
+  /// srv_to_gui_scrubbed: SIMG's IMG tree 120, imode F, hidden under the
+  /// IMG activity's imode G at #24 and back at #33 with no CreateControl /
+  /// R3Table / SetDataFromUrl; the Easy Access menu, imode D, under SPRO /
+  /// SM59 / their nested ALV and back at #38 / #88).
+  bool shellInOtherIMode(String shell) {
+    final im = _layoutState.imodes;
+    if (im.inOtherIMode(shell)) return true;
+    final a = _ea.shellAlias[shell];
+    return a != null && a != shell && im.inOtherIMode(a);
+  }
+
+  /// Live AND of the current internal mode: the controls the screen on
+  /// display may show or address.
+  bool _onScreen(String shell) => _live(shell) && !shellInOtherIMode(shell);
+
+  /// The composition of the current base window (under a popup: of the
+  /// screen beneath it) — the dynpro area, the docked panes and their
+  /// hosted controls, the dynpro's custom-control regions with the reference client
+  /// ladder rung each resolves to. Empty before the first paint.
+  /// The base window's AREASIZE window (16/12/7: rows, cols) — the frame
+  /// [regions] are laid out in; it stays put while screens change inside
+  /// it. Null before the first paint that carries one.
+  (int, int)? get windowExtent => _layoutState.window;
+
+  List<ScreenRegion> get regions {
+    final s = (screen?.modalLevel ?? 0) > 0 ? baseScreen : screen;
+    if (s == null || s.program == null) return const [];
+    final st = _layoutState;
+    final tables = [
+      ..._layoutTables((_) => true),
+      // a designer canvas is drawn in its splitter cell like a table (the
+      // reference client's sapw_screenshot appends canvas_schematic_tables to
+      // grid_tables). Without it the canvas container's R7 placeholder
+      // named the ICDataFlow sibling (a recorded session srv[5]:
+      // CreateControl 122 ICDATAFLOW + 123 SAP.BWAdapter.1 in cell 120) —
+      // "control control, no content channel yet" — and the canvas, bound
+      // to 123, was never drawn (live the test system RSNPG_TEST_NETPLAN1, shell 124).
+      for (final c in canvases)
+        LayoutTable(c.shell, c.nodes.length, canvas: true),
+    ];
+    final composed = composeScreen(
+      st.registry,
+      LayoutInputs(
+        screen: s,
+        window: st.window,
+        area: st.area,
+        tables: tables,
+        chartShells: {for (final c in charts) c.shell},
+        graphShells: {
+          for (final g in netPlans)
+            if (g.shell case final sh?) sh,
+        },
+        contentShells: st.contentShells,
+        editorLines: _editorLines,
+        htmlShells: _htmlShells,
+        calendarShells: _calendarShells,
+        isLive: _onScreen,
+        sinceStep: st.baseSinceStep ?? _progSinceStep,
+        dockFraction: st.dockFraction,
+      ),
+    );
+    // then the CFW modal dialogs floating over it (the F1 Performance
+    // Assistant's toolbar + HTML viewer; sap_session_html.dart)
+    return [...composed, ..._cfwDialogRegions];
+  }
+
+  /// The composition of the active MODAL window (a popup: the ALV "Tri" /
+  /// "Filtre" dialogs, …) in POPUP-relative cells — the same frame its
+  /// [ScreenModel] fields use: its dynpro region (the popup's own 16/12/7
+  /// pair), then its custom-control regions with the grids / trees its
+  /// containers host (CONTAINER2_SORT -> 131 -> grid 132, …), the same
+  /// [ScreenRegion] kinds and rungs as [regions]. Only the controls the
+  /// popup's own generation created take part (minted at or after the
+  /// action that opened it — the covered window's docks and grids stay in
+  /// [regions]). Empty without a popup.
+  List<ScreenRegion> get modalRegions {
+    final s = screen;
+    if (s == null || s.modalLevel == 0 || s.program == null) return const [];
+    final st = _layoutState;
+    final since = st.modalSinceStep;
+    if (since == null) return const [];
+    final born = {for (final c in st.registry.created) c.shell: c.step};
+    bool mine(String sh) => _onScreen(sh) && (born[sh] ?? -1) >= since;
+    return composeScreen(
+      st.registry,
+      LayoutInputs(
+        screen: s,
+        window: st.modalWindow,
+        area: st.modalArea,
+        tables: _layoutTables(mine),
+        contentShells: st.contentShells.where(mine).toSet(),
+        editorLines: {
+          for (final e in _editorLines.entries)
+            if (mine(e.key)) e.key: e.value,
+        },
+        htmlShells: _htmlShells.where(mine).toSet(),
+        calendarShells: _calendarShells.where(mine).toSet(),
+        isLive: mine,
+        sinceStep: since,
+      ),
+    );
+  }
+
+  List<LayoutTable> _layoutTables(bool Function(String shell) keep) => [
+    for (final e in trees.entries)
+      if (keep(e.key)) LayoutTable(e.key, _visibleNodes(e.value), tree: true),
+    for (final e in grids.entries)
+      if (keep(e.key))
+        LayoutTable(
+          e.key,
+          e.value.rows.where((r) => r.any((c) => c.trim().isNotEmpty)).length,
+        ),
+  ];
+
+  /// After a fold: the step the BASE window's program generation began at
+  /// (a popup opening and closing over the same program keeps it — the
+  /// ALV grid linked at step 22 must outlive the "Tri" dialog) and the
+  /// step the active popup's generation began at.
+  void _noteGenerations() {
+    final st = _layoutState;
+    final b = baseScreen;
+    if (b?.program != null && b!.program != st.baseProgram) {
+      st
+        ..baseProgram = b.program
+        ..baseSinceStep = _actionStartStep ?? clockStep;
+    }
+    final s = screen;
+    final key = s != null && s.modalLevel > 0
+        ? '${s.modalLevel}:${s.program}/${s.dynpro}'
+        : null;
+    if (key != null && key != st.modalKey) {
+      st.modalSinceStep = _actionStartStep ?? clockStep;
+    }
+    st.modalKey = key;
+  }
+
+  /// Every live tree control's content by shell (the DBA cockpit's
+  /// navigation tree beside the dynpro, the Easy Access menu, …). A push
+  /// carrying a root node starts that tree afresh; a root-less push (a
+  /// folder expansion's children) extends it. [tree] keeps its meaning.
+  /// Only the current internal mode's trees are listed ([shellInOtherIMode]).
+  Map<String, SapTreeModel> get trees {
+    final st = _layoutState;
+    final byShell = <String, List<DpTable>>{};
+    String? fallback;
+    for (final c in _ea.createdControls.reversed) {
+      if (controlKind(c.cls) == 'tree' && _live(c.handle)) {
+        fallback = c.handle;
+        break;
+      }
+    }
+    for (final (url, t) in st.treeTables) {
+      final sh = st.treeUrlShell[url] ?? fallback;
+      if (sh == null) continue;
+      final list = byShell[sh] ??= [];
+      final isNodes = t.columns.contains('RELATKEY');
+      if (isNodes && t.rows.any((r) => (r['RELATKEY'] ?? '').isEmpty)) {
+        list.removeWhere((x) => x.columns.contains('RELATKEY'));
+      }
+      list.add(t);
+    }
+    // a tree of another live internal mode is hidden, its content kept
+    // (the Easy Access menu under a transaction, back on its return)
+    final memo = st.treeModels;
+    memo.removeWhere((sh, _) => !byShell.containsKey(sh));
+    return {
+      for (final e in byShell.entries)
+        if (_onScreen(e.key)) e.key: _treeModelOf(memo, e.key, e.value),
+    };
+  }
+
+  /// The model of [shell]'s [tables] — rebuilt only when its tables changed
+  /// (the same decoded tables give the same tree; audit #15: every read of
+  /// [trees] re-applied every push of every tree).
+  SapTreeModel _treeModelOf(
+    Map<String, (List<DpTable>, SapTreeModel)> memo,
+    String shell,
+    List<DpTable> tables,
+  ) {
+    final hit = memo[shell];
+    if (hit != null && _sameTables(hit.$1, tables)) return hit.$2;
+    final m = _treeOf(tables);
+    memo[shell] = (tables, m);
+    return m;
+  }
+
+  /// Every live grid control's content by shell, docked panes and
+  /// containers included ([grid] stays the full-screen dynpro's grid);
+  /// a grid of another live internal mode is hidden, its rows kept.
+  Map<String, SapGridModel> get grids => {
+    for (final e in _gridAsm.entries)
+      if (_onScreen(e.key)) e.key: e.value.build(),
+  };
+
+  /// Whether [shell]'s CreateControl parent chain reaches a docking
+  /// container (a docked pane's content: the ST04 message grid).
+  bool _inDockingPane(String shell) {
+    final reg = _layoutState.registry;
+    final classes = reg.classes();
+    var sh = shell;
+    for (var i = 0; i < 16; i++) {
+      if ((classes[sh] ?? '').toUpperCase().contains('DOCKING')) return true;
+      final p = reg.parents[sh];
+      if (p == null) return false;
+      sh = p;
+    }
+    return false;
+  }
+
+  void _noteTreeTable(String url, DpTable t) {
+    final st = _layoutState;
+    st.treeTables.add((url, t));
+    if (st.imodes.current case final u?) st.treeUrlIMode[url] = u;
+  }
+
+  /// The ABAP internal modes of the main window ([IModeScope]): the live
+  /// uuids (server order) and the current one — empty / null before a
+  /// frame carried 16/6/31.
+  List<String> get liveIModes => _layoutState.imodes.live;
+  String? get currentIMode => _layoutState.imodes.current;
+
+  /// The logon's own system (16/6/2 DBNAME, 16/6/3 CPUNAME, 16/6/12
+  /// CLIENT of its first frame naming one); null before that frame.
+  SystemIdentity? get homeSystem => _modes.home.identity;
+
+  /// The system the active window's latest frames were RELAYED from — an
+  /// RFC target painting its remote logon / progress frames over this
+  /// connection (imode_scope.dart) — null on the logon's own frames.
+  SystemIdentity? get relayedSystem => _w.onRelay ? _w.relayedFrom : null;
+
+  /// The step generation arithmetic runs on (reference client imode_scope
+  /// .clock_step): the wire [step], except while the active window sits on
+  /// frames relayed from another system — then the last HOME step. Replies
+  /// still echo [step].
+  int get clockStep => _w.onRelay ? _w.homeStep : step;
+
+  /// Per step-bearing frame (after [step] took its value): advance the
+  /// home clock, or hold it on a relayed frame.
+  void _noteClock(Uint8List f) {
+    final w = _w;
+    final relay = _relayFrames[f];
+    if (relay == null) {
+      if (w.onRelay) {
+        _trace(
+          'home system again at step $step (relay from '
+          '${w.relayedFrom} ended; the step clock resumes)',
+        );
+      }
+      w
+        ..homeStep = step
+        ..onRelay = false
+        ..relayedFrom = null
+        ..relayedWall = null;
+    } else {
+      if (!w.onRelay || w.relayedFrom?.sid != relay.sid) {
+        _trace(
+          'frame relayed from $relay at its step $step: the step '
+          'clock stays at home step ${w.homeStep}',
+        );
+      }
+      w
+        ..onRelay = true
+        ..relayedFrom = relay;
+    }
+    _frameClock[f] = clockStep;
+  }
+
+  /// The home-clock step [f] was folded at, else [wire].
+  int _clockOf(Uint8List f, int wire) => _frameClock[f] ?? wire;
+
+  /// Per received frame, before anything else folds it: the imode facts.
+  /// A uuid that leaves IMODEUUIDS2 is the frontend's `delIMode`
+  /// (imode_scope.dart): every control its generation created dies here,
+  /// locally — the real GUI gets no DestroyWindow for them. Leaving a
+  /// transaction (`/n`) ends its imode(s), so its docks, trees, grids and
+  /// dock requests go with it (reference client imode_scope.del_imodes, d888b68).
+  void _observeIModes(List<Uint8List> frames) {
+    final st = _layoutState;
+    for (final f in frames) {
+      // a materialized stream paint nests the paint's own imode list / step
+      if (isStreamCarrier(f)) continue;
+      final gone = st.imodes.observe(f);
+      if (st.imodes.lastFrameForeign) {
+        _relayFrames[f] = st.imodes.relayedFrom!;
+        continue;
+      }
+      // a frame of a window living on ANOTHER system (a remote-logon
+      // window): its own clock and imodes, but not this logon's wall
+      if (st.imodes.elsewhere case final sys?) _remoteWindowFrames[f] = sys;
+      if (gone.isEmpty) continue;
+      final dead = st.imodes.takeShellsOf(gone);
+      // a tree push that rode the dead imode is no tree content anymore
+      // (reference client del_imodes drops the tree memo)
+      final urls = {
+        for (final e in st.treeUrlIMode.entries)
+          if (gone.contains(e.value)) e.key,
+        for (final e in st.treeUrlShell.entries)
+          if (dead.contains(e.value)) e.key,
+      };
+      st.treeTables.removeWhere((t) => urls.contains(t.$1));
+      urls
+        ..forEach(st.treeUrlShell.remove)
+        ..forEach(st.treeUrlIMode.remove);
+      _ea.dpCache.evict(urls); // the pushes die with their imode
+      if (dead.isEmpty) continue;
+      for (final sh in dead) {
+        _ea.destroyedControls.add(sh);
+        if (_ea.shellAlias[sh] case final a? when a != sh) {
+          _ea.destroyedControls.add(a);
+        }
+        _gridAsm.remove(sh);
+      }
+      // …and so do the cached pushes of its controls; the registries stay
+      // bounded (audit #12)
+      _ea
+        ..evictDeadPushes()
+        ..capControlRegistry();
+      st.contentShells.removeAll(dead);
+      st.registry.forget(dead);
+      // the docks the last layout round reported are gone with them
+      st.reportedDocks = null;
+      int n(String sh) => int.tryParse(sh) ?? 0;
+      final sorted = dead.toList()..sort((a, b) => n(a).compareTo(n(b)));
+      _trace(
+        'imode ${[for (final u in gone) u.substring(0, 8)].join(', ')} '
+        'ended (delIMode): shells ${sorted.join(' ')} destroyed',
+      );
+    }
+  }
+
+  /// Whether the session sends the Windows GUI's `%_GS 0 3` layout round
+  /// after a paint whose waves docked or resized a container (default on;
+  /// see [_maybeLayoutRound]).
+  bool get layoutRoundEnabled => _layoutState.layoutRoundEnabled;
+
+  /// The share of the window width a lone left/right docking pane takes
+  /// when the server's first paint lays out only a provisional area: the
+  /// pane WE draw, reported in the layout round so the server re-lays out
+  /// to it. Default = the operator's remembered sash of
+  /// a recorded session gui[15] (16/12/8: area 1141 of a
+  /// 1880 px window -> dock 739 / 1880; the same extent its CONTROLS report
+  /// gives as 135 300 = 845 of a 2163-unit window). null = a fresh profile:
+  /// the dock realizes the server's latest request (1360 / 8 px per col).
+  double? get dockFraction => _layoutState.dockFraction;
+  set dockFraction(double? v) => _layoutState.dockFraction = v;
+  set layoutRoundEnabled(bool v) => _layoutState.layoutRoundEnabled = v;
+
+  /// The real Windows GUI reports the layout it realized for a docked
+  /// screen in its own `%_GS 0 3` round right after the paint
+  /// (a recorded session gui[15], step 37 after the
+  /// DB50/0100 paint srv[23]); the server answers the queue it owes
+  /// (srv[24], RegisterEvent) and repaints with the AREASIZE re-laid out
+  /// to the reported area (srv[25]: 34 x 163 of 38 x 268). Sent once per
+  /// change of the docking containers' requested extents, on the main
+  /// window, Windows dialect only. The reported extents are what [regions]
+  /// draws: a dock realizes the server's latest request (the fresh-profile
+  /// rule, screen_layout._dockedBoxes), the area is the rest of the window,
+  /// scaled to the same 16/12/8 window pixels every other round carries.
+  ///
+  /// Owed only after a wave that [painted] (reference client raw_settle
+  /// ._emit_render_trigger, Windows profile, 37e6240) and only when the area
+  /// we draw departs from the painted one — after a paint whose area
+  /// already reflects the docks' latest requests nothing is sent
+  /// (a recorded session: the next client frame is the
+  /// user's own F4), and no Java "control-ready" trigger frame either (the
+  /// session has none).
+  Future<void> _maybeLayoutRound({bool painted = true}) async {
+    final st = _layoutState;
+    void skip(String why) => _trace('layout round skipped: $why');
+    if (!st.layoutRoundEnabled) return skip('disabled');
+    if (answerDialect != GuiDialect.windows) return skip('not Windows');
+    if (!painted) return skip('the wave has not painted');
+    final s = screen;
+    final scroll = st.scrollInfos2;
+    if (s == null || s.program == null) return skip('no paint');
+    if (s.modalLevel > 0) return skip('a popup is up');
+    if (scroll == null) return skip('no SCROLL_INFOS2 painted');
+    final reg = st.registry;
+    final latest = <String, String>{};
+    for (final c in reg.created) {
+      latest[c.shell] = c.cls;
+    }
+    // a HIDDEN dock (SetProperty 290 = 0, ControlRegistry.hidden) takes
+    // no window space and owes no report: SM12's server-administration
+    // dock 130 (a recorded session srv[114]) — the real GUI sends no
+    // `%_GS 0 3` after the paint (srv[115]); it is reported, under its
+    // `…:1` signature, once the toolbar button shows it
+    final docks = [
+      for (final e in latest.entries)
+        if (e.value.toUpperCase().contains('DOCKING') &&
+            _onScreen(e.key) &&
+            !reg.hidden(e.key))
+          e.key,
+    ];
+    if (docks.isEmpty) {
+      st.reportedDocks = null; // the docks a round reported are gone
+      return skip('no docking container shown');
+    }
+    final sig = [
+      for (final d in docks)
+        [
+          d,
+          for (final p in const ['470', '300', '120', '290'])
+            reg.props[d]?[p] ?? '',
+        ].join(':'),
+    ].join(';');
+    if (sig == st.reportedDocks) {
+      return skip('already reported for these dock requests ($sig)');
+    }
+
+    // owed only when the area we draw is not the server's AREASIZE area:
+    // the DB50 overview paints a provisional 34 x 262 (6 cols = the dock's
+    // first request, 50 px) — the real GUI reports (gui[15]); the netplan
+    // test's paint already lays out area 243 = 268 - 200 / 8 and the real
+    // GUI sends no round (a recorded session srv[11] -> gui[8])
+    final regs = regions;
+    final dyn = regs.where((r) => r.kind == 'dynpro').firstOrNull;
+    final a = st.area;
+    if (dyn == null || a == null) return skip('no AREASIZE painted');
+    if (dyn.rect.rows == a.$1 && dyn.rect.cols == a.$2) {
+      return skip(
+        'the server area ${a.$1}x${a.$2} is the one we draw (docks $sig)',
+      );
+    }
+    st.reportedDocks = sig;
+    final w0 = st.window;
+    if (w0 != null) {
+      // the pair at the report: a later different one is the re-layout
+      for (final d in docks) {
+        final side = reg.props[d]?['470'];
+        if (side == '1' || side == '2') reg.reportedDelta[d] = w0.$2 - a.$2;
+      }
+    }
+    final winPx = (ctx.winPxHeight, ctx.winPxWidth);
+    var areaPx = winPx;
+    final w = st.window;
+    if (w != null && w.$1 > 0 && w.$2 > 0) {
+      areaPx = (
+        (winPx.$1 * dyn.rect.rows / w.$1).round(),
+        (winPx.$2 * dyn.rect.cols / w.$2).round(),
+      );
+      // a pane we realize by dockFraction: area = window px - dock px
+      final f = st.dockFraction;
+      if (f != null && w.$2 - dyn.rect.cols == (f * w.$2).round()) {
+        areaPx = (areaPx.$1, winPx.$2 - (winPx.$2 * f).round());
+      }
+    }
+    final xml = windowsControlsXml(_controlsReport(s, dyn.rect, w));
+    _trace(
+      'layout round sent: window ${winPx.$1}x${winPx.$2} px, area '
+      '${areaPx.$1}x${areaPx.$2} px (${dyn.rect.rows.toInt()}x'
+      '${dyn.rect.cols.toInt()} cells; the server painted '
+      '${a.$1}x${a.$2} of ${w0?.$1}x${w0?.$2}), docks $sig, step $step',
+    );
+    var items = windowsLayoutRoundItems(
+      ctx,
+      windowPx: winPx,
+      areaPx: areaPx,
+      scrollInfos2: scroll,
+      xml: xml,
+    );
+    // the first round in a new window carries the window atoms, whatever
+    // the round (sap_session_windows.dart _WindowState.firstRoundOwed)
+    items = _withFirstRound(items);
+    await _send(clientFrame(items));
+    // the reply: the queue the round releases, then the re-laid-out paint
+    for (var i = 0; i < 60; i++) {
+      final List<Uint8List> got;
+      try {
+        got = await recvTurn(
+          timeout: Duration(seconds: i == 0 ? (offlineReplay ? 2 : 30) : 10),
+        );
+      } on TimeoutException {
+        if (i == 0) _trace('layout round: no reply');
+        break;
+      }
+      final sent = await _driveAutomation(got);
+      if (sent == 0 && _paintsScreen(got)) break;
+    }
+    await _drainPending();
+  }
+
+  /// The item-17 CONTROLS report of the layout round: per shell (numeric
+  /// order, as gui[15]) the first-visible cell of a grid that registered
+  /// FirstVisibleRow (FVCID/FVRID 1/1 with rows, 0/0 without — gui[15]
+  /// 118 / 180), and every registered size prop (120 height / 300 width)
+  /// the server did NOT set itself (a fresh profile realizes a requested
+  /// extent exactly and reports nothing for it — sameuser gui[44] dock 137
+  /// reports 120 alone; gui[15]'s 135 300 = 845 is the operator's
+  /// remembered sash, not a fresh value). Values in the session's own
+  /// METRICS (X2 8 / Y2 29, the reference client's ea_controlxml model): a dynpro
+  /// area container cols x 8 / rows x 13.64; a side dock's height its pane
+  /// rows x 13 + 17; a top/bottom dock's width the window cols x 8.
+  List<ControlReport> _controlsReport(
+    ScreenModel s,
+    CellRect area,
+    (int, int)? window,
+  ) {
+    final reg = _layoutState.registry;
+    final kinds = reg.kinds();
+    final classes = reg.classes();
+    final linked = <String, ScreenContainer>{};
+    reg.areaLinks.forEach((name, link) {
+      final g = s.containers[name];
+      if (g != null && _onScreen(link.$1)) linked[link.$1] = g;
+    });
+    final out = <ControlReport>[];
+    final shells = reg.cachedProps.keys.where(_onScreen).toList()
+      ..sort((a, b) => (int.tryParse(a) ?? 0).compareTo(int.tryParse(b) ?? 0));
+    for (final sh in shells) {
+      final props = reg.cachedProps[sh]!;
+      (int, int)? generic;
+      if (kinds[sh] == 'grid' && props.contains('FirstVisibleRow')) {
+        final rows = grids[sh]?.rows.length ?? 0;
+        generic = rows > 0 ? (1, 1) : (0, 0);
+      }
+      final set = reg.props[sh] ?? const <String, String>{};
+      final docking = (classes[sh] ?? '').toUpperCase().contains('DOCKING');
+      // a hidden dock realizes no extent (see _maybeLayoutRound)
+      if (docking && reg.hidden(sh) && generic == null) continue;
+      final side = set['470'];
+      final values = <(String, String)>[];
+      for (final p in props) {
+        if (p != '120' && p != '300') continue;
+        // a side dock's width the server set but we realize differently
+        // (dockFraction): reported, like gui[15]'s 135 300 = 845
+        final f = _layoutState.dockFraction;
+        if (docking && p == '300' && (side == '1' || side == '2')) {
+          if (f != null && window != null) {
+            final v = (f * window.$2 * 8).round();
+            if ('$v' != set['300']) values.add((p, '$v'));
+          }
+          continue;
+        }
+        if (set.containsKey(p)) continue;
+        String? v;
+        final g = linked[sh];
+        if (g != null) {
+          v = areaContainerPx(g, p);
+        } else if (docking && set['290'] != '0') {
+          if ((side == '1' || side == '2') && p == '120') {
+            v = '${area.rows.toInt() * 13 + 17}';
+          } else if ((side == '3' || side == '4') && p == '300') {
+            v = '${(window?.$2 ?? area.cols.toInt()) * 8}';
+          }
+        }
+        if (v != null) values.add((p, v));
+      }
+      if (generic != null || values.isNotEmpty) {
+        out.add(ControlReport(sh, generic: generic, props: values));
+      }
+    }
+    return out;
+  }
+
+  /// The last AREASIZE (16/12/7) pairs of a turn: (window, area), per
+  /// window level — a popup's paint carries its own pair (the "Tri"
+  /// dialog: 16 x 79 under the grid's 40 x 268, live the test system step 35, its SES
+  /// byte 7 = 1); the base pair and SCROLL_INFOS2 come from level 0.
+  void _mirrorAreaPairs(List<Uint8List> frames) {
+    final st = _layoutState;
+    var level = 0;
+    for (final f in frames) {
+      final dec = decompressFrame(f);
+      if (dec == null) continue;
+      for (final it in dec.walk.items) {
+        if (it.type == itemSes && it.value.length >= 8) level = it.value[7];
+        if (!it.isAppl || it.id != 12) continue;
+        final v = it.value;
+        if (it.sid == 7 && v.length >= 16) {
+          final bd = ByteData.sublistView(v);
+          final w = (bd.getUint32(0), bd.getUint32(4));
+          final a = (bd.getUint32(8), bd.getUint32(12));
+          if (level == 0) {
+            st
+              ..window = w
+              ..area = a;
+          } else {
+            st
+              ..modalWindow = w
+              ..modalArea = a;
+          }
+        } else if (it.sid == 6 && v.length >= 33 && level == 0) {
+          st.scrollInfos2 = Uint8List.fromList(v);
+        }
+      }
+    }
+  }
+
+  /// Fold one answered flush call into the layout registry and bind its
+  /// tree pushes (AddR3Table / AddItemTable on a tree object) to the
+  /// tree's shell by the url the preceding SetDataFromUrl named.
+  void _foldLayoutCall(FlushCall call, int closingStep) {
+    final st = _layoutState;
+    final meta = verbMeta(call);
+    final verbs = [
+      for (var i = 1; i <= call.verbs.length; i++)
+        LayoutVerb(
+          call.verbs[i - 1],
+          verbNamedArgs(call, i),
+          i <= meta.length ? meta[i - 1].obj : '',
+          i <= meta.length ? meta[i - 1].objValue : '',
+          i <= meta.length ? (meta[i - 1].result ?? '') : '',
+        ),
+    ];
+    st.registry.foldCall(
+      verbs,
+      program: screen?.program,
+      step: closingStep,
+      shellOfHandle: (h) => _ea.shellAlias[h],
+      isLive: _live,
+    );
+    // every creation is stamped with the imode its frame rode, and a
+    // re-created shell id lives again — in wire order against the call's
+    // own DestroyWindow verbs (the frame-level fold misses a chunked call)
+    for (final v in verbs) {
+      final sh = (v.args['#1'] ?? '').trim();
+      if (!RegExp(r'^\d+$').hasMatch(sh)) continue;
+      if (v.verb.startsWith('CreateControl')) {
+        st.imodes.stamp(sh, step: closingStep);
+        _ea.destroyedControls.remove(sh);
+      } else if (v.verb == 'DestroyWindow') {
+        _ea.destroyedControls.add(sh);
+      }
+    }
+    for (final b in dpPushBindings(call)) {
+      if (b.shell case final sh?) st.contentShells.add(sh);
+    }
+    final rowShell = <String, String>{};
+    for (final v in verbs) {
+      final sh = (v.args['#1'] ?? '').trim();
+      if (v.verb.startsWith('CreateControl') && v.result.isNotEmpty) {
+        rowShell[v.result] = sh;
+      }
+    }
+    final kinds = st.registry.kinds();
+    String? url;
+    for (final v in verbs) {
+      if (v.verb == 'SetDataFromUrl') {
+        final u = (v.args['#3'] ?? '').trim();
+        if (u.startsWith('SAPR3://')) url = u;
+      } else if (_treeTableVerb.hasMatch(v.verb) && url != null) {
+        var sh = rowShell[v.obj.trim()];
+        final h = v.objValue.trim();
+        if (sh == null && h.isNotEmpty) {
+          sh = kinds[h] == 'tree' ? h : _ea.shellAlias[h];
+        }
+        if (sh != null && kinds[sh] == 'tree') st.treeUrlShell[url] = sh;
+        url = null;
+      }
+    }
+  }
+}
+
+final RegExp _treeTableVerb = RegExp(
+  r'^(?:Add|Update|Set|SetUpdate)(?:R3|Item)Table$',
+);
+
+bool _sameTables(List<DpTable> a, List<DpTable> b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (!identical(a[i], b[i])) return false;
+  }
+  return true;
+}
+
+int _visibleNodes(SapTreeModel m) =>
+    m.nodes.values.where((n) => !n.hidden).length;
+
+SapTreeModel _treeOf(List<DpTable> tables) {
+  final m = SapTreeModel();
+  for (final t in tables) {
+    m.apply(t);
+  }
+  return m;
+}
+
+class _LayoutState {
+  _LayoutState(HomeSystem home) : imodes = IModeScope(home: home);
+
+  final ControlRegistry registry = ControlRegistry();
+
+  /// the internal modes and each shell's (see _observeIModes)
+  final IModeScope imodes;
+
+  /// tree push url -> the imode it arrived in
+  final Map<String, String> treeUrlIMode = {};
+  int? actionStartStep;
+  int? progSinceStep;
+  (int, int)? window;
+  (int, int)? area;
+
+  /// the active popup's AREASIZE pair (see _mirrorAreaPairs)
+  (int, int)? modalWindow;
+  (int, int)? modalArea;
+
+  /// generation starts (see _noteGenerations)
+  String? baseProgram;
+  int? baseSinceStep;
+  String? modalKey;
+  int? modalSinceStep;
+  final Set<String> contentShells = {};
+  bool layoutRoundEnabled = true;
+  double? dockFraction = 739 / 1880;
+
+  /// the docking containers' requested extents last reported
+  String? reportedDocks;
+
+  /// the last server SCROLL_INFOS2 (16/12/6) value, echoed by the round
+  Uint8List? scrollInfos2;
+
+  /// (dp url, decoded tree table) in arrival order
+  final List<(String, DpTable)> treeTables = [];
+
+  /// tree push url -> the tree shell its Add*Table verb named
+  final Map<String, String> treeUrlShell = {};
+
+  /// tree shell -> the tables its last built model was applied from, and
+  /// that model ([SapSessionLayout.trees])
+  final Map<String, (List<DpTable>, SapTreeModel)> treeModels = {};
+}
+
+final Expando<_LayoutState> _layoutStates = Expando('layoutState');
+
+/// received frame -> the system it was relayed from (imode_scope.dart)
+final Expando<SystemIdentity> _relayFrames = Expando('relayFrames');
+
+/// Frames of a window that lives on another system than the logon's (the
+/// SM59 remote-logon window, [IModeScope.elsewhere]) — not relays (their
+/// step is the window's clock), but nothing this logon's wall answer reads.
+final Expando<SystemIdentity> _remoteWindowFrames = Expando(
+  'remoteWindowFrames',
+);
+
+/// received step-bearing frame -> the home-clock step it was folded at
+final Expando<int> _frameClock = Expando('frameClock');
+
+/// The cached size prop [prop] (120 height / 300 width) a container
+/// LinkContainer'd into the dynpro custom-control area [g] reports, in the
+/// session's own METRICS (X2 8 / Y2 29, the reference client's ea_controlxml model):
+/// cols x 8, rows x 13.64 — the layout round's CONTROLS report and the
+/// calendar pick's container block (a recorded session gui[6], where
+/// the real GUI's own metrics give 141 / 327 for the 12 x 40 area). Null
+/// for any other prop.
+String? areaContainerPx(ScreenContainer g, String prop) => switch (prop) {
+  '300' => '${g.width * 8}',
+  '120' => '${(g.height * 13.64 + 0.5).floor()}',
+  _ => null,
+};
