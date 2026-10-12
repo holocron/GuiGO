@@ -31,7 +31,7 @@ apps/guigo/android/key.properties
 *.p12
 *.cer
 
-# --- never public (see POLICY.md) ---
+# --- never public ---
 # tests and their recorded-session data
 **/test/
 **/integration_test/

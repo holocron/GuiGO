@@ -58,8 +58,7 @@ iOS needs Xcode; Android needs the Android SDK.
   travels compressed but in clear text. Connect through a VPN or a secured
   network path.
 
-See [SECURITY.md](SECURITY.md) to report a vulnerability and
-[POLICY.md](POLICY.md) for what may be contributed to this repository.
+See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## Disclaimer
 
