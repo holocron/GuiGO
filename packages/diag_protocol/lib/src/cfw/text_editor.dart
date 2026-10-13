@@ -115,6 +115,19 @@ class SapTextEditor {
   int? viewFirstLine;
   int? viewLastLine;
 
+  /// The line a `SetSelPosInLineCentered(l, c)` asked the control to
+  /// center, until the session resolved the scroll it implies (by the
+  /// view's capacity: SapSessionEditor) — null otherwise.
+  int? centerLine;
+
+  /// The height in rows of the dynpro custom-control area the control was
+  /// last painted in (SAPLS38E/0500's EDITOR: 37 rows in the 38-row window
+  /// of a recorded session), null before any paint
+  /// showed it. Kept while another screen is up: the control outlives its
+  /// screen (F3 back to SAPLWBABAP/0100, F7 reloads it) and keeps its size —
+  /// the reload's answer reports the view of that size (g[30]).
+  int? areaRows;
+
   /// The 1-based lines carrying a session breakpoint: the ABAP editor's
   /// marker 2, set by `SetMarker(2, ",<line>")`, cleared by
   /// `RemoveMarker(2, ",<line>")` / `RemoveAllMarker(2)` (live the test system,
@@ -132,6 +145,47 @@ class SapTextEditor {
   /// unrecorded: a recorded session is the Java GUI, whose source is
   /// the TC_SOURCE table control).
   final Map<int, Set<int>> markers = {};
+
+  /// The 1-based lines carrying a breakpoint of ANOTHER kind than the
+  /// session breakpoint ([breakpoints]): the breakpoint-family markers the
+  /// server resets before every rewrite (SE38 `RemoveAllMarker` 2, 5, 4,
+  /// 15; the debugger 10, 9, 3, 2, 5, 4 — a recorded session
+  /// whereused s[22], a recorded session s[50]) other than 2:
+  /// the external (user) breakpoint set by the toolbar's Ctrl+Shift+F9 —
+  /// kind 4 ([externalBreakpoints], a recorded session
+  /// marker) — or a disabled one. Drawn apart from the session dots; a
+  /// margin click on one is still the BorderClick the server decides on
+  /// (on an external dot it removes the external breakpoint).
+  Set<int> get otherBreakpoints => {
+    for (final k in ab4OtherBreakpointMarkers) ...?markers[k],
+  };
+
+  /// The 1-based lines carrying an EXTERNAL (user) breakpoint: the ABAP
+  /// editor's marker 4 ([ab4ExternalBreakpointMarker]), set by the
+  /// toolbar's @VB@ / Ctrl+Shift+F9 (`SetMarker(4, ",<line>")` — the server
+  /// picks the line and first clears a session marker there:
+  /// `RemoveMarker(2, ",1")`, `SetMarker(4, ",1")`), removed by the same
+  /// key or by a margin click on its dot (`RemoveMarker(4, ",1")`, no
+  /// session marker set in its place) — a recorded session
+  /// breakpoint_marker s[25] / s[28] / s[37] / s[39]. A subset of
+  /// [otherBreakpoints].
+  Set<int> get externalBreakpoints => {...?markers[ab4ExternalBreakpointMarker]};
+
+  /// The cached properties (FirstVisibleLine, LastVisibleLine, LineCount,
+  /// SelPos*) as the SERVER last holds them: the control's creation state
+  /// (all 1), then every value the client flushed — in a round or in a
+  /// flush's answer — or answered a read-back with, and the property the
+  /// server put itself (`FirstVisibleLine(=n)`). A method that moves one
+  /// (`SetSelectionPosInLine(l, c)`, a document load's LineCount) leaves it
+  /// owed: the flush's answer reports it (a recorded session
+  /// scrolled g[30] / g[32]). A round flushes only the props whose client
+  /// value differs (a recorded session g[26]: the margin click
+  /// after the creation carries LastVisibleLine 28 — the server's 1 is
+  /// stale — and not FirstVisibleLine, read back as 1; g[29]: none;
+  /// a recorded session g[31]: the scrolled view
+  /// 97 / 140 and the caret 92 / 35, LineCount not — its load's answer
+  /// reported it).
+  final Map<String, String> serverProps = Map.of(ab4InitialCachedProps);
 
   @override
   String toString() =>
@@ -154,6 +208,7 @@ const Set<String> _ab4Verbs = {
   'LoadDocFromDP',
   'SetCurrentDocReadOnly',
   'SetSelectionPosInLine',
+  'SetSelPosInLineCentered',
   'SetMarker',
   'RemoveMarker',
   'RemoveAllMarker',
@@ -162,6 +217,73 @@ const Set<String> _ab4Verbs = {
 
 /// The ABAP editor's session-breakpoint marker kind (`SetMarker(2, …)`).
 const int ab4BreakpointMarker = 2;
+
+/// The ABAP editor's EXTERNAL (user) breakpoint marker kind
+/// (`SetMarker(4, …)`: a recorded session).
+const int ab4ExternalBreakpointMarker = 4;
+
+/// The breakpoint-family marker kinds other than the session breakpoint
+/// ([SapTextEditor.otherBreakpoints]; 4 = the external one).
+const Set<int> ab4OtherBreakpointMarkers = {3, 4, 5, 9, 10};
+
+/// The view / caret cached props of a fresh ABAP editor control (its
+/// state before any flush: line 1, column 1) — [SapTextEditor.serverProps].
+const Map<String, String> ab4InitialCachedProps = {
+  'FirstVisibleLine': '1',
+  'LastVisibleLine': '1',
+  // the empty document's one line (the creation reply: a recorded session
+  // se38_breakpoint_scrolled g[10] `LineCount 1`); a load's answer reports
+  // the new count (g[23] 6, g[30] 1212)
+  'LineCount': '1',
+  'SelPosStartLine': '1',
+  'SelPosStartCol': '1',
+  'SelPosEndLine': '1',
+  'SelPosEndCol': '1',
+};
+
+/// The ABAP editor's cached props in the order sapab4edit.ocx flushes them
+/// (its property map's own order, not the registration order) — every
+/// Windows creation answer of the corpus (a recorded session
+/// scrolled g[10], a recorded session g[12] / g[41],
+/// a recorded session g[13], a recorded session g[27], …)
+/// and every later report a subsequence of it (g[24], g[30], g[31]).
+const List<String> ab4FlushOrder = [
+  'SelPosStartCol',
+  'FirstVisibleLine',
+  'LineCount',
+  'SelPosEndLine',
+  'LastVisibleLine',
+  'TextModified',
+  'SelPosStartLine',
+  'Version',
+  'SelPosEndCol',
+];
+
+/// How many lines a source view [viewportHeight] tall shows at
+/// [lineHeight] a line, from its top: the partly visible last line counted
+/// (at least 1). ONE formula for the session and the app: the ABAP
+/// editor's LastVisibleLine is `first + editorVisibleLines(...) - 1`
+/// (capped by the document), and GuiGo's SapSourceView reports exactly
+/// that as its last line (`ceil((offset + viewport) / lineHeight)`).
+int editorVisibleLines(double viewportHeight, double lineHeight) {
+  if (!(viewportHeight > 0) || !(lineHeight > 0)) return 1;
+  final n = (viewportHeight / lineHeight).ceil();
+  return n < 1 ? 1 : n;
+}
+
+/// The ABAP editor's line pitch in the kernel's window pixels (its 22 px
+/// cell row): the session's model of the real sapab4edit.ocx view when no
+/// app reports one — [editorVisibleLines] of the custom-control area's
+/// rows x 22 px. Fitted on every Windows capture that shows a full view:
+/// the 37-row SAPLS38E/0500 EDITOR area (814 px; its container reports
+/// 120 = 434) shows 44 lines (a recorded session
+/// g[30] / g[31] 97..140, a recorded session g[20] /
+/// g[21] 184..227, a recorded session g[29] / g[45] 151..194), a
+/// 34-row one (748 px; 120 = 399) 41 (token_whereused g[25], its _s4d
+/// g[19]), the debugger's 33-row source (726 px; 120 = 387) 40
+/// (a recorded session g[56] 10..49): ceil(px / pitch) gives all
+/// three for a pitch in [18.5, 18.61) px.
+const double ab4KernelLinePx = 18.55;
 
 /// The editor verbs whose on-object is the editor itself.
 const Set<String> _editorVerbs = {
@@ -373,6 +495,12 @@ class SapTextEditorTracker {
           e.viewLastLine = null;
           e.breakpoints.clear();
           e.markers.clear();
+          // [SapTextEditor.serverProps] stay: what the server last HEARD
+          // of the control, a new document or not — the debugger's switch
+          // to LBTCUTIL2U01 (CloseDoc / AddEmptyDoc / LoadDocFromDP /
+          // SetSelPosInLineCentered(29, 1)) is answered with SelPosStartCol
+          // 1, the server holding the 25 the F5 round sent
+          // (a recorded session g[55] / g[56])
         case 'LoadDocFromDP':
           // the DataProvider it loads from: by row, else the last url set
           final dpRow = (m.slots['#2'] ?? '').trim();
@@ -386,12 +514,28 @@ class SapTextEditorTracker {
         case 'SetCurrentDocReadOnly' || 'ReadOnly' || 'ReadOnlyMode':
           e.readOnly = _truthy(arg('#1'));
           text = false;
-        case 'SetSelectionPosInLine':
+        case 'SetSelectionPosInLine' || 'SetSelPosInLineCentered':
           e.cursorLine = int.tryParse(arg('#1').trim());
           e.cursorCol = int.tryParse((named['#2'] ?? '').trim());
+          if (verb == 'SetSelPosInLineCentered' && e.cursorLine != null) {
+            // the ABAP Debugger's current line (a recorded session
+            // debugger s[50] / s[66]): the control also SCROLLS to center
+            // it — by its own view's height, which the session resolves
+            // ([centerLine]); the reported view is stale
+            e.centerLine = e.cursorLine;
+            e.viewFirstLine = null;
+            e.viewLastLine = null;
+          }
           // the server's caret collapses the user's selection
           e.selEndLine = null;
           e.selEndCol = null;
+          // … and moves the control's cached SelPos* props: a METHOD the
+          // server cannot mirror, so the client reports the moved caret in
+          // this flush's answer ([SapTextEditor.serverProps] stays what the
+          // server last heard — a recorded session
+          // g[32]: SelPosStartCol 1, SelPosEnd/StartLine 136, SelPosEndCol
+          // 1 after SetSelectionPosInLine(136, 1); a recorded session
+          // debugger g[27])
           text = false;
         case 'FirstVisibleLine':
           // a put carries the line (`FirstVisibleLine(=295)`); a getter
@@ -404,6 +548,7 @@ class SapTextEditorTracker {
           if (n == null) continue;
           e.firstVisibleLine = n;
           e.firstVisibleLinePuts++;
+          e.serverProps['FirstVisibleLine'] = '$n';
           // the server scrolled the control: the reported view is stale
           e.viewFirstLine = null;
           e.viewLastLine = null;

@@ -421,6 +421,10 @@ class _SessionScreenState extends State<SessionScreen>
     // (a session from the factory learns it here: before the logon this
     // only sets the size the logon reports — no round)
     session.resizeWindow(rows, cols);
+    // the ABAP editor's view capacity: what the session's LastVisibleLine
+    // of a (re)loaded document is computed from before the view shows it
+    session.editorViewLines = (shell) =>
+        _editorViewLines[shell] ?? _editorRegionLines[shell];
     _trace = session.traceLog;
     _traceLen = -1;
     _traceLast = null;
@@ -1078,6 +1082,7 @@ class _SessionScreenState extends State<SessionScreen>
             onContextMenu: _screenMenu,
             onListPick: _listPick,
             onListCell: _stageListCell,
+            onListScroll: _listScroll,
             onDoubleClick: _doubleClick,
             model: base,
             busy: _busy || modalActive,
@@ -1305,6 +1310,13 @@ class _SessionScreenState extends State<SessionScreen>
   /// The least height a control pane lays out at; a shorter pane clips it.
   static const double _minPaneHeight = 72;
 
+  /// ABAP editor shell -> the lines its laid-out SapSourceView shows
+  /// ([SapSourceView.onViewLines]), and -> the lines the pane the composer
+  /// gives it would show ([SapSourceView.linesFitting] of its height): the
+  /// session's [SapSession.editorViewLines], the view's own count first.
+  final Map<String, int> _editorViewLines = {};
+  final Map<String, int> _editorRegionLines = {};
+
   /// The height a control toolbar's button row is drawn at (its 30-px
   /// buttons and the scroll bar's 6-px strip).
   static const double _controlRowHeight = 36;
@@ -1499,6 +1511,7 @@ class _SessionScreenState extends State<SessionScreen>
           onContextMenu: _screenMenu,
           onListPick: _listPick,
           onListCell: _stageListCell,
+          onListScroll: _listScroll,
           onDoubleClick: _doubleClick,
           model: base,
           busy: _busy || modal,
@@ -1539,6 +1552,7 @@ class _SessionScreenState extends State<SessionScreen>
     }
     final shell = r.shell;
     Widget? content;
+    String? editorShell; // the ABAP editor the pane shows
     // the generation's snapshot ([_viewOf]): every pane of a composed
     // window read every model afresh — each read rebuilds every tree and
     // grid of the session (audit #15)
@@ -1576,19 +1590,35 @@ class _SessionScreenState extends State<SessionScreen>
         );
       } else if (editor.isNotEmpty) {
         // the ABAP editor control (SE38 / SE80): the source with its
-        // breakpoints; a gutter tap toggles one (the session-breakpoint
-        // key with the editor cursor), a double tap navigates, the long
-        // press offers the where-used list
+        // breakpoints (the server's markers: a dot comes and goes with its
+        // SetMarker / RemoveMarker answer, never optimistically); a tap in
+        // the gutter — on a dot or not — is the editor's margin click
+        // (BorderClick: the server sets or removes the SESSION
+        // breakpoint), Ctrl+Shift+F12 the same toggle by key; a double
+        // tap navigates, the long press offers the where-used list. The
+        // external breakpoint is the toolbar's own button (Ctrl+Shift+F9),
+        // never a gutter gesture.
         final e = editor.first;
+        final ab4 = e.kind == 'ab4';
+        if (ab4) editorShell = e.shell;
         content = SapSourceView(
           key: ValueKey('editor-${e.shell}'),
           lines: e.lines,
           breakpoints: e.breakpoints,
+          otherBreakpoints: e.otherBreakpoints,
+          externalBreakpoints: e.externalBreakpoints,
           currentLine: e.cursorLine,
           firstVisibleLine: e.firstVisibleLine,
           scrollSerial: e.firstVisibleLinePuts,
-          onToggleBreakpoint: (line) =>
-              _run(() async => _session!.editorToggleBreakpoint(e, line)),
+          onToggleBreakpoint: !ab4
+              ? null
+              : (line) =>
+                    _run(() async => _session!.editorMarginClick(e, line)),
+          onBreakpointKey: !ab4
+              ? null
+              : (line) => _run(
+                  () async => _session!.editorToggleBreakpoint(e, line),
+                ),
           onNavigate: (line, col) =>
               _run(() async => _session!.editorNavigate(e, line, col)),
           onWhereUsed: (line, col) =>
@@ -1600,6 +1630,7 @@ class _SessionScreenState extends State<SessionScreen>
             firstVisibleLine: first,
             lastVisibleLine: last,
           ),
+          onViewLines: (n) => _editorViewLines[e.shell] = n,
           onCaret: (line, col) => _session?.setEditorClientState(
             e,
             caretLine: line,
@@ -1696,14 +1727,22 @@ class _SessionScreenState extends State<SessionScreen>
         // control row is drawn in its own height (_controlRow)
         builder: (context, cell) => ClipRect(
           child: LayoutBuilder(
-            builder: (context, cons) => controlRow
+            builder: (context, cons) {
+              // the ABAP editor's region, before its view lays out
+              if (editorShell != null && cons.maxHeight.isFinite) {
+                _editorRegionLines[editorShell] = SapSourceView.linesFitting(
+                  math.max(cons.maxHeight, _minPaneHeight),
+                );
+              }
+              return controlRow
                 ? _controlRow(c, cons, scaled: r.rung == 'TB')
                 : cons.maxHeight >= _minPaneHeight
                 ? c
                 : SingleChildScrollView(
                     physics: const NeverScrollableScrollPhysics(),
                     child: SizedBox(height: _minPaneHeight, child: c),
-                  ),
+                  );
+            },
           ),
         ),
       );
@@ -2212,6 +2251,11 @@ class _SessionScreenState extends State<SessionScreen>
   /// A classic list line tapped: the list's pick (F2 on its hotspot).
   Future<void> _listPick(ListLine line) =>
       _run(() async => _session!.pickValue(line));
+
+  /// A paged classic list scrolled past its page: the server's page at
+  /// [firstLine] (the real GUI's VSCROLL round; never while busy — [_run]).
+  Future<void> _listScroll(int firstLine) =>
+      _run(() async => _session!.scrollList(firstLine));
 
   /// A list input cell changed (a checkbox ticked): staged, it rides the
   /// list's next key round (F2 on a line, a function key).
@@ -2859,6 +2903,7 @@ class _SessionScreenState extends State<SessionScreen>
                   onContextMenu: _screenMenu,
                   onListPick: !wallPrompt ? _listPick : null,
                   onListCell: !wallPrompt ? _stageListCell : null,
+                  onListScroll: !wallPrompt ? _listScroll : null,
                   onDoubleClick: !wallPrompt ? _doubleClick : null,
                   model: m,
                   content: composedModal?.$1,

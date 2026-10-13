@@ -27,6 +27,7 @@ export 'src/session/grid_rows_request.dart';
 export 'src/session/grid_selection.dart';
 export 'src/session/imode_scope.dart';
 export 'src/session/layout_round.dart';
+export 'src/session/list_scroll.dart';
 export 'src/session/resize_round.dart';
 export 'src/session/login.dart';
 export 'src/session/logon_frames.dart';

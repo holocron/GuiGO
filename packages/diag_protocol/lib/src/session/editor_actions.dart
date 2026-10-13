@@ -10,7 +10,11 @@
 /// round as built (16/15/1 + the painted 16/9/11 field cursor), the
 /// live METRICS XML with the CONTROLS block appended (live the test system,
 /// a recorded session step 32: answered by
-/// `SetMarker(2, ",378")`, the breakpoint);
+/// `SetMarker(2, ",378")`, the breakpoint). The breakpoint keys now
+/// go out as the real GUI's bare key round in the editor with only
+/// the owed props ([editorFocusKeyItems]: a recorded session
+/// breakpoint_scrolled g[38], a recorded session
+/// marker g[20] / g[35]);
 /// - [EditorKeyFocus.editor]: the real GUI's key round with the focus
 /// IN the editor (a recorded session gui raw[152]: `9/18 =
 /// <editor shell>` in place of 16/15/1 + 16/9/11, a CONTROLS-only
@@ -26,7 +30,11 @@
 /// SelPosStartCol, then `SetSelectionPosInLine(300, 6)` +
 /// `FirstVisibleLine(=295)` — the jump to `form read_actual_par_values`).
 /// A TextEdit sends the -601 round alone (the reference client's Java oracle,
-/// a recorded session).
+/// a recorded session);
+/// * a click in the margin (the breakpoint gutter): the OCX event
+/// BorderClick `%_GC <editor> 18` (line, ctrl, shift) with only the
+/// changed cached props ([editorBorderClickItems]) — what the real GUI
+/// sends; the Ctrl+Shift+F12 key round above is its keyboard form.
 library;
 
 import 'dart:convert';
@@ -44,8 +52,24 @@ const int editorDoubleClickEvent = -601;
 /// text before the double-click (CL_GUI_SOURCEEDIT: EVENT_QUICK_INFO).
 const int ab4LineEvent = 12;
 
-/// Ctrl+Shift+F12: set / remove a session breakpoint at the cursor.
+/// The ABAP editor OCX event a click in its MARGIN fires:
+/// `BorderClick(nLine, bCtrlPressed, bShiftPressed)` (sapab4edit.ocx
+/// typelib `_DAB4R3EditorEvents`, dispid 18; a recorded session
+/// g[26] / g[29] in SE38, g[69] in the debugger). The server toggles the
+/// SESSION breakpoint of the statement holding the line.
+const int ab4BorderClickEvent = 18;
+
+/// Ctrl+Shift+F12: set / remove a session breakpoint at the cursor (the
+/// keyboard form of the margin click: [ab4BorderClickEvent]; the real
+/// GUI's round is [editorFocusKeyItems]).
 const int vkeySessionBreakpoint = 48;
+
+/// Ctrl+Shift+F9: SAPLS38E's "Activer/Supprimer point d'arrêt externe" —
+/// the EXTERNAL (user) breakpoint key, the application toolbar's `@VB@`
+/// button (ICON_USER_BREAKPOINT, a red dot with a small person) and
+/// Utilities > Breakpoints. Never sent by an editor gesture: only the
+/// toolbar / menu entry fires it.
+const int vkeyExternalBreakpoint = 45;
 
 /// Ctrl+Shift+F3: where-used list of the object under the cursor.
 const int vkeyWhereUsed = 39;
@@ -85,6 +109,28 @@ String _winControls(String shell, List<(String, String)> props) {
     b.write('   <PROPERTY VALUE ="${_attr(v)}" NAME ="${_attr(n)}"/>');
   }
   b.write('</CONTROL></CONTROLS>');
+  return b.toString();
+}
+
+/// The real GUI's ` <CONTROLS>…</CONTROLS>` block of several controls
+/// (ascending shell, as the OCX flushes them: a recorded session
+/// g[26] `118 {120, 300}` then `119 {LastVisibleLine}`); '' when none.
+String _winControlsOf(List<(String, List<(String, String)>)> controls) {
+  if (controls.isEmpty) return '';
+  return ' <CONTROLS>${windowsControlBlocks(controls)}</CONTROLS>';
+}
+
+/// The real GUI's CONTROL blocks of [controls] (per shell, in the order
+/// given), the body of a ` <CONTROLS>` section.
+String windowsControlBlocks(List<(String, List<(String, String)>)> controls) {
+  final b = StringBuffer();
+  for (final (shell, props) in controls) {
+    b.write('  <CONTROL SHELLID ="${_attr(shell)}">');
+    for (final (n, v) in props) {
+      b.write('   <PROPERTY VALUE ="${_attr(v)}" NAME ="${_attr(n)}"/>');
+    }
+    b.write('</CONTROL>');
+  }
   return b.toString();
 }
 
@@ -158,6 +204,46 @@ List<Uint8List> editorKeyItems(
   return out;
 }
 
+/// The real GUI's key round of [vkey] typed IN the editor [shell] (the
+/// focus there, 16/9/18 <editor>, no okcode, no 16/15/1): the bare key
+/// round, with ONLY the cached props the client changed since it last
+/// reported them as its CONTROLS ([controls], per shell ascending, as
+/// [editorBorderClickItems]) — none at all when nothing changed, and then
+/// no item 17 (a recorded session g[38] / g[40] and
+/// a recorded session g[33]: Ctrl+Shift+F12 with the caret
+/// already on the line the server put it on, 172 bytes; the F3 round g[24]
+/// of the same capture carries the props a creation left dirty). The
+/// server reads the line from the caret it holds.
+List<Uint8List> editorFocusKeyItems(
+  ActionContext ctx,
+  int vkey, {
+  required String shell,
+  List<(String, List<(String, String)>)> controls = const [],
+}) {
+  final saved = ctx.paintedControlFocus;
+  ctx.paintedControlFocus = shell;
+  final List<Uint8List> base;
+  try {
+    base = windowsActionItems(pressItems(ctx, vkey), ctx: ctx);
+  } finally {
+    ctx.paintedControlFocus = saved;
+  }
+  final block = _winControlsOf(controls);
+  if (block.isEmpty) return base;
+  return [
+    for (final raw in base)
+      if (raw.length == 1 && raw[0] == itemEom) ...[
+        xmlBlobItem(
+          Uint8List.fromList(
+            utf8.encode('$_xmlDecl<DATAMANAGER>$block</DATAMANAGER>'),
+          ),
+        ),
+        raw,
+      ] else
+        raw,
+  ];
+}
+
 /// The ABAP editor's OCX line event 12 (the first round of a
 /// double-click): `%_GC <shell> 12` with (line text, line, col - 1, 0, 0).
 List<Uint8List> ab4LineEventItems(
@@ -200,6 +286,61 @@ Map<int, String> ab4LineEventParams(String lineText, int line, int col) => {
   3: '0',
   4: '0',
 };
+
+/// The PARAM values of a margin click ([editorBorderClickItems]), by PID.
+Map<int, String> borderClickParams(
+  int line, {
+  bool ctrl = false,
+  bool shift = false,
+}) => {0: '$line', 1: ctrl ? '1' : '0', 2: shift ? '1' : '0'};
+
+/// A click in the MARGIN of [line] (1-based) of the ABAP editor [shell]:
+/// the OCX event BorderClick `%_GC <shell> 18` with PIDs (line, ctrl,
+/// shift) — a recorded session g[26] / g[29] (SE38, editor 119,
+/// line 9) and g[69] (the debugger, editor 104, line 19), in the generic
+/// Windows control-event envelope (OK 0x0b, 16/15/1 with the editor's
+/// custom-control [path], 16/9/18 <editor>). [controls] = ONLY the cached
+/// properties that changed since the client last flushed them, per shell
+/// in ascending order — the first round after the editor's creation
+/// carries its container's realized size (120 / 300) and the editor's
+/// LastVisibleLine (g[26]); the next click none at all (g[29]: no
+/// `<CONTROLS>`). The server answers SetSelectionPosInLine(line, 1), then
+/// SetMarker(2, ",<line>") + SetSavePoint (set, s[32] / s[33]) or
+/// RemoveMarker(2, ",<line>") (removal, s[35] / s[36]); it resolves the
+/// line to its statement itself (g[69] line 19 removed the breakpoint of
+/// line 9).
+List<Uint8List> editorBorderClickItems(
+  ActionContext ctx, {
+  required String shell,
+  required int line,
+  bool ctrl = false,
+  bool shift = false,
+  List<(String, List<(String, String)>)> controls = const [],
+  List<int>? path,
+}) {
+  final params = borderClickParams(line, ctrl: ctrl, shift: shift);
+  final b = StringBuffer(
+    '$_xmlDecl<DATAMANAGER> <EVENTS>  <EVENT SHELLID ="${_attr(shell)}" '
+    'EVENTID ="$ab4BorderClickEvent">',
+  );
+  for (final e in params.entries) {
+    b.write('   <PARAM PID ="${e.key}" VALUE ="${_attr(e.value)}"/>');
+  }
+  b.write('</EVENT></EVENTS>${_winControlsOf(controls)}</DATAMANAGER>');
+  return canvasEventItems(
+    ctx,
+    okcode: '%_GC $shell $ab4BorderClickEvent',
+    xml: Uint8List.fromList(utf8.encode(b.toString())),
+    focusShell: shell,
+    sourcePath: path,
+    // the editor's 16/9/18: the control half of the acked paint
+    okMode: windowsOkMode(
+      ctx,
+      cursor: false,
+      fallback: winOkModeControlFocus,
+    ),
+  );
+}
 
 /// The CFW double-click round `%_GC <shell> -601` with the cursor span
 /// [props] under `<CONTROLS>`.

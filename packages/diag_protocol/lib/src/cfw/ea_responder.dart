@@ -544,21 +544,12 @@ bool aliasesRoot(EaSession session, FlushCall call) =>
 /// CONVT_NO_NUMBER), else "" (ea_controlxml._control_xml port).
 Uint8List controlXml(
     EaSession session, FlushCall call, List<(String, String)> cachedProps) {
-  final order = <String>[];
-  final byShell = <String, List<String>>{};
-  for (final (shell, prop) in cachedProps) {
-    byShell.putIfAbsent(shell, () {
-      order.add(shell);
-      return <String>[];
-    }).add(prop);
-  }
   final b = StringBuffer()
     ..write('<?xml version="1.0" encoding="sap*"?>\n<DATAMANAGER><CONTROLS>');
-  for (final shell in order.reversed) {
+  for (final (shell, props)
+      in registeredControlValues(call, cachedProps).reversed) {
     b.write('<CONTROL SHELLID="${_xmlAttr(shell)}">');
-    for (final prop in byShell[shell]!) {
-      final echoed = call.setProps[(shell, prop)];
-      final value = echoed ?? _propDefault(prop, call.dialect);
+    for (final (prop, value) in props) {
       b.write('<PROPERTY VALUE="${_xmlAttr(value)}" '
           'NAME="${_xmlAttr(prop)}"/>');
     }
@@ -570,6 +561,30 @@ Uint8List controlXml(
       'Y3="${session.screenRows * 29}" Y2="29" Y1="17" Y0="283"/>'
       '</GUI></COPY></DATAMANAGER>\u0000');
   return wireText(b.toString());
+}
+
+/// The (shell, prop) pairs [call] registered as cached props
+/// ([cachedProps], default [FlushCall.cachedProps]) with their answer
+/// values: one entry per shell in FIRST-registration order, its props in
+/// registration order; each value the identity echo of the server's own
+/// SetProperty where captured, else the type default ([_propDefault]).
+/// [controlXml] writes them in reverse (the Java registry walk); the
+/// Windows ABAP editor's creation answer in this order
+/// (SapSessionEditor._editorCreationAnswer).
+List<(String, List<(String, String)>)> registeredControlValues(
+  FlushCall call, [
+  List<(String, String)>? cachedProps,
+]) {
+  final order = <String>[];
+  final byShell = <String, List<(String, String)>>{};
+  for (final (shell, prop) in cachedProps ?? call.cachedProps) {
+    final echoed = call.setProps[(shell, prop)];
+    byShell.putIfAbsent(shell, () {
+      order.add(shell);
+      return <(String, String)>[];
+    }).add((prop, echoed ?? _propDefault(prop, call.dialect)));
+  }
+  return [for (final sh in order) (sh, byShell[sh]!)];
 }
 
 /// The answer value of a registered cached prop with no captured state:

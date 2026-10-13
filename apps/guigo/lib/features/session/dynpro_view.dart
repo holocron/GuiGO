@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/sap_icons.dart';
 import 'dynpro_grid.dart';
+import 'sap_list_pager.dart';
 import 'sap_list_view.dart';
 import 'type_ahead.dart';
 
@@ -119,6 +120,7 @@ class DynproView extends StatefulWidget {
     this.onValueHelp,
     this.onListPick,
     this.onListCell,
+    this.onListScroll,
     this.onFocusField,
     this.onContextMenu,
     this.onDoubleClick,
@@ -180,6 +182,12 @@ class DynproView extends StatefulWidget {
   /// session stages it, and it rides the next list key round.
   final void Function(ListLine line, ListSegment cell, String text)?
   onListCell;
+
+  /// The list is scrolled past the page the server painted (a classic list
+  /// longer than its window, [ListPage.scrolls]): ask the server for the
+  /// page starting at list line [firstLine] (0-based) — the session's
+  /// `scrollList`, the real GUI's VSCROLL round ([SapPagedList]).
+  final Future<void> Function(int firstLine)? onListScroll;
 
   /// SAP GUI's double-click on a field (an icon field too) or a
   /// table-control cell: the choose key (F2) with the cursor on it — the
@@ -703,7 +711,9 @@ class _DynproViewState extends State<DynproView> {
     if (widget.cell != null) {
       // a pane of a composed window: the grid starts at the pane's origin
       if (rows.isEmpty) return SingleChildScrollView(child: body);
-      return _withList(context, rows, 0, (line, width) {
+      final paged = _pagedList(rows, body, const [], EdgeInsets.zero);
+      if (paged != null) return paged;
+      return _withList(context, rows, 0, (line, width, _) {
         return ListView.builder(
           padding: EdgeInsets.zero,
           itemCount: 1 + rows.length,
@@ -743,12 +753,57 @@ class _DynproViewState extends State<DynproView> {
           },
         );
     if (rows.isEmpty) return listView(null, 0);
+    final paged = _pagedList(
+      rows,
+      body,
+      below,
+      EdgeInsets.fromLTRB(hPad, 8, hPad, widget.compact ? 8 : 24),
+    );
+    if (paged != null) return paged;
     return _withList(
       context,
       rows,
       2 * hPad,
-      (line, width) => listView(line, rows.length),
+      (line, width, _) => listView(line, rows.length),
     );
+  }
+
+  /// A classic list the server PAGES ([listPageOf]: longer than its
+  /// window): the page heading fixed, the body scrolling over the whole
+  /// list, the page the server sent at its own lines ([SapPagedList]) —
+  /// null for a list the paint holds whole (drawn as before). [rows] are
+  /// the painted buffer rows from the first painted one ([_listRows]).
+  Widget? _pagedList(
+    List<ListLine?> rows,
+    Widget body,
+    List<Widget> below,
+    EdgeInsets padding,
+  ) {
+    final m = widget.model;
+    final page = listPageOf(m);
+    if (page == null || !page.scrolls || m.listPaint.isEmpty) return null;
+    final base = m.listPaint.first.line;
+    return _withList(context, rows, padding.horizontal, (line, width, lh) {
+      return SapPagedList(
+        page: page,
+        lineHeight: lh,
+        identity: (m.program, m.dynpro, m.title, m.modalLevel),
+        row: (r) {
+          final i = r - base;
+          return i >= 0 && i < rows.length
+              ? line(i)
+              : SizedBox(width: width, height: lh);
+        },
+        top: m.fields.isEmpty ? null : body,
+        bottom: below,
+        busy: widget.busy,
+        onScroll: widget.onListScroll,
+        onPress: widget.onPress,
+        padding: padding,
+        compact: widget.compact,
+        autofocus: m.fields.isEmpty,
+      );
+    });
   }
 
   /// The rows a list renderer draws: every painted buffer row from the
@@ -782,7 +837,8 @@ class _DynproViewState extends State<DynproView> {
     BuildContext context,
     List<ListLine?> rows,
     double padding,
-    Widget Function(Widget Function(int i) line, double width) build,
+    Widget Function(Widget Function(int i) line, double width, double lh)
+    build,
   ) {
     final palette = SapListPalette.of(context);
     final icons = SapIconAtlasStrip.of(context);
@@ -828,7 +884,7 @@ class _DynproViewState extends State<DynproView> {
           );
         }
 
-        final list = build(line, width);
+        final list = build(line, width, mt.lh);
         if (width <= avail || !cons.hasBoundedWidth) return list;
         // wider than the window even at the minimum cell: sideways
         return SingleChildScrollView(

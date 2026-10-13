@@ -259,6 +259,13 @@ class ControlRegistry {
   /// in registration order (the CONTROLS report's order)
   final Map<String, List<String>> cachedProps = {};
 
+  /// shell -> the size props (120 / 300) the client already flushed for
+  /// it, by value: a later round reports a size only when it changed
+  /// (a recorded session g[26] reports container 118's realized
+  /// 120 / 300 with the first margin click after the editor's creation,
+  /// g[29] — the next click — nothing). A re-created shell starts afresh.
+  final Map<String, Map<String, String>> flushedSizes = {};
+
   /// AREA -> (container shell, program, step) — LinkContainer
   final Map<String, (String, String?, int)> areaLinks = {};
 
@@ -290,6 +297,7 @@ class ControlRegistry {
       reportedDelta,
       draggedDelta,
       cachedProps,
+      flushedSizes,
       controlLinks,
       splitters,
       toolbarButtons,
@@ -378,6 +386,7 @@ class ControlRegistry {
       }
       created.add(LayoutControl(program, step, shell, cls));
       requested.remove(shell); // a re-created shell starts a new history
+      flushedSizes.remove(shell); // … and owes its realized size again
       props[shell]?.remove('290'); // … and visible (see [hidden])
       if (_digits.hasMatch(par)) parents[shell] = par;
     }

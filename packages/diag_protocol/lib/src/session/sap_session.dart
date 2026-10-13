@@ -58,6 +58,7 @@ import 'grid_edit_actions.dart';
 import 'grid_rows_request.dart';
 import 'grid_selection.dart';
 import 'imode_scope.dart';
+import 'list_scroll.dart';
 import 'login.dart';
 import 'logon_frames.dart';
 import 'table_cell.dart';
@@ -77,6 +78,7 @@ part 'sap_session_grid_edit.dart';
 part 'sap_session_grid_rows.dart';
 part 'sap_session_html.dart';
 part 'sap_session_layout.dart';
+part 'sap_session_list_scroll.dart';
 part 'sap_session_menu.dart';
 part 'sap_session_picture.dart';
 part 'sap_session_remote_logon.dart';
@@ -220,6 +222,17 @@ class SapSession {
   /// pauses until the future resolves; null (default) auto-answers with
   /// [endOtherSessions].
   final Future<WallOption> Function(WallInfo wall)? onWall;
+
+  /// How many lines the app's view of the ABAP editor [shell] shows from
+  /// its top — its viewport's capacity, [editorVisibleLines] of the view's
+  /// height (the laid-out view's, else the region the app gives it) — or
+  /// null when the app has no view of it. The editor's LastVisibleLine (a
+  /// reload's answer, a round's view delta, a read-back) is `first + that
+  /// - 1`, capped by the document, so the value the server hears is the
+  /// one the view then reports through [setEditorClientState] and no later
+  /// delta is owed for it. Unset (no app, a replay), the session models
+  /// the real GUI's view of the editor's area ([ab4KernelLinePx]).
+  int? Function(String shell)? editorViewLines;
 
   Socket? _sock;
   StreamSubscription<Uint8List>? _sockSub;
@@ -1152,6 +1165,7 @@ class SapSession {
         // counted as its failing fold counted it, in the same order.
         FlushCall? parsed;
         Object? parseError;
+        var editorsTouched = const <String>{};
         try {
           parsed = parseFlushCall(value, dialect: answerDialect);
         } catch (e) {
@@ -1167,7 +1181,7 @@ class SapSession {
           _ingestNetPlanCall(value, parsed);
           _ingestCanvasCall(value, parsed);
           _ingestContextMenuCall(value, parsed);
-          _ingestEditorCall(value, parsed);
+          editorsTouched = _ingestEditorCall(value, parsed);
           _ingestPictureCall(parsed);
         }
         // the call is OWED an answer (the kernel blocks in OLE_FLUSH_CALL):
@@ -1202,6 +1216,12 @@ class SapSession {
         // answer (sap_session_grid_edit.dart)
         final adoption =
             _guarded('grid delta adoption', () => _gridDeltaAdoption(call));
+        // an ABAP editor's caret / line count the call's methods moved:
+        // reported in this answer (sap_session_editor.dart)
+        final editorReport = adoption != null
+            ? null
+            : _guarded('editor flush report',
+                () => _editorFlushReport(call, editorsTouched));
         final propStore = {
           ...?_guarded('doi fold', () => doiObserveCall(_ea, _doi, call)),
           ...?_guarded('editor props', () => _editorPropAnswers(call)),
@@ -1215,7 +1235,8 @@ class SapSession {
         final List<Uint8List>? items;
         try {
           items = buildAnswer(_ea, call,
-              propStore: propStore, exportXml: adoption?.$1);
+              propStore: propStore,
+              exportXml: adoption?.$1 ?? editorReport);
         } catch (e) {
           _noteAnswerFailure(
               'flush answer at step $closingStep '
@@ -1341,6 +1362,12 @@ class SapSession {
     built = _withFirstRound(built);
     built = _withAfterPopup(built);
     if (staged != null) built = withGridStateXml(built, staged.$1, staged.$2);
+    // the ABAP editors' client state the server does not hold yet (a
+    // caret, a selection, a scroll, a creation's layout delta) rides this
+    // round, whatever it is (sap_session_editor.dart)
+    final editorState = _guarded(
+        'editor pending props', () => _pendingEditorControls(built));
+    if (editorState != null) built = withGridStateXml(built, '', editorState);
     // the Java GUI's OK mode = the acked paint's | the focus half the
     // round finally names (frontend_profile.withJavaOkMode); a Windows
     // round's builders decided it already (windowsOkMode)
@@ -2222,10 +2249,24 @@ class SapSession {
 
   // --- actions ----------------------------------------------------------------
 
+  /// Scroll the active window's classic list so its page starts at list
+  /// line [firstLine] (0-based, clamped to the list) — the real GUI's
+  /// VSCROLL round of a scroll-bar drag / wheel; the server repaints the
+  /// list at that line (sap_session_list_scroll.dart, list_scroll.dart).
+  Future<List<Uint8List>> scrollList(int firstLine) => _scrollList(firstLine);
+
   Future<List<Uint8List>> press(int vkey) async {
+    // which key the UI fired (a toolbar / menu / key-table entry): the SES
+    // bytes of the send say it too, but not by name — the SE80 log of
+    // vkey 45 (the toolbar's external breakpoint) read as a margin tap
+    _trace('press vkey $vkey');
     // typed / ticked classic-list cells ride the list key round
     final listCells = _listCellKeyRound(vkey);
     if (listCells != null) return listCells;
+    // a paging key on a classic list: the list's own key round
+    // (sap_session_list_scroll.dart)
+    final paging = _listPagingKey(vkey);
+    if (paging != null) return paging;
     // typed cells of one table control ride the key in its TABLE plane
     // (a recorded session gui[313]); cells beside other typed
     // values go first as their own Enter round ([_sendStagedCellsFirst])
@@ -2246,6 +2287,11 @@ class SapSession {
     if (ed != null) {
       return editorHelp(ed, ed.cursorLine ?? 1, ed.cursorCol ?? 1);
     }
+    // the ABAP editor's caret-keyed breakpoint functions (Ctrl+Shift+F12,
+    // the toolbar's @VB@): the key typed in the editor, its dirty cached
+    // props riding (sap_session_editor.dart)
+    final keyed = _editorKeyTarget(vkey);
+    if (keyed != null) return _editorFocusKey(keyed, vkey);
     return _act(pressItems(ctx, vkey));
   }
 

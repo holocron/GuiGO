@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:diag_protocol/diag_protocol.dart' show editorVisibleLines;
 import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -116,6 +117,46 @@ class _ClearSelectionIntent extends Intent {
   const _ClearSelectionIntent();
 }
 
+class _BreakpointKeyIntent extends Intent {
+  const _BreakpointKeyIntent();
+}
+
+/// The gutter mark of a breakpoint of another kind than the session one
+/// (an external / user breakpoint): SAP's ICON_USER_BREAKPOINT, a red dot
+/// with a small person over its corner.
+class _OtherBreakpointDot extends StatelessWidget {
+  const _OtherBreakpointDot({super.key});
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+        label: 'External breakpoint',
+        child: SizedBox(
+          width: 14,
+          height: 14,
+          child: Stack(clipBehavior: Clip.none, children: [
+            Positioned(
+              left: 0,
+              top: 0,
+              child: Container(
+                width: 10,
+                height: 10,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFE5484D),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: const Color(0xFF8E1B1F), width: 1),
+                ),
+              ),
+            ),
+            const Positioned(
+              right: -1,
+              bottom: -1,
+              child: Icon(Icons.person, size: 9, color: Color(0xFF3B4A57)),
+            ),
+          ]),
+        ),
+      );
+}
+
 /// A key action of the view, enabled only while [enabled] holds.
 class _ViewAction<T extends Intent> extends Action<T> {
   _ViewAction(this.enabled, this.run);
@@ -138,8 +179,11 @@ class _ViewAction<T extends Intent> extends Action<T> {
 ///
 /// Gestures (touch first, as text reads on an iPad; a vertical swipe stays
 /// the scroll):
-/// * tap in the code: the caret ([onCaret]); a tap in the gutter toggles
-/// a breakpoint ([onToggleBreakpoint]);
+/// * tap in the code: the caret ([onCaret]); a tap ANYWHERE in the gutter
+/// of a line — its number, the margin, a breakpoint dot on it — is the
+/// editor's margin click on that line ([onToggleBreakpoint]: the server
+/// sets the session breakpoint, or removes the one there). It is the
+/// only thing a gutter tap does: never another key;
 /// * double tap on a token: navigate to its definition ([onNavigate],
 /// 1-based line and column, the editor's double-click; the first tap
 /// put the caret there, as the real GUI's click before its -601);
@@ -151,7 +195,9 @@ class _ViewAction<T extends Intent> extends Action<T> {
 /// * a mouse / trackpad drag selects directly, the secondary click opens
 /// the toolbar;
 /// * hardware keyboard (the view focused by a tap): Cmd/Ctrl+A selects
-/// all, Cmd/Ctrl+C copies, Esc drops the selection.
+/// all, Cmd/Ctrl+C copies, Esc drops the selection, Ctrl+Shift+F12 sets
+/// / removes the session breakpoint on the caret's line
+/// ([onBreakpointKey], the editor's own shortcut).
 ///
 /// The view is read-only (the source changes on the server only): there
 /// is no cut or paste.
@@ -160,19 +206,38 @@ class SapSourceView extends StatefulWidget {
     super.key,
     required this.lines,
     this.breakpoints = const {},
+    this.otherBreakpoints = const {},
+    this.externalBreakpoints = const {},
     this.currentLine,
     this.firstVisibleLine,
     this.scrollSerial = 0,
     this.onToggleBreakpoint,
+    this.onBreakpointKey,
     this.onNavigate,
     this.onWhereUsed,
     this.onViewport,
+    this.onViewLines,
     this.onCaret,
     this.onSelection,
   });
 
   final List<String> lines;
+
+  /// The lines with a SESSION breakpoint (the server's marker 2): a solid
+  /// red dot.
   final Set<int> breakpoints;
+
+  /// The lines with a breakpoint of another kind (an external / user
+  /// breakpoint the toolbar's Ctrl+Shift+F9 set, a disabled one —
+  /// SapTextEditor.otherBreakpoints): a red dot with a small person, as
+  /// SAP's ICON_USER_BREAKPOINT.
+  final Set<int> otherBreakpoints;
+
+  /// The lines of [otherBreakpoints] that carry an EXTERNAL breakpoint
+  /// (SapTextEditor.externalBreakpoints, the server's marker 4): a margin
+  /// click on one removes it (a recorded session
+  /// s[28]), so the long-press menu says so.
+  final Set<int> externalBreakpoints;
   final int? currentLine;
 
   /// The line the server scrolled the editor to (its FirstVisibleLine
@@ -187,7 +252,15 @@ class SapSourceView extends StatefulWidget {
   /// [firstVisibleLine] even when it repeats the last one (a navigation
   /// back to the same spot after the user scrolled away).
   final int scrollSerial;
+
+  /// A tap in the gutter of a line, with or without a dot on it (the
+  /// editor's margin click), or the long-press menu's breakpoint entry:
+  /// the one breakpoint action of the view.
   final void Function(int line)? onToggleBreakpoint;
+
+  /// Ctrl+Shift+F12 on a hardware keyboard: the breakpoint KEY with the
+  /// caret's line (1 when no caret was placed).
+  final void Function(int line)? onBreakpointKey;
   final void Function(int line, int col)? onNavigate;
   final void Function(int line, int col)? onWhereUsed;
 
@@ -196,6 +269,22 @@ class SapSourceView extends StatefulWidget {
   /// — the editor control's client state the server reads back
   /// (FirstVisibleLine / LastVisibleLine).
   final void Function(int firstLine, int lastLine)? onViewport;
+
+  /// How many lines the laid-out view shows from its top — its viewport's
+  /// capacity, [editorVisibleLines] of its height at [lineHeight] a line —
+  /// reported after the first layout and whenever its height changes: the
+  /// count the session's LastVisibleLine of a NEW document is computed
+  /// from (SapSession.editorViewLines) before the view shows it, so the
+  /// [onViewport] that follows reports the same last line.
+  final void Function(int lines)? onViewLines;
+
+  /// The height of one source line (points): the view's row pitch.
+  static const double lineHeight = 20;
+
+  /// How many lines a view [height] points tall shows from its top (the
+  /// partly visible last one counted): what [onViewLines] reports.
+  static int linesFitting(double height) =>
+      editorVisibleLines(height, lineHeight);
 
   /// A single tap in the code: the caret (1-based line, column) — the
   /// control's SelPosStartLine / SelPosStartCol, the selection collapsed.
@@ -215,7 +304,7 @@ class SapSourceView extends StatefulWidget {
 
 class _SapSourceViewState extends State<SapSourceView> {
   static const double _fontSize = 13;
-  static const double _lineH = 20;
+  static const double _lineH = SapSourceView.lineHeight;
   final _h = ScrollController();
   final _v = ScrollController();
   final _listKey = GlobalKey();
@@ -226,6 +315,7 @@ class _SapSourceViewState extends State<SapSourceView> {
   double _gutterW = 0;
 
   (int, int)? _view; // the (first, last) lines last reported
+  int? _capacity; // the view's line capacity last reported
 
   // the selection: (1-based line, 0-based character offset) — the anchor
   // the gesture started from, the extent it moved to
@@ -259,11 +349,17 @@ class _SapSourceViewState extends State<SapSourceView> {
   /// Report the lines on screen through [SapSourceView.onViewport] when
   /// they changed.
   void _reportView() {
-    final cb = widget.onViewport;
-    final n = widget.lines.length;
-    if (cb == null || n == 0 || !_v.hasClients) return;
+    if (!_v.hasClients) return;
     final p = _v.position;
     if (!p.hasPixels || !p.hasViewportDimension) return;
+    final fits = SapSourceView.linesFitting(p.viewportDimension);
+    if (fits != _capacity) {
+      _capacity = fits;
+      widget.onViewLines?.call(fits);
+    }
+    final cb = widget.onViewport;
+    final n = widget.lines.length;
+    if (cb == null || n == 0) return;
     final first = (p.pixels / _lineH).floor().clamp(0, n - 1) + 1;
     final last = ((p.pixels + p.viewportDimension) / _lineH).ceil().clamp(first, n);
     if (_view == (first, last)) return;
@@ -430,8 +526,27 @@ class _SapSourceViewState extends State<SapSourceView> {
     });
   }
 
-  /// Report the selection as the control's client state.
+  /// Whether a whole-line selection of the gutter is up (an empty line
+  /// selected alone included: its span is the line break).
+  bool get _hasLineSelection => _lineMode && _anchor != null && _extent != null;
+
+  /// Report the selection as the control's client state: 1-based, the end
+  /// the slot AFTER the last selected character (exclusive — a word of 8
+  /// at line 5 col 15 is (5,15)-(5,23): a recorded session
+  /// carrier gui[21]). A whole-line selection of lines a..b in the gutter
+  /// ends at the START of line b+1 — (a,1)-(b+1,1), its last line break
+  /// included (the carrier's margin drag over 2..4: (2,1)-(5,1), gui[23])
+  /// — and, on the document's last line, after its last character
+  /// (b, len+1), as Select All's end (a recorded session
+  /// (1,1)-(6,28); the capture holds no margin select of the last line).
   void _reportSelection() {
+    if (_hasLineSelection) {
+      final n = widget.lines.length;
+      final a = _start.$1, b = _end.$1;
+      final (el, ec) = b < n ? (b + 1, 1) : (b, widget.lines[b - 1].length + 1);
+      widget.onSelection?.call(a, 1, el, ec);
+      return;
+    }
     if (!_hasSelection) return;
     final s = _start, e = _end;
     widget.onSelection?.call(s.$1, s.$2 + 1, e.$1, e.$2 + 1);
@@ -482,6 +597,16 @@ class _SapSourceViewState extends State<SapSourceView> {
   void _onTapUp(TapUpDetails d) {
     if (_pastText(d.globalPosition)) {
       _clearSelection();
+      // a click below the text parks the caret in the slot after the last
+      // character (a recorded session: (6, 28) on a 6-line
+      // source whose last line has 27 characters)
+      final n = widget.lines.length;
+      if (n > 0 && !_inGutter(d.globalPosition)) {
+        _focus.requestFocus();
+        final end = (n, widget.lines[n - 1].length + 1);
+        setState(() => _selected = end);
+        widget.onCaret?.call(end.$1, end.$2);
+      }
       return;
     }
     if (_inGutter(d.globalPosition)) {
@@ -510,7 +635,10 @@ class _SapSourceViewState extends State<SapSourceView> {
     _firstTap = hit;
     _firstTapAt = d.globalPosition;
     setState(() => _selected = hit);
-    widget.onCaret?.call(hit.$1, hit.$2);
+    // the caret: past a line's end it parks in the slot after its last
+    // character (len + 1), as the control's SelPos* report it
+    final len = widget.lines[hit.$1 - 1].length;
+    widget.onCaret?.call(hit.$1, hit.$2 > len + 1 ? len + 1 : hit.$2);
   }
 
   void _onLongPressStart(LongPressStartDetails d) {
@@ -591,7 +719,7 @@ class _SapSourceViewState extends State<SapSourceView> {
   void _onSelectEnd() {
     if (!_dragging) return;
     _dragging = false;
-    if (_hasSelection) {
+    if (_hasSelection || _hasLineSelection) {
       _reportSelection();
     } else {
       final at = _anchor;
@@ -625,7 +753,7 @@ class _SapSourceViewState extends State<SapSourceView> {
   void _onMousePanEnd() {
     if (!_dragging) return;
     _dragging = false;
-    if (_hasSelection) {
+    if (_hasSelection || _hasLineSelection) {
       _reportSelection();
     } else {
       setState(() => _anchor = _extent = null);
@@ -725,7 +853,16 @@ class _SapSourceViewState extends State<SapSourceView> {
         ),
       if (hit != null && widget.onToggleBreakpoint != null)
         ContextMenuButtonItem(
-          label: widget.breakpoints.contains(hit.$1) ? 'Remove breakpoint' : 'Set breakpoint',
+          // the margin click: it sets or removes the SESSION breakpoint, on
+          // an external one's dot removes that one; on a line with another
+          // kind only, the server decides
+          label: widget.breakpoints.contains(hit.$1)
+              ? 'Remove breakpoint'
+              : widget.externalBreakpoints.contains(hit.$1)
+                  ? 'Remove external breakpoint'
+                  : widget.otherBreakpoints.contains(hit.$1)
+                      ? 'Toggle breakpoint'
+                      : 'Set breakpoint',
           onPressed: () {
             close();
             widget.onToggleBreakpoint!(hit.$1);
@@ -818,6 +955,7 @@ class _SapSourceViewState extends State<SapSourceView> {
     Widget row(BuildContext context, int i) {
       final line = i + 1;
       final bp = widget.breakpoints.contains(line);
+      final other = !bp && widget.otherBreakpoints.contains(line);
       final current = widget.currentLine == line;
       final sel = _selected?.$1 == line && !_hasSelection;
       final span = _rowSelection(line);
@@ -837,12 +975,15 @@ class _SapSourceViewState extends State<SapSourceView> {
                 child: bp
                     ? Center(
                         child: Container(
+                          key: ValueKey('bp-$line'),
                           width: 10,
                           height: 10,
                           decoration: const BoxDecoration(color: Color(0xFFE5484D), shape: BoxShape.circle),
                         ),
                       )
-                    : null,
+                    : other
+                        ? Center(child: _OtherBreakpointDot(key: ValueKey('bp-other-$line')))
+                        : null,
             ),
               Expanded(
                 child: Text('$line',
@@ -914,12 +1055,19 @@ class _SapSourceViewState extends State<SapSourceView> {
                   onLongPressMoveUpdate: (d) => _extendTo(d.globalPosition),
                   onLongPressEnd: (_) => _onSelectEnd(),
                   onLongPressCancel: () => _dragging = false,
-                  child: ListView.builder(
-                    key: _listKey,
-                    controller: _v,
-                    itemCount: widget.lines.length,
-                    itemExtent: _lineH,
-                    itemBuilder: row,
+                  // a new height (the pane resized) reports the view again
+                  child: NotificationListener<ScrollMetricsNotification>(
+                    onNotification: (_) {
+                      _reportView();
+                      return false;
+                    },
+                    child: ListView.builder(
+                      key: _listKey,
+                      controller: _v,
+                      itemCount: widget.lines.length,
+                      itemExtent: _lineH,
+                      itemBuilder: row,
+                    ),
                   ),
                 ),
               ),
@@ -946,6 +1094,7 @@ class _SapSourceViewState extends State<SapSourceView> {
         SingleActivator(LogicalKeyboardKey.keyC, meta: true): _CopyIntent(),
         SingleActivator(LogicalKeyboardKey.keyC, control: true): _CopyIntent(),
         SingleActivator(LogicalKeyboardKey.escape): _ClearSelectionIntent(),
+        SingleActivator(LogicalKeyboardKey.f12, control: true, shift: true): _BreakpointKeyIntent(),
       },
       child: Actions(
         // enabled only when they apply: a key they do not take goes on up
@@ -955,6 +1104,9 @@ class _SapSourceViewState extends State<SapSourceView> {
           _CopyIntent: _ViewAction<_CopyIntent>(() => _hasSelection, _copy),
           _ClearSelectionIntent: _ViewAction<_ClearSelectionIntent>(
               () => _hasSelection, _clearSelection),
+          _BreakpointKeyIntent: _ViewAction<_BreakpointKeyIntent>(
+              () => widget.onBreakpointKey != null && widget.lines.isNotEmpty,
+              () => widget.onBreakpointKey!(_selected?.$1 ?? 1)),
         },
         child: Focus(focusNode: _focus, child: view),
       ),

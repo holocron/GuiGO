@@ -29,6 +29,7 @@ class ModalDynproWindow extends StatelessWidget {
     this.onValueHelp,
     this.onListPick,
     this.onListCell,
+    this.onListScroll,
     this.onFocusField,
     this.onContextMenu,
     this.onDoubleClick,
@@ -55,6 +56,7 @@ class ModalDynproWindow extends StatelessWidget {
   final Future<void> Function(ListLine line)? onListPick;
   final void Function(ListLine line, ListSegment cell, String text)?
   onListCell;
+  final Future<void> Function(int firstLine)? onListScroll;
   final void Function(ScreenField f)? onFocusField;
   final void Function(Offset at, ScreenField? field)? onContextMenu;
   final Future<void> Function(ScreenField f)? onDoubleClick;
@@ -142,6 +144,7 @@ class ModalDynproWindow extends StatelessWidget {
                   onValueHelp: onValueHelp,
                   onListPick: onListPick,
                   onListCell: onListCell,
+                  onListScroll: onListScroll,
                   onFocusField: onFocusField,
                   onContextMenu: onContextMenu,
                   onDoubleClick: onDoubleClick,
