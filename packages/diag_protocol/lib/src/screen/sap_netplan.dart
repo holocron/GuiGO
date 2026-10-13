@@ -74,12 +74,12 @@ class NetPlanNode {
     Map<String, String>? values,
   }) : values = values ?? {};
 
-  /// The node id the server keys it by (`the test system`, `/DOMAIN/`, `0000000019`,
+  /// The node id the server keys it by (`<SID>`, `/DOMAIN/`, `0000000019`,
   /// `1`) — what [SapSession.selectNetPlanNode] sends back.
   String id;
 
   /// /$NVALS key 1: the node's type text (a workflow step type `MSEL`,
-  /// `CASE`; a transport system id `the test system`; NETZOCX1's first info text).
+  /// `CASE`; a transport system id `<SID>`; NETZOCX1's first info text).
   String type;
 
   /// /$NVALS key 2: the step number (`000019` in SWDD; '' when absent).
@@ -665,9 +665,7 @@ String? _pullUrl(Uint8List v) {
   if (_indexOf(v, 'DP_GET_CLIENT_TABLE'.codeUnits) < 0) return null;
   final i = _indexOf(v, 'INURL'.codeUnits);
   if (i < 0) return null;
-  final m = RegExp(
-    'SAPR3://[0-9A-Za-z]+',
-  ).firstMatch(latin1.decode(Uint8List.sublistView(v, i), allowInvalid: true));
+  final m = _pullUrlRx.firstMatch(latin1.decode(Uint8List.sublistView(v, i), allowInvalid: true));
   return m?.group(0);
 }
 
@@ -1032,3 +1030,9 @@ class SapNetPlanTracker {
     ];
   }
 }
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _pullUrlRx = RegExp(
+    'SAPR3://[0-9A-Za-z]+',
+  );

@@ -23,7 +23,7 @@ class InputHistoryStore extends ChangeNotifier {
   InputHistoryStore({
     SharedPreferences? prefs,
     this.maxPerField = 20,
-    this.maxFieldLength = 59,
+    this.maxFieldLength = defaultHistoryFieldLength,
   }) : _prefs = prefs {
     if (prefs != null) _read(prefs);
   }
@@ -80,15 +80,39 @@ class InputHistoryStore extends ChangeNotifier {
     }
   }
 
-  Future<void> _write() async {
-    final p = _prefs;
-    if (p == null) return;
+  /// The write in flight, and whether the map changed since it encoded:
+  /// values kept while one is written fold into ONE more write (each kept
+  /// value encoded and wrote the whole map again).
+  Future<void>? _writing;
+  bool _dirty = false;
+
+  Future<void> _write() {
+    if (_prefs == null) return Future.value();
+    _dirty = true;
+    return _writing ??= _flush();
+  }
+
+  Future<void> _flush() async {
+    final p = _prefs!;
     try {
-      await p.setString(prefsKey, jsonEncode(_data));
-    } on Object {
-      // a store that cannot be written keeps the memory copy
+      while (_dirty) {
+        _dirty = false;
+        try {
+          await p.setString(prefsKey, jsonEncode(_data));
+        } on Object {
+          // a store that cannot be written keeps the memory copy
+        }
+      }
+    } finally {
+      _writing = null;
     }
   }
+
+  /// Fields kept per system, systems kept: the least recently kept go
+  /// first (every field ever typed into stayed, and was rewritten with
+  /// every value).
+  static const int maxFieldsPerSystem = 500;
+  static const int maxSystems = 32;
 
   /// Whether the history records and offers values (SAP GUI: On / Off).
   bool get enabled => _enabled;
@@ -119,11 +143,16 @@ class InputHistoryStore extends ChangeNotifier {
     int limit = 10,
   }) {
     if (!_enabled) return const [];
-    final t = typed.trimRight().toLowerCase();
-    return [
-      for (final v in entries(system, field))
-        if (v.toLowerCase().startsWith(t) && v != typed.trimRight()) v,
-    ].take(limit).toList();
+    final values = _data[system]?[field];
+    if (values == null) return const [];
+    final typedV = typed.trimRight();
+    final t = typedV.toLowerCase();
+    final out = <String>[];
+    for (final v in values) {
+      if (out.length >= limit) break;
+      if (v != typedV && v.toLowerCase().startsWith(t)) out.add(v);
+    }
+    return out;
   }
 
   /// Keep [value] typed into [field] on [system] (the most recent first;
@@ -133,7 +162,12 @@ class InputHistoryStore extends ChangeNotifier {
     final v = value.trimRight();
     if (!_enabled || field.isEmpty || v.trim().isEmpty) return;
     if (v.length > maxFieldLength) return;
-    final list = (_data[system] ??= {})[field] ??= [];
+    final fields = _data.remove(system) ?? {};
+    _data[system] = fields; // the most recently kept system last
+    if (_data.length > maxSystems) _data.remove(_data.keys.first);
+    final list = fields.remove(field) ?? [];
+    fields[field] = list; // the most recently kept field last
+    if (fields.length > maxFieldsPerSystem) fields.remove(fields.keys.first);
     if (list.isNotEmpty && list.first == v) return;
     list
       ..remove(v)
@@ -175,23 +209,24 @@ class InputHistoryStore extends ChangeNotifier {
 String inputHistorySystem(ScreenModel m) =>
     '${m.systemId ?? '-'}/${m.client ?? '-'}';
 
+/// SAP GUI's "Enable History for Fields up to" default (characters).
+const int defaultHistoryFieldLength = 59;
+
 /// Whether [f] of [m] may keep an input history: a named, editable, visible
-/// input — never a password / invisible field (the INVISIBLE attribute,
-/// [ScreenField.invisible]; a BCODE / PASSW / PWD name like the session's
-/// secret rule), never a field of the logon program SAPMSYST, never one
-/// longer than [maxFieldLength].
+/// input — never a secret ([isSecretField]: an invisible field, a BCODE /
+/// PASSW / PWD name — the session's trace rule), never a field of the
+/// kernel's logon program ([ScreenModel.isKernelLogon]), never one longer
+/// than [maxFieldLength].
 bool inputHistoryEligible(
   ScreenModel m,
   ScreenField f, {
-  int maxFieldLength = 59,
+  int maxFieldLength = defaultHistoryFieldLength,
 }) {
   final name = f.name ?? '';
-  if (f.kind != FieldKind.input || f.isProtected || f.invisible) return false;
+  if (f.kind != FieldKind.input || f.isProtected) return false;
   if (name.isEmpty) return false;
-  if ((m.program ?? '').trim().toUpperCase() == 'SAPMSYST') return false;
-  if (RegExp(r'BCODE|PASSW|PWD', caseSensitive: false).hasMatch(name)) {
-    return false;
-  }
+  if (m.isKernelLogon) return false;
+  if (isSecretField(f)) return false;
   final len = f.maxnrchars > 0 ? f.maxnrchars : f.mlen;
   return len <= maxFieldLength;
 }

@@ -67,7 +67,7 @@ class ScreenRegion {
   });
 
   /// 'dynpro' | 'tree' | 'grid' | 'chart' | 'image' | 'html' | 'netplan' |
-  /// 'canvas' | 'editor' | 'calendar' | 'control'
+  /// 'canvas' | 'editor' | 'calendar' | 'office' | 'control'
   final String kind;
 
   /// The hosted control shell (a 'dynpro' region: null).
@@ -105,6 +105,16 @@ const int cellH = 18;
 const int metricX2 = 8;
 const int metricY2 = 29;
 
+/// The CFW control properties the layout and docking code reads and
+/// writes (SAP GUI's numeric property ids, the registry's keys): the
+/// control's height and width (in the METRICS units [metricY2] /
+/// [metricX2]), a docking container's side (`1` / `2` left / right, `3` /
+/// `4` top / bottom) and its visibility (`0` hidden).
+const String propControlHeight = '120';
+const String propControlWidth = '300';
+const String propDockSide = '470';
+const String propVisible = '290';
+
 /// render_ladder.RUNGS
 const Map<String, String> ladderRungs = {
   'R1': 'composited dynpro atoms',
@@ -124,6 +134,9 @@ const Map<String, String> ladderRungs = {
   // GuiGo's own rung: a CFW combo box / input field (CL_GUI_COMBOBOX,
   // CL_GUI_INPUT_FIELD) drawn as its widget in its box
   'CF': 'CFW combo box / input field',
+  // GuiGo's own rung: a DOI container (SAP.DocumentContainerControl.1)
+  // drawn as the Office document it holds (SapSession.officeDocuments)
+  'OF': 'Office document (DOI container)',
 };
 
 /// The CFW field controls drawn by the 'CF' rung (SAPGUI.SAPComboBoxCtrl.1,
@@ -154,6 +167,9 @@ String controlKind(String cls) {
   if (c.contains('Tree')) return 'tree';
   if (['TextEdit', 'AbapEditor', 'EditCtrl'].any(c.contains)) return 'editor';
   if (c.contains('Html') || c.contains('HTML')) return 'html';
+  // the DOI container (doi.dart containerClassRx) — before the container
+  // test, which its `Container` (not `CONTAINER`) never matched anyway
+  if (_officeClass.hasMatch(c.trim())) return 'office';
   if (c.contains('NetPlanGraphics') || c.contains('JNet')) return 'jnet';
   if (['CONTAINER', 'Splitter', 'DOCKING', 'DIALOGCTRL'].any(c.contains)) {
     return 'container';
@@ -176,6 +192,12 @@ String controlKind(String cls) {
 bool _isDockingClass(String cls) => cls.toUpperCase().contains('DOCKING');
 
 final RegExp _digits = RegExp(r'^\d+$');
+
+/// SAP.DocumentContainerControl.N (doi.dart containerClassRx).
+final RegExp _officeClass = RegExp(
+  r'^SAP\.DocumentContainerControl\.\d+$',
+  caseSensitive: false,
+);
 
 /// One CreateControl of the registry (ea_control_tree.note_created_controls:
 /// program, step, shell, class).
@@ -373,7 +395,7 @@ class ControlRegistry {
       final shell = (v.args['#1'] ?? '').trim();
       if (!_digits.hasMatch(shell)) continue;
       final cls = [v.args['#1'], v.args['#2']].whereType<String>().firstWhere(
-        (x) => x.contains(RegExp('[A-Za-z]')),
+        (x) => x.contains(_letterRx),
         orElse: () => '',
       );
       var par = (v.args['#4'] ?? '').trim();
@@ -387,7 +409,7 @@ class ControlRegistry {
       created.add(LayoutControl(program, step, shell, cls));
       requested.remove(shell); // a re-created shell starts a new history
       flushedSizes.remove(shell); // … and owes its realized size again
-      props[shell]?.remove('290'); // … and visible (see [hidden])
+      props[shell]?.remove(propVisible); // … and visible (see [hidden])
       if (_digits.hasMatch(par)) parents[shell] = par;
     }
     if (created.length > 1000) created.removeRange(0, created.length - 1000);
@@ -586,7 +608,7 @@ class ControlRegistry {
     final seen = <String>{};
     String? sh = shell;
     while (sh != null && seen.add(sh)) {
-      if ((props[sh]?['290'] ?? '').trim() == '0') return true;
+      if ((props[sh]?[propVisible] ?? '').trim() == '0') return true;
       sh = parents[sh];
     }
     return false;
@@ -598,6 +620,186 @@ class ControlRegistry {
   };
 
   Map<String, String> classes() => {for (final c in created) c.shell: c.cls};
+}
+
+/// The answers the SAP GUI for Windows gives to a splitter's size READS in
+/// one flush call — `GetRowHeight(row)` / `GetColumnWidth(col)` on a
+/// SAPGUI.SplitterCtrl — by 0-based VARS row of each read's `_RESULT`:
+/// the extent the server last SET on that row / column (in the splitter's
+/// mode: percent, or pixels when absolute — never normalised, a negative
+/// one included), else the share an undeclared one holds (relative mode:
+/// what the declared ones leave, split evenly). a recorded session
+/// (raw srv[39] step 51 -> gui[32]): /AIF/IFMON's BT_SELECTDT reads its
+/// three splitters before it re-lays them out — the 1 x 1 splitter 120
+/// rows 1 / 2: `100`, `-104`; the 1 x 2 splitter 122 columns: `30`, `80`;
+/// the left pane's 3 x 1 splitter 125 (row 1 empty, row 2 the HTML
+/// selection, row 3 the date navigator): `0`, `20`, `0` — each the value
+/// the launch set (the Java oracle a recorded session shows those
+/// sets: srv[26] step 39 SetRowHeight(1, 100) / (2, -104) on 120, …) —
+/// and srv[40] then sets the three from what it read: (100, -104), (30,
+/// 80), (0, 10, 10). The Java GUI answers the same reads alike (srv[53] ->
+/// its step-73 answer) but for 120's row 1, `-1` (a dialect divergence
+/// left unmodelled: the server sets it back unchanged). GuiGo answered
+/// every row `0` and every column `31` (the responder's numeric
+/// defaults), so the server re-laid the pane out from zeros — the likely
+/// cause of the live the test system "Afficher calendrier" (2026-10-13 15:08: one
+/// read, two sets, the HTML row gone and the whole pane blank).
+///
+/// [verbs] = the call's verbs in wire order (a Set* in the same call
+/// before a read is what that read sees); [shellOfHandle] bridges the
+/// object token a verb names to its kernel shell (the session alias).
+/// Reads on anything but a known splitter are not answered here (the
+/// responder's defaults stay).
+///
+/// [held] = the layout the CLIENT holds since the server's last set of a
+/// splitter axis, (splitter, rows?) -> index -> value: a sash the user
+/// dragged ([splitterValuesFromExtents]). A drag is wire-silent; the next
+/// read reports it (a recorded session KEY DECODE 1, 5), in the
+/// splitter's own units, the row sum kept. a recorded session
+/// calendar shows both on splitter 123 (O17): its first read (raw s43)
+/// answers 4 / 16 / 0 after the launch set 0 / 20 / 0, and the read after
+/// the first hide (raw s64) 4 / 11 / 9 after the set 4 / 20 / 0 — while
+/// the read after the SECOND hide (raw s105), the same set 4 / 20 / 0, the
+/// same verbs and the same button, echoes 4 / 20 / 0: identical wire
+/// inputs, different answers, so no wire rule yields them — the human's
+/// sash drags (the top sash down before the first submit, the calendar
+/// sash up while it was hidden) do. The server then sets back what it
+/// read (4 / 10 / 10 keeping row 1, 4 / 11 / 9): its Set* is the new
+/// baseline and ends the hold ([splitterAxesSet]).
+Map<int, String> splitterSizeReads(
+  List<LayoutVerb> verbs,
+  ControlRegistry reg, {
+  String? Function(String handle)? shellOfHandle,
+  Map<(String, bool), Map<int, double>> held = const {},
+}) {
+  final out = <int, String>{};
+  // the extents this call set so far, over the registry's
+  final setHere = <(String, bool), Map<int, double>>{};
+  String? splitterOf(LayoutVerb v) => _splitterOfVerb(v, reg, shellOfHandle);
+
+  String fmt(double x) =>
+      x == x.roundToDouble() ? x.toInt().toString() : x.toString();
+
+  for (final v in verbs) {
+    final rowAxis = v.verb == 'GetRowHeight' || v.verb == 'SetRowHeight';
+    final colAxis = v.verb == 'GetColumnWidth' || v.verb == 'SetColumnWidth';
+    if (!rowAxis && !colAxis) continue;
+    final sh = splitterOf(v);
+    if (sh == null) continue;
+    final f = reg.splitters[sh]!;
+    final idx = int.tryParse((v.args['#1'] ?? '').trim());
+    if (idx == null) continue;
+    final declared = {
+      ...(rowAxis ? f.rowPct : f.colPct),
+      // the client's own layout since the server's last set (a drag)
+      ...?(setHere.containsKey((sh, rowAxis)) ? null : held[(sh, rowAxis)]),
+      ...?setHere[(sh, rowAxis)],
+    };
+    if (v.verb.startsWith('Set')) {
+      final t = (v.args['#2'] ?? '').trim();
+      final n = t.endsWith('-')
+          ? -(double.tryParse(t.substring(0, t.length - 1)) ?? 0)
+          : double.tryParse(t);
+      if (n != null) (setHere[(sh, rowAxis)] ??= {})[idx] = n;
+      continue;
+    }
+    final row = int.tryParse(v.result.trim());
+    if (row == null || row < 1) continue;
+    final n = math.max(rowAxis ? f.rows : f.cols, 1);
+    final String value;
+    if (declared.containsKey(idx)) {
+      value = fmt(declared[idx]!);
+    } else if (idx < 1 || idx > n) {
+      continue; // past the grid, never set: not known here
+    } else if ((rowAxis ? f.rowMode : f.colMode) != 0) {
+      final set = [
+        for (var i = 1; i <= n; i++)
+          if (declared.containsKey(i)) math.max(declared[i]!, 0.0),
+      ];
+      final free = n - set.length;
+      final left = 100 - set.fold(0.0, (a, b) => a + b);
+      value = '${math.max(_pyRound(left / math.max(free, 1)), 0)}';
+    } else {
+      continue; // an absolute splitter's undeclared pixels: not known here
+    }
+    out[row - 1] = value;
+  }
+  return out;
+}
+
+/// The splitter [v] addresses (its object token, a kernel shell or a
+/// handle [shellOfHandle] binds to one), or null.
+String? _splitterOfVerb(
+  LayoutVerb v,
+  ControlRegistry reg,
+  String? Function(String handle)? shellOfHandle,
+) {
+  final h = v.objValue.trim();
+  if (h.isEmpty) return null;
+  if (reg.splitters.containsKey(h)) return h;
+  final sh = shellOfHandle?.call(h);
+  return sh != null && reg.splitters.containsKey(sh) ? sh : null;
+}
+
+/// The splitter axes (splitter, rows?) [verbs] SET (`SetRowHeight` /
+/// `SetColumnWidth`): the server's layout replaces whatever the client
+/// held there ([splitterSizeReads] `held`).
+Set<(String, bool)> splitterAxesSet(
+  List<LayoutVerb> verbs,
+  ControlRegistry reg, {
+  String? Function(String handle)? shellOfHandle,
+}) => {
+  for (final v in verbs)
+    if (v.verb == 'SetRowHeight' || v.verb == 'SetColumnWidth')
+      if (_splitterOfVerb(v, reg, shellOfHandle) case final sh?)
+        (sh, v.verb == 'SetRowHeight'),
+};
+
+/// The values a RELATIVE splitter axis reports once the user dragged its
+/// sashes to [extents] (each row's / column's extent, in any one unit —
+/// cells, pixels): the extents rescaled to the sum of the values it held
+/// ([current], index -> value; 100 when they sum to nothing or one is
+/// unset), whole numbers whose sum stays that sum (largest
+/// remainder). a recorded session splitter 123: 0 / 20 / 0
+/// dragged to 1 : 4 : 0 → 4 / 16 / 0; 4 / 20 / 0 dragged to 4 : 11 : 9 → 4 /
+/// 11 / 9 — the sum (20, then 24) kept by every read the real GUI gave.
+/// Null when [extents] is empty or sums to nothing, or a held value is
+/// negative (an absolute or reserved extent: not a share to rescale).
+Map<int, double>? splitterValuesFromExtents(
+  Map<int, double> current,
+  List<num> extents,
+) {
+  final n = extents.length;
+  final total = extents.fold<num>(0, (a, b) => a + math.max(b, 0));
+  if (n == 0 || total <= 0) return null;
+  var sum = 0.0;
+  var unset = false;
+  for (var i = 1; i <= n; i++) {
+    final v = current[i];
+    if (v == null) {
+      unset = true;
+      continue;
+    }
+    if (v < 0) return null;
+    sum += v;
+  }
+  // a share left unset takes what the declared ones leave of 100 (the
+  // Easy Access splitter: SetColumnWidth(1, 31) alone): the whole is 100
+  if (sum <= 0 || unset) sum = 100;
+  final exact = [for (final e in extents) math.max(e, 0) * sum / total];
+  final out = [for (final x in exact) x.floorToDouble()];
+  var left = (sum - out.fold<double>(0, (a, b) => a + b)).round();
+  final order = List.generate(n, (i) => i)
+    ..sort((a, b) {
+      final c = (exact[b] - out[b]).compareTo(exact[a] - out[a]);
+      return c != 0 ? c : a.compareTo(b);
+    });
+  for (final i in order) {
+    if (left <= 0) break;
+    out[i] += 1;
+    left--;
+  }
+  return {for (var i = 0; i < n; i++) i + 1: out[i]};
 }
 
 class _SashOnly extends LayoutSplitter {
@@ -642,6 +844,7 @@ class LayoutInputs {
     this.isLive,
     this.sinceStep,
     this.dockFraction,
+    this.splitterHeld = const {},
   });
 
   final ScreenModel screen;
@@ -675,6 +878,12 @@ class LayoutInputs {
 
   /// the step the current screen generation began at (_prog_since_step)
   final int? sinceStep;
+
+  /// The layout the CLIENT holds on a splitter axis since the user dragged
+  /// its sashes, (splitter, rows?) -> index -> value (the splitter's own
+  /// units — [splitterValuesFromExtents]): over the server's values until
+  /// the server sets that axis again (SapSession.noteSplitterSash).
+  final Map<(String, bool), Map<int, double>> splitterHeld;
 
   /// The share of the window width a lone left/right dock realizes when
   /// the server's area is provisional (null: the latest request / 8 px
@@ -750,6 +959,14 @@ class _Facts {
   final Map<String, String> classes;
   final Map<String, int> order = {};
 
+  /// Splitter [sp]'s row ([rows]) or column values: the server's, the
+  /// user's drag over them ([LayoutInputs.splitterHeld]).
+  Map<int, double> pctOf(String sp, LayoutSplitter f, bool rows) {
+    final held = inputs.splitterHeld[(sp, rows)];
+    final own = rows ? f.rowPct : f.colPct;
+    return held == null ? own : {...own, ...held};
+  }
+
   /// the area width / height when a dock's extent departs from the
   /// AREASIZE pair (see _dockedBoxes), else null
   int? areaCols;
@@ -774,7 +991,9 @@ class _Facts {
     return since != null && st != null && st >= since;
   }
 
-  /// editor_push.current_area_links
+  /// editor_push.current_area_links, plus the binding rule of the jar (see
+  /// [_bindsByName]): a link of an older screen generation still binds
+  /// when its container would bind to this screen's area of that name.
   Map<String, String> currentAreaLinks() {
     final prog = inputs.screen.program;
     final since = inputs.sinceStep;
@@ -784,9 +1003,42 @@ class _Facts {
         if (prog == null ||
             e.value.$2 == prog ||
             (since != null && e.value.$3 >= since) ||
-            reg.controlLinks[e.value.$1] == here)
+            reg.controlLinks[e.value.$1] == here ||
+            _bindsByName(e.value.$1))
           if (shellLive(e.value.$1)) e.key: e.value.$1,
     };
+  }
+
+  /// Whether the LinkContainer'd container [sh] binds to the painted area
+  /// of its name whatever screen generation linked it — the frontend's own
+  /// rule, which never looks at the generation (platinr3S.jar
+  /// GuiSession.checkCustomControlList, from GuiShell.linkContainer ->
+  /// GuiCtlMgr.registerShellCustomControl, and the reverse order through
+  /// GuiCustomControl.doRegistration -> GuiCtlMgr.checkShellList): the
+  /// area name equal, the shell's program empty (no LinkControl) or the
+  /// area's, its dynpro -1 or the area's, and its DYNPRO LEVEL equal — the
+  /// CreateControl parent argument 10..19 (GuiCtlMgr.CreateControl: a
+  /// session-level shell awaiting a link; 10 = the main window, 10 + n the
+  /// n-th popup, GuiSession.computeDynproLevel). Liveness / the internal
+  /// mode stay the caller's ([shellLive]).
+  ///
+  /// the reference client's generation filter alone (the link's program, or a step
+  /// of the current generation) drops a link the moment the screen
+  /// generation moves on without re-linking — a 16/6/13 program change, a
+  /// later action's paint: PPOSE's TREE_CONTAINER 147, LIST_HOLDER 153 and
+  /// LONGTEXT 161 (a recorded session srv[17] step 26: parent 10,
+  /// LinkContainer only, no LinkControl, the areas declared at step 35)
+  /// then fell to the R9 "no hosted shell known" wireframe, all three at
+  /// once, although their tree / grid / TextEdit were up and fed — the
+  /// live the test system (Windows) symptom; the live trigger itself is not recorded.
+  bool _bindsByName(String sh) {
+    final level = int.tryParse(reg.parents[sh] ?? '');
+    if (level == null || level < 10 || level > 19) return false;
+    if (level != 10 + inputs.screen.modalLevel) return false;
+    final lc = reg.controlLinks[sh];
+    if (lc == null) return true;
+    final m = inputs.screen;
+    return lc == (m.program, m.dynpro) || m.hostedDynpros.contains(lc);
   }
 
   /// parent -> children, built once per compose (the registry holds still
@@ -941,10 +1193,12 @@ _Box _cellBox(
   int cc0,
   Set<int> collapseRows,
   Set<int> collapseCols,
-  String parent,
-) {
+  String parent, {
+  Map<int, double>? rowPct,
+  Map<int, double>? colPct,
+}) {
   final rh = _shares(
-    f.rowPct,
+    rowPct ?? f.rowPct,
     f.rows == 0 ? 1 : f.rows,
     spb.height,
     f.rowMode,
@@ -952,7 +1206,7 @@ _Box _cellBox(
     collapse: collapseRows,
   );
   final cw = _shares(
-    f.colPct,
+    colPct ?? f.colPct,
     f.cols == 0 ? 1 : f.cols,
     spb.width,
     f.colMode,
@@ -1048,8 +1302,9 @@ Map<String, _Box> _dockedBoxes(
       continue;
     }
     final p = fx.reg.props[h] ?? const {};
-    final side = sides[(p['470'] ?? '').trim()];
-    final wRaw = (p['300'] ?? '').trim(), hRaw = (p['120'] ?? '').trim();
+    final side = sides[(p[propDockSide] ?? '').trim()];
+    final wRaw = (p[propControlWidth] ?? '').trim(),
+        hRaw = (p[propControlHeight] ?? '').trim();
     final wPx = wRaw.isEmpty ? 0 : int.tryParse(wRaw);
     final hPx = hRaw.isEmpty ? 0 : int.tryParse(hRaw);
     if (wPx == null || hPx == null) continue;
@@ -1105,7 +1360,7 @@ Map<String, _Box> _dockedBoxes(
     final h = horiz.single;
     final b = out[h]!;
     final delta = winCols - areaCols;
-    final asks = fx.reg.requested[h]?['300'] ?? const <String>[];
+    final asks = fx.reg.requested[h]?[propControlWidth] ?? const <String>[];
     int cellsOf(String v) => _pyRound((int.tryParse(v) ?? -1) / metricX2);
     // The pair is trusted when the server laid out its LATEST request (the
     // netplan test: area 243 = 268 - 200 / 8, a recorded session
@@ -1160,7 +1415,7 @@ Map<String, _Box> _dockedBoxes(
     final h = vert.single;
     final b = out[h]!;
     final asks = [
-      for (final v in fx.reg.requested[h]?['120'] ?? const <String>[])
+      for (final v in fx.reg.requested[h]?[propControlHeight] ?? const <String>[])
         if (int.tryParse(v) case final px? when px > 0) px,
     ];
     final (cells, stale) = committedExtent(
@@ -1428,7 +1683,18 @@ Map<String, _Box> _shellBoxes(_Facts fx) {
         final spb = boxes[sp];
         if (spb == null) return;
         final (er, ec) = collapse[sp] ?? (<int>{}, <int>{});
-        boxes[sh] = _cellBox(spb, fx.reg.splitters[sp]!, rr, cc, er, ec, sp);
+        final f = fx.reg.splitters[sp]!;
+        boxes[sh] = _cellBox(
+          spb,
+          f,
+          rr,
+          cc,
+          er,
+          ec,
+          sp,
+          rowPct: fx.pctOf(sp, f, true),
+          colPct: fx.pctOf(sp, f, false),
+        );
       } else {
         final pb = boxes[par]!;
         boxes[sh] = _Box(
@@ -1743,7 +2009,7 @@ final RegExp _numRx = RegExp(r'[0-9][0-9\s.,]*');
     final m = _numRx.firstMatch(p);
     if (m == null) return null;
     final v = double.tryParse(
-      m.group(0)!.replaceAll(RegExp(r'\s'), '').replaceAll(',', '.'),
+      m.group(0)!.replaceAll(_whitespaceRx, '').replaceAll(',', '.'),
     );
     if (v == null) return null;
     nums.add(v);
@@ -1758,7 +2024,7 @@ String _g(double v) {
   if (v == v.roundToDouble() && v.abs() < 1e15) return v.toInt().toString();
   var s = v.toStringAsPrecision(6);
   if (s.contains('.') && !s.contains('e')) {
-    s = s.replaceFirst(RegExp(r'0+$'), '').replaceFirst(RegExp(r'\.$'), '');
+    s = s.replaceFirst(_trailingZerosRx, '').replaceFirst(_trailingDotRx, '');
   }
   return s;
 }
@@ -1772,6 +2038,7 @@ String _kindOfShell(String? k) => switch (k) {
   'jnet' => 'netplan',
   'editor' => 'editor',
   'calendar' => 'calendar',
+  'office' => 'office',
   _ => 'control',
 };
 
@@ -1786,7 +2053,12 @@ String _reason(String rung, String? shell, String note) {
 /// shell boxes -> content-sized docks -> carve -> cell items / dock hosts
 /// -> control regions through the ladder). Regions are in WINDOW cells
 /// (the carve origin applied).
-List<ScreenRegion> composeScreen(ControlRegistry reg, LayoutInputs inputs) {
+List<ScreenRegion> composeScreen(
+  ControlRegistry reg,
+  LayoutInputs inputs, {
+  List<SplitterSash>? sashes,
+  Map<String, CellRect>? boxesOut,
+}) {
   final fx = _Facts(reg, inputs);
   final m = inputs.screen;
   final modelBoxes = _shellBoxes(fx);
@@ -2054,9 +2326,6 @@ List<ScreenRegion> composeScreen(ControlRegistry reg, LayoutInputs inputs) {
     );
     final chartSh = hsSorted.where(inputs.chartShells.contains).firstOrNull;
     final graphSh = hsSorted.where(inputs.graphShells.contains).firstOrNull;
-    final calSh = hsSorted
-        .where((sh) => inputs.calendarShells.contains(sh) && fx.shellLive(sh))
-        .firstOrNull;
     // an editor / HTML viewer in a SPLITTER CELL of the area is drawn in
     // its cell, not over the whole area (where it covered the cells beside
     // it), and not at all when its cell is collapsed. SBWP (SAPLSINWP/1000,
@@ -2082,6 +2351,91 @@ List<ScreenRegion> composeScreen(ControlRegistry reg, LayoutInputs inputs) {
       return r == null || (r.rows > 0 && r.cols > 0);
     }
 
+    // a calendar in a collapsed cell (its row sized 0) shows nothing: as
+    // the area's calendar it took the dispatch from the HTML viewer in the
+    // cell beside it (below)
+    final calSh = hsSorted
+        .where(
+          (sh) =>
+              inputs.calendarShells.contains(sh) &&
+              fx.shellLive(sh) &&
+              shown(sh),
+        )
+        .firstOrNull;
+    // a calendar in a SPLITTER CELL of the area of its own is drawn in that
+    // cell, whatever else the area's other cells hold — as a chart is
+    // (above). /AIF/IFMON's left pane (a recorded session raw srv[17]
+    // / srv[20]: MAIN_CUSTOM 119 -> splitter 122 column 1 -> splitter 125
+    // 3 x 1: cell 127 the HTML selection 129, cell 128 the date navigator
+    // 144) shows the selection form AND, once the server sizes row 3
+    // (raw srv[40] step 53: rows 0 / 10 / 10) and shows the navigator
+    // (raw srv[47]: SetProperty(144, 290, 1)), the month grid under it:
+    // the one area dispatch below drew one of them only.
+    final calInCell = () {
+      if (calSh == null) return false;
+      final c = ownCell(calSh);
+      return c != null &&
+          c != rect &&
+          c.row >= rect.row &&
+          c.col >= rect.col &&
+          c.row + c.rows <= rect.row + rect.rows &&
+          c.col + c.cols <= rect.col + rect.cols;
+    }();
+    if (calInCell) {
+      regions.add(
+        region(
+          'R11',
+          'calendar drawn in its splitter cell',
+          shell: calSh,
+          kind: 'calendar',
+          at: ownCell(calSh!),
+        ),
+      );
+    }
+    // a picture in a SPLITTER CELL of its own is drawn in that cell,
+    // beside whatever the area's other cells hold — the Easy Access
+    // IMAGE_CONTAINER: container 101 -> splitter 102 1 x 2 (column 1 31 %,
+    // no sash verb: movable), the menu tree 105 in cell 103, the session
+    // picture SESS_IMAGE 106 (displayMode 1) in cell 104
+    // (a recorded session srv[5]: its bytes pushed on the
+    // cold PublishUrl, srv[6..12]). Read as the area's one dispatch the
+    // tree took it and the picture was never drawn
+    bool inOwnCell(String sh) {
+      final c = ownCell(sh);
+      return c != null &&
+          c != rect &&
+          c.row >= rect.row &&
+          c.col >= rect.col &&
+          c.row + c.rows <= rect.row + rect.rows &&
+          c.col + c.cols <= rect.col + rect.cols;
+    }
+
+    // (a picture the server builds a bar from — the DB50 overview's, a
+    // 1 x 2 splitter of a picture beside its value — stays the gauge)
+    final gauged =
+        _gaugePair(name, m.fields) != null || _splitterGauge(fx, hs) != null;
+    final picCells = [
+      if (!gauged)
+        for (final sh in hsSorted)
+          if (inputs.pictureShells.contains(sh) &&
+              fx.shellLive(sh) &&
+              !fx.hidden(sh) &&
+              shown(sh) &&
+              inOwnCell(sh))
+            sh,
+    ];
+    for (final sh in picCells) {
+      regions.add(
+        region(
+          'R3',
+          'picture drawn in its splitter cell',
+          shell: sh,
+          kind: 'image',
+          at: ownCell(sh),
+        ),
+      );
+    }
+
     final editSh = hsSorted
         .where(
           (sh) =>
@@ -2096,12 +2450,29 @@ List<ScreenRegion> composeScreen(ControlRegistry reg, LayoutInputs inputs) {
               inputs.htmlShells.contains(sh) && fx.shellLive(sh) && shown(sh),
         )
         .firstOrNull;
+    // a DOI container: its area shows the Office document it holds
+    final officeSh = hsSorted
+        .where(
+          (sh) => fx.kinds[sh] == 'office' && fx.shellLive(sh) && shown(sh),
+        )
+        .firstOrNull;
+    // a cell item belongs to this area when the area HOSTS its shell (its
+    // LinkContainer'd subtree), else when its box lies in the area's
+    // DECLARED rect — not the window-clipped one ([h]): the box map lays
+    // the area out at its painted geometry, and the clip to the window
+    // comes last (_clipToArea). Against the clipped rect an area reaching
+    // past the window's bottom never held its own grid: PPOSE's LIST_HOLDER
+    // (r12, 8 rows in a 17-row window — a recorded session srv[22],
+    // the dynpro 22 rows tall) drew grid 154 AND the R9 "no hosted shell
+    // known" wireframe over it.
     bool inside(_Box b) =>
         b.top >= top &&
         b.left >= left &&
-        b.top + b.height <= top + h &&
+        b.top + b.height <= top + c.height &&
         b.left + b.width <= left + wch;
-    final hostsCells = cellItems.any((ci) => inside(ci.$1));
+    bool hostedCell((_Box, LayoutTable) ci) =>
+        hs.contains(ci.$2.shell) || inside(ci.$1);
+    final hostsCells = cellItems.any(hostedCell);
     final structOnly =
         hs.isNotEmpty &&
         hs.every((sh) => _structuralKinds.contains(fx.kinds[sh])) &&
@@ -2126,7 +2497,8 @@ List<ScreenRegion> composeScreen(ControlRegistry reg, LayoutInputs inputs) {
                 (sh) =>
                     inputs.pictureShells.contains(sh) &&
                     fx.shellLive(sh) &&
-                    shown(sh),
+                    shown(sh) &&
+                    !picCells.contains(sh),
               )
               .firstOrNull;
     // _dispatch
@@ -2171,7 +2543,7 @@ List<ScreenRegion> composeScreen(ControlRegistry reg, LayoutInputs inputs) {
           ),
         );
       }
-    } else if (calSh != null) {
+    } else if (calSh != null && !calInCell) {
       // the date picker the server hosts for a DATS F4 (a recorded session
       // controls srv[1]: container 115 LinkContainer'd into the popup's
       // CONTAINER area, the calendar 116 in it): the whole area
@@ -2204,6 +2576,16 @@ List<ScreenRegion> composeScreen(ControlRegistry reg, LayoutInputs inputs) {
           at: ownCell(htmlSh),
         ),
       );
+    } else if (officeSh != null) {
+      regions.add(
+        region(
+          'OF',
+          'Office document container',
+          shell: officeSh,
+          kind: 'office',
+          at: ownCell(officeSh),
+        ),
+      );
     } else if (picSh != null) {
       regions.add(
         region(
@@ -2214,6 +2596,8 @@ List<ScreenRegion> composeScreen(ControlRegistry reg, LayoutInputs inputs) {
           at: ownCell(picSh),
         ),
       );
+    } else if ((calInCell || picCells.isNotEmpty) && !hostsCells) {
+      // the calendar / picture alone: drawn in its cell above
     } else if (composited) {
       regions.add(region('R1', 'invisible layout container'));
     } else if (!hostsCells &&
@@ -2252,7 +2636,7 @@ List<ScreenRegion> composeScreen(ControlRegistry reg, LayoutInputs inputs) {
       // cell 325 hosting toolbar 326 + tree 327).
       final inCells = [
         for (final ci in cellItems)
-          if (inside(ci.$1)) ci.$2.shell,
+          if (hostedCell(ci)) ci.$2.shell,
       ];
       regions.add(
         ScreenRegion(
@@ -2347,7 +2731,7 @@ List<ScreenRegion> composeScreen(ControlRegistry reg, LayoutInputs inputs) {
     final (er, ec) = collapse[sp] ?? (<int>{}, <int>{});
     final rows = f.rows == 0 ? 1 : f.rows, cols = f.cols == 0 ? 1 : f.cols;
     final rh = _shares(
-      f.rowPct,
+      fx.pctOf(sp, f, true),
       rows,
       spb.height,
       f.rowMode,
@@ -2355,16 +2739,29 @@ List<ScreenRegion> composeScreen(ControlRegistry reg, LayoutInputs inputs) {
       collapse: er,
     );
     final cw = _shares(
-      f.colPct,
+      fx.pctOf(sp, f, false),
       cols,
       spb.width,
       f.colMode,
       metricX2,
       collapse: ec,
     );
+    final box = at(spb.top, spb.left, spb.height, spb.width);
     var y = spb.top;
     for (var k = 1; k < rows; k++) {
       y += rh[k - 1];
+      sashes?.add(
+        SplitterSash(
+          splitter: sp,
+          rows: true,
+          index: k,
+          line: at(y, spb.left, 0, spb.width),
+          box: box,
+          spans: List.unmodifiable(rh),
+          fixed: f.rowSashFixed(k) || er.contains(k) || er.contains(k + 1),
+          mode: f.rowMode,
+        ),
+      );
       if (!f.rowSashFixed(k)) continue;
       regions.add(
         ScreenRegion(
@@ -2380,6 +2777,18 @@ List<ScreenRegion> composeScreen(ControlRegistry reg, LayoutInputs inputs) {
     var x = spb.left;
     for (var k = 1; k < cols; k++) {
       x += cw[k - 1];
+      sashes?.add(
+        SplitterSash(
+          splitter: sp,
+          rows: false,
+          index: k,
+          line: at(spb.top, x, spb.height, 0),
+          box: box,
+          spans: List.unmodifiable(cw),
+          fixed: f.colSashFixed(k) || ec.contains(k) || ec.contains(k + 1),
+          mode: f.colMode,
+        ),
+      );
       if (!f.colSashFixed(k)) continue;
       regions.add(
         ScreenRegion(
@@ -2393,7 +2802,147 @@ List<ScreenRegion> composeScreen(ControlRegistry reg, LayoutInputs inputs) {
       );
     }
   });
+  if (boxesOut != null) {
+    boxes.forEach((sh, b) {
+      boxesOut[sh] = at(b.top, b.left, b.height, b.width);
+    });
+  }
   return _clipToArea(regions);
+}
+
+/// The values a splitter axis holds once the user dragged its cells to
+/// [extents] (cells): a relative axis its shares rescaled to the sum it
+/// held ([splitterValuesFromExtents]); an ABSOLUTE one (SetRowMode /
+/// SetColumnMode 0) its pixels — each cell's [metricY2] / [metricX2] px,
+/// the composition's own conversion — its last row (column) left to take
+/// the rest unless [current] declares it. Null when nothing can be held.
+Map<int, double>? splitterHeldValues(
+  Map<int, double> current,
+  List<num> extents, {
+  required bool absolute,
+  required bool rows,
+}) {
+  if (!absolute) return splitterValuesFromExtents(current, extents);
+  final n = extents.length;
+  if (n == 0) return null;
+  final px = rows ? metricY2 : metricX2;
+  return {
+    for (var i = 1; i <= n; i++)
+      if (i < n || current.containsKey(i))
+        i: (math.max(extents[i - 1], 0) * px).roundToDouble(),
+  };
+}
+
+/// What a client round reports after the user dragged the sashes of the
+/// splitters [dragged]: per shell, ascending, the realized size (120
+/// height / 300 width) of every shell INSIDE them that registered it as a
+/// cached prop (RegisterCachedProp), the server did not set itself
+/// ([ControlRegistry.props]) and whose value differs from the one last
+/// flushed ([ControlRegistry.flushedSizes], updated here: the drag is
+/// reported once) — the real GUI's dirty report: a sash drag sends nothing
+/// of its own, its effect rides the next round as these sizes
+/// (a recorded session KEY DECODE 1 / 2: `CONTROLS 262 300=1799
+/// only`, the pane a drag grew; a recorded session: its
+/// splitter cells register nothing, so a drag inside LOAD_HISTORY_CONTAINER
+/// adds nothing). [boxes] = the shells' composed boxes in window cells
+/// ([composeScreen] boxesOut); the values in the session's METRICS (cols x
+/// 8, rows x 13.64, the area containers' model). [isLive] filters the
+/// shells on screen.
+List<(String, List<(String, String)>)> splitterDragSizes(
+  ControlRegistry reg,
+  Map<String, CellRect> boxes,
+  Set<String> dragged, {
+  bool Function(String shell)? isLive,
+}) {
+  bool under(String sh) {
+    String? p = reg.parents[sh];
+    for (var i = 0; i < 32 && p != null; i++) {
+      if (dragged.contains(p)) return true;
+      p = reg.parents[p];
+    }
+    return false;
+  }
+
+  final shells = [
+    for (final e in reg.cachedProps.entries)
+      if ((isLive?.call(e.key) ?? true) &&
+          under(e.key) &&
+          (e.value.contains(propControlHeight) ||
+              e.value.contains(propControlWidth)))
+        e.key,
+  ]..sort((a, b) => (int.tryParse(a) ?? 0).compareTo(int.tryParse(b) ?? 0));
+  final out = <(String, List<(String, String)>)>[];
+  for (final sh in shells) {
+    final b = boxes[sh];
+    if (b == null) continue;
+    final set = reg.props[sh] ?? const <String, String>{};
+    final done = reg.flushedSizes[sh] ??= {};
+    final props = <(String, String)>[];
+    for (final p in reg.cachedProps[sh]!) {
+      if (set.containsKey(p)) continue;
+      final v = switch (p) {
+        propControlWidth => '${b.cols.round() * 8}',
+        propControlHeight => '${(b.rows * 13.64 + 0.5).floor()}',
+        _ => null,
+      };
+      if (v == null || done[p] == v) continue;
+      done[p] = v;
+      props.add((p, v));
+    }
+    if (props.isNotEmpty) out.add((sh, props));
+  }
+  return out;
+}
+
+/// One sash of a splitter as the composition lays it out — between its
+/// row (column) [index] and [index] + 1: a zero-height (row) / zero-width
+/// (column) [line] in window cells, the splitter's [box], the extents
+/// ([spans], cells) of all its rows (columns). [fixed]: the program locked
+/// or hid it (SetRowSash / SetColumnSash movable / visible false), or a
+/// cell beside it holds nothing and collapsed — the user cannot drag it;
+/// a free sash is the client's own to drag (SapSession.noteSplitterSash).
+/// [mode] = the axis' SetRowMode / SetColumnMode (1 relative, 0 absolute).
+class SplitterSash {
+  const SplitterSash({
+    required this.splitter,
+    required this.rows,
+    required this.index,
+    required this.line,
+    required this.box,
+    required this.spans,
+    required this.fixed,
+    required this.mode,
+  });
+
+  final String splitter;
+  final bool rows;
+  final int index;
+  final CellRect line;
+  final CellRect box;
+  final List<int> spans;
+  final bool fixed;
+  final int mode;
+
+  /// The extents after moving this sash by [delta] cells (down / right
+  /// positive), each of the two cells beside it kept at least [minCells]
+  /// (a cell already under it stays as it is): the drag the user made, as
+  /// SapSession.noteSplitterSash takes it.
+  List<int> movedBy(int delta, {int minCells = 1}) {
+    final out = List.of(spans);
+    final a = index - 1, b = index;
+    if (a < 0 || b >= out.length) return out;
+    final lo = -math.max(out[a] - math.min(minCells, out[a]), 0);
+    final hi = math.max(out[b] - math.min(minCells, out[b]), 0);
+    final d = delta.clamp(lo, hi).toInt();
+    out[a] += d;
+    out[b] -= d;
+    return out;
+  }
+
+  @override
+  String toString() =>
+      'SplitterSash($splitter ${rows ? 'row' : 'column'} $index '
+      '${fixed ? 'fixed' : 'free'} $line $spans)';
 }
 
 /// Every region that starts inside the dynpro area ends at its edges: the
@@ -2466,3 +3015,10 @@ List<(int, int, int)> _fieldBoxes(ScreenModel m) => [
       else if (f.text.trim().isNotEmpty)
         (f.row, f.col, f.text.length),
 ];
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _letterRx = RegExp('[A-Za-z]');
+final RegExp _whitespaceRx = RegExp(r'\s');
+final RegExp _trailingZerosRx = RegExp(r'0+$');
+final RegExp _trailingDotRx = RegExp(r'\.$');

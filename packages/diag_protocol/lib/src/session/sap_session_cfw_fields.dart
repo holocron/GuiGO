@@ -254,7 +254,8 @@ extension SapSessionCfwFields on SapSession {
   /// Pick item [key] of combo box [shell] (a unique item TEXT is taken
   /// for its key): the local selection changes, and — the server having
   /// registered it — `%_GC <shell> -600` PARAM 0 = the KEY goes out
-  /// (a recorded session gui[97]). Refused, nothing sent: no such
+  /// (a recorded session gui[97]); the item already selected sends
+  /// nothing (the OCX fires no event for it). Refused, nothing sent: no such
   /// combo box on the screen, a key the item list does not hold
   /// ([ArgumentError]). Returns the frames of the server's answer (empty
   /// when nothing was sent).
@@ -275,6 +276,15 @@ extension SapSessionCfwFields on SapSession {
         );
       }
       k = byText.single.key;
+    }
+    // the item already selected: the OCX fires no select event — the real
+    // GUI's re-pick of "Programme" sent nothing (a recorded session
+    // subnode_dblclick: no frame on combo 149 in the whole session, its
+    // CurSel `P` the server's own put, srv[23]); a CHANGED pick does
+    // (a recorded session gui[97] `%_GC 150 -600` "P" after "O")
+    if (box.selectedKey == k) {
+      _trace('combo box $sh: $k is the selection already — nothing sent');
+      return const [];
     }
     (_cfState.combos[sh] ??= _Combo(sh)).selected = k;
     if (!box.selectRegistered) {

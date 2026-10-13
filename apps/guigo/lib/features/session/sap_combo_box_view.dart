@@ -2,6 +2,7 @@ import 'package:diag_protocol/diag_protocol.dart';
 import 'package:flutter/material.dart';
 
 import '../../core/sap_icons.dart';
+import 'session_busy.dart';
 import 'type_ahead.dart';
 
 /// The CFW combo box (CL_GUI_COMBOBOX, `SAPGUI.SAPComboBoxCtrl.1` — SE80's
@@ -25,7 +26,9 @@ class SapComboBoxView extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final sel = box.selected;
-    final enabled = !busy && box.enabled && box.items.isNotEmpty;
+    final enabled = !(busy || SessionBusy.of(context)) &&
+        box.enabled &&
+        box.items.isNotEmpty;
     return LayoutBuilder(
       builder: (context, cons) {
         final h = cons.maxHeight.isFinite ? cons.maxHeight : 28.0;
@@ -156,8 +159,12 @@ class _SapInputFieldViewState extends State<SapInputFieldView> {
     super.dispose();
   }
 
+  /// Busy as the last build drew it: the view's flag or the session's
+  /// ([SessionBusy], depended on in [build]).
+  bool _busy = false;
+
   bool get _enabled =>
-      !widget.busy && widget.field.enabled && widget.field.submitRegistered;
+      !_busy && widget.field.enabled && widget.field.submitRegistered;
 
   void _submit() {
     if (!_enabled) return;
@@ -188,6 +195,7 @@ class _SapInputFieldViewState extends State<SapInputFieldView> {
 
   @override
   Widget build(BuildContext context) {
+    _busy = widget.busy || SessionBusy.of(context);
     final scheme = Theme.of(context).colorScheme;
     final f = widget.field;
     return LayoutBuilder(
@@ -201,7 +209,7 @@ class _SapInputFieldViewState extends State<SapInputFieldView> {
         ) => TextField(
           key: ValueKey('inputfield-${f.shell}'),
           controller: _ctrl,
-          enabled: !widget.busy && f.enabled,
+          enabled: !_busy && f.enabled,
           textAlignVertical: TextAlignVertical.center,
           textInputAction: TextInputAction.go,
           style: TextStyle(

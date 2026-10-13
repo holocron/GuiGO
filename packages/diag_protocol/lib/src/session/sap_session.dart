@@ -9,15 +9,20 @@ import 'dart:typed_data';
 
 import '../codepages.dart' show wireDecode, wireText;
 import '../framing/client_request_stream.dart';
+import '../framing/decode_worker.dart';
 import '../framing/diag_frame.dart';
 import '../framing/envelope.dart';
+import '../framing/frame_facts.dart';
 import '../items/dynt_atom.dart' show attrInvisible;
 import '../ni/ni_frame.dart';
 import '../ni/saprouter.dart';
+import '../cfw/browser_launch.dart';
 import '../cfw/client_table_pull.dart';
 import '../cfw/context_menu.dart';
 import '../cfw/control_toolbar.dart';
+import '../cfw/datamanager_grammar.dart';
 import '../cfw/doi.dart';
+import '../cfw/office_document.dart';
 import '../cfw/dp_cache.dart' show DpCache;
 import '../cfw/dragdrop_service.dart';
 import '../cfw/ea_responder.dart';
@@ -36,6 +41,7 @@ import '../screen/sap_grid.dart';
 import '../screen/sap_netplan.dart';
 import '../screen/sap_picture.dart';
 import '../screen/sap_tree.dart';
+import '../screen/tree_columns.dart';
 import '../screen/sap_value_help.dart';
 import '../screen/screen_layout.dart';
 import '../screen/screen_model.dart';
@@ -60,12 +66,14 @@ import 'grid_selection.dart';
 import 'imode_scope.dart';
 import 'list_scroll.dart';
 import 'login.dart';
+import 'gui_profile.dart';
 import 'logon_frames.dart';
 import 'table_cell.dart';
 import 'trace_ring.dart';
 import 'type_ahead_actions.dart';
 import 'value_help_actions.dart';
 
+part 'sap_session_browser.dart';
 part 'sap_session_calendar.dart';
 part 'sap_session_canvas.dart';
 part 'sap_session_cfw_fields.dart';
@@ -79,7 +87,9 @@ part 'sap_session_grid_rows.dart';
 part 'sap_session_html.dart';
 part 'sap_session_layout.dart';
 part 'sap_session_list_scroll.dart';
+part 'sap_session_liveness.dart';
 part 'sap_session_menu.dart';
+part 'sap_session_office.dart';
 part 'sap_session_picture.dart';
 part 'sap_session_remote_logon.dart';
 part 'sap_session_request_stream.dart';
@@ -93,11 +103,11 @@ class SapSystem {
   SapSystem({
     required this.name,
     required this.host,
-    this.port = 3200,
+    this.port = defaultSapPort,
     this.routerString = '',
     this.client = '100',
     this.user = '',
-    this.language = 'EN',
+    this.language = defaultLogonLanguage,
   });
 
   String name;
@@ -160,7 +170,9 @@ class SapSession {
     this.snc,
     this.onWall,
     this.answerDialect = GuiDialect.windows,
+    EmulatedGuiProfile? guiProfile,
   })  : _password = password,
+        guiProfile = guiProfile ?? EmulatedGuiProfile.host(),
         _screenRows = screenRows,
         _screenCols = screenCols {
     // the logon's first window, DIAG mode 0 (sap_session_windows.dart)
@@ -169,7 +181,17 @@ class SapSession {
     // the client's own window (an app that knows its screen): every round
     // reports the pixels of THIS window (sap_session_resize.dart)
     if (sizedWindow) _w.ctx.sizeWindow(screenRows, screenCols);
+    // the device's own display (DISPLAY_SIZE / MAINAREA_SIZE / the 16/4/36
+    // window rect), when the app reports one
+    final display = this.guiProfile.displayPx;
+    if (display != null) _w.ctx.reportDisplay(display);
   }
+
+  /// What the logon says about this front end (gui_profile.dart): the OS,
+  /// browser and Office atoms of the logon submit and the display every
+  /// round reports. The host platform's ([EmulatedGuiProfile.host]) unless
+  /// the constructor names one.
+  final EmulatedGuiProfile guiProfile;
 
   /// The logon's windows, one per DIAG mode (sap_session_windows.dart);
   /// every per-window field below reads the active one ([_w]).
@@ -252,6 +274,19 @@ class SapSession {
   DateTime? _lastWire;
   final _closedController = StreamController<String>.broadcast();
 
+  /// The ceilings the transport holds the peer to (sap_session_liveness.
+  /// dart): a turn, the unread inbox, the parked window queues, the
+  /// retained tree tables; the idle watchdog's cadence.
+  TransportLimits limits = const TransportLimits();
+  int _inboxBytes = 0;
+  Duration? _pingGap; // the server's learned idle NI_PING interval
+  Timer? _watchdog;
+  int _parkedDropped = 0;
+
+  /// Time the logon spent waiting on the user (the multi-logon wall): not
+  /// counted against connect's logon deadline.
+  final Stopwatch _userWait = Stopwatch();
+
   /// Fires once when the SERVER closes the socket (the kernel's idle
   /// auto-logout, rdisp/gui_auto_logout — the test system tears a logon down after
   /// ~5 min of silence — or a teardown the last action provoked), with
@@ -271,6 +306,20 @@ class SapSession {
 
   String _peerClosedMessage() {
     if (loggedOff) return 'logged off — the server ended the session';
+    // the transport failed under us: a network loss is not the server's
+    // close, a dropped connection names why it was dropped
+    final err = _sockError;
+    if (err is ConnectionLostError) return err.message;
+    if (err is NiProtocolException) {
+      return 'the connection was dropped: ${err.message}';
+    }
+    if (err is SocketException || err is OSError) {
+      return 'the network connection to the server was lost ($err) — '
+          'check the network and log on again';
+    }
+    if (err is TimeoutException) {
+      return 'the connection was dropped: ${err.message ?? 'timed out'}';
+    }
     final last = _lastWire;
     final gap = last == null ? null : DateTime.now().difference(last);
     if (gap != null && gap.inSeconds >= 60) {
@@ -345,23 +394,65 @@ class SapSession {
   /// socket, its listener and the deframer are torn down before the error
   /// propagates (the server-side logon dies with the socket) and the
   /// password reference is dropped.
+  ///
+  /// [timeout] bounds the TCP connect (the name lookup included) and each
+  /// SAProuter handshake read; [logonTimeout] the whole logon on the wire.
   Future<void> connect({Duration timeout = const Duration(seconds: 10)}) =>
-      _exclusive('the logon', () => _connect(timeout));
+      _exclusive('the logon', () => _connect(timeout, logonTimeout));
 
-  Future<void> _connect(Duration timeout) async {
+  /// The most the whole logon may take on the wire (the time the
+  /// multi-logon wall waits on the user is not counted): a peer that keeps
+  /// sending without ever settling the logon cannot hold it open.
+  Duration logonTimeout = const Duration(minutes: 3);
+
+  Future<void> _connect(Duration timeout, Duration logonTimeout) async {
     if (state == SessionState.closed) throw SessionClosedError();
     state = SessionState.connecting;
+    Timer? logonTimer;
+    TimeoutException? logonExpired;
+    final logonClock = Stopwatch()..start();
+    void armLogonDeadline(Duration d) {
+      logonTimer = Timer(d, () {
+        final used = logonClock.elapsed - _userWait.elapsed;
+        if (used < logonTimeout) {
+          armLogonDeadline(logonTimeout - used);
+          return;
+        }
+        _abortTransport(logonExpired = TimeoutException(
+            'the logon did not complete within ${logonTimeout.inSeconds}s',
+            logonTimeout));
+      });
+    }
+
+    armLogonDeadline(logonTimeout);
     try {
       final route = parseRouteString(system.routerString);
       final first = route.isEmpty ? null : route.first;
       // the first hop's /S/ is a port number or an SAP service name
       // (sapdp00, sapgw00 …): resolved here, or refused with the reason
       final port = first == null ? system.port : resolveServicePort(first.port);
-      _sock = await Socket.connect(first?.host ?? system.host, port,
-          timeout: timeout)
+      final host = first?.host ?? system.host;
+      // Socket.connect's own timeout starts after the name lookup: the
+      // whole connect, DNS included, is bounded by [timeout] (a socket the
+      // abandoned attempt still opens is destroyed)
+      final pending = Socket.connect(host, port, timeout: timeout);
+      final sock = _sock = await pending.timeout(timeout, onTimeout: () {
+        pending.then((s) => s.destroy(), onError: (Object _) {});
+        throw TimeoutException(
+            'connecting to $host:$port (name lookup included)', timeout);
+      })
         ..setOption(SocketOption.tcpNoDelay, true);
+      // a half-open path (NAT expiry, network handover) is noticed by the
+      // OS while the session idles; a write error lands on `done`, never
+      // unhandled
+      enableTcpKeepAlive(sock);
+      unawaited(sock.done.then<void>((_) {}, onError: (Object e) {
+        _sockError ??= e;
+        _wakeReader();
+      }));
       _lastWire = DateTime.now();
-      _sockSub = _sock!.listen((data) {
+      _sockSub = sock.listen((data) {
+        final previousWire = _lastWire;
         _lastWire = DateTime.now();
         // NI_PING is answered the moment it arrives, also while the session
         // sits idle between actions: the real GUI's reader thread pongs at
@@ -376,18 +467,24 @@ class SapSession {
         } on NiProtocolException catch (e) {
           _inbox.addAll(e.framesBefore);
           _sockError ??= e;
-          _sock?.destroy();
+          _destroySocket();
           _notifyClosed();
           _wakeReader();
           return;
         }
         for (final payload in payloads) {
           if (_isNiPing(payload)) {
-            _sock?.add(niPongFrame);
+            _notePing(previousWire == null
+                ? null
+                : _lastWire!.difference(previousWire));
+            _pong();
             _trace('NI_PING answered (NI_PONG)');
             continue;
           }
           _inbox.add(payload);
+          if (_inboxOverflow(payload)) return; // the transport is dropped
+          // a big frame inflates off this isolate while the next arrives
+          if (_sncCtx == null) FrameDecodeOffload.ahead(payload);
         }
         _wakeReader();
       }, onError: (Object e) {
@@ -409,7 +506,8 @@ class SapSession {
       });
       if (route.isNotEmpty) {
         await _openRoute(
-            [...route, RouteHop(system.host, system.port.toString())]);
+            [...route, RouteHop(system.host, system.port.toString())],
+            timeout);
       }
       if (snc != null) {
         await _sncNegotiate();
@@ -417,12 +515,17 @@ class SapSession {
       state = SessionState.loggingIn;
       await _bootstrapGuarded();
       state = SessionState.ready;
+      _startWatchdog();
     } catch (e) {
       if (state != SessionState.closed) state = SessionState.failed;
       lastError = e.toString();
       _password = null;
       await _dropTransport();
+      // whatever read the deadline woke, the logon failed on the deadline
+      if (logonExpired case final expired?) throw expired;
       rethrow;
+    } finally {
+      logonTimer?.cancel();
     }
   }
 
@@ -435,23 +538,29 @@ class SapSession {
     _sockSub = null;
     _sock = null;
     _sncCtx = null;
+    _stopWatchdog();
     try {
       await sub?.cancel();
     } catch (_) {}
     sock?.destroy();
     _deframer.reset();
     _inbox.clear();
+    _inboxBytes = 0;
   }
 
   // --- transport -----------------------------------------------------------
 
   /// Ask the SAProuter we are connected to for a route through [hops]; on
   /// NI_PONG the socket carries plain NI traffic to the target from here on.
-  Future<void> _openRoute(List<RouteHop> hops) async {
+  Future<void> _openRoute(List<RouteHop> hops, Duration timeout) async {
     _sock!.add(niFrame(buildRouteRequest(hops)));
     await _sock!.flush();
-    final replies = await _recvRaw();
+    final replies = await _recvRaw(timeout);
     checkRouteReply(replies.first);
+    // whatever came with the route's NI_PONG is the target's: read next
+    for (final r in replies.skip(1).toList().reversed) {
+      _inbox.addFirst(r);
+    }
   }
 
 
@@ -516,7 +625,7 @@ class SapSession {
       closedByPeer = true; // the onDone of the socket destroyed below
       if (!_closedController.isClosed) _closedController.add(e.message);
     }
-    _sock?.destroy();
+    _destroySocket();
     _wakeReader();
     throw e;
   }
@@ -535,6 +644,12 @@ class SapSession {
   Future<Uint8List> _nextPayload(DateTime deadline) async {
     // a [close] ends every read at once, buffered frames or not
     if (state == SessionState.closed) throw SessionClosedError();
+    // the deadline holds on EVERY read, buffered frames or not: a peer
+    // that keeps a frame ahead of the reader never let the empty-inbox
+    // check below run (audit R-01)
+    if (!DateTime.now().isBefore(deadline)) {
+      throw TimeoutException('no complete reply from server in time');
+    }
     while (_inbox.isEmpty) {
       if (_sockError != null) throw _sockError!;
       final left = deadline.difference(DateTime.now());
@@ -545,17 +660,28 @@ class SapSession {
       await _wake!.future.timeout(left, onTimeout: () {});
       if (state == SessionState.closed) throw SessionClosedError();
     }
-    return _inbox.removeFirst();
+    final payload = _inbox.removeFirst();
+    _inboxTaken(payload);
+    // its off-isolate decode (decode_worker.dart), awaited in frame order
+    final decoding = _sncCtx == null
+        ? FrameDecodeOffload.ahead(payload, live: !offlineReplay)
+        : null;
+    if (decoding != null) {
+      await decoding;
+      if (state == SessionState.closed) throw SessionClosedError();
+    }
+    return payload;
   }
 
   /// Raw NI payloads: the next one plus whatever else is already buffered
   /// (used by the SNC handshake and the SAProuter route request).
-  Future<List<Uint8List>> _recvRaw() async {
-    if (_sock == null) throw StateError('session not connected');
-    final first = await _nextPayload(
-        DateTime.now().add(const Duration(seconds: 5)));
+  Future<List<Uint8List>> _recvRaw(
+      [Duration timeout = const Duration(seconds: 5)]) async {
+    if (_sock == null) throw _sockError ?? StateError('session not connected');
+    final first = await _nextPayload(DateTime.now().add(timeout));
     final out = [first, ..._inbox];
     _inbox.clear();
+    _inboxBytes = 0;
     return out;
   }
 
@@ -566,6 +692,13 @@ class SapSession {
     if (_w.mode != 0 && payload.length >= diagHeaderLen && payload[0] == 0) {
       payload = Uint8List.fromList(payload)..[0] = _w.mode;
     }
+    // debug builds: every DATAMANAGER the frame carries (the round's item
+    // 17, a flush answer's control report), typed values masked — so a
+    // CNDP 008 dump in CL_GUI_DATAMANAGER shows the document in the log
+    assert(() {
+      _traceDatamanagers(payload);
+      return true;
+    }());
     final body = clientBodyLength(payload);
     // a reply over the kernel's request buffer goes out as the real GUI's
     // sid-4 request stream (sap_session_request_stream.dart)
@@ -582,17 +715,34 @@ class SapSession {
     await _sendWire(payload);
   }
 
+  /// Trace the DATAMANAGER documents of client frame [payload]
+  /// ([datamanagerTraceText]: user input masked) with their grammar
+  /// problems (datamanager_grammar.dart). Debug builds only ([_send]).
+  void _traceDatamanagers(Uint8List payload) {
+    if (!traceEnabled) return;
+    final dec = decompressFrame(payload);
+    if (dec == null) return;
+    final docs = datamanagerDocuments(String.fromCharCodes(dec.body));
+    for (final (i, d) in docs.indexed) {
+      final p = datamanagerProblems(d);
+      _trace('datamanager out ${i + 1}/${docs.length} (${d.length} B'
+          '${p.isEmpty ? '' : ', MALFORMED: ${p.join('; ')}'}): '
+          '${datamanagerTraceText(d)}');
+    }
+  }
+
   /// [payload] onto the wire as it is (offline: into [sentFrames]).
   Future<void> _sendWire(Uint8List payload) async {
     if (offlineReplay) {
       sentFrames.add(payload); // offline capture replay (tools/tests)
+      _roundSent();
       return;
     }
     final s = _sock;
     if (s == null) {
       throw state == SessionState.closed
           ? SessionClosedError()
-          : StateError('session not connected');
+          : _sockError ?? StateError('session not connected');
     }
     if (_sncCtx != null) {
       payload = _sncCtx!.wrapFrame(payload);
@@ -600,6 +750,18 @@ class SapSession {
     s.add(niFrame(payload));
     await s.flush();
     _lastWire = DateTime.now();
+    _roundSent();
+  }
+
+  /// A round of the addressed window is on the wire: what it carried is
+  /// no longer owed (the list METRICS, [ActionContext.listMetricsSending]).
+  void _roundSent() {
+    final c = _w.ctx;
+    if (c.listMetricsSending) {
+      c
+        ..listMetricsSending = false
+        ..listMetricsOwed = false;
+    }
   }
 
   /// Send one client [frame] through the transport path every action's
@@ -644,6 +806,24 @@ class SapSession {
     _wakeReader();
   }
 
+  /// Offline replay of a capture ANOTHER front end answered (tools/tests):
+  /// the server's later verbs address the objects by THAT front end's
+  /// handles — the real GUI's mints, read from its creation answers (the
+  /// `_RESULT` rows of its CreateControl verbs: `O12` = splitter 118 of
+  /// a recorded session) — never by this session's own.
+  /// [handles] (its handle -> the kernel shell it was minted for) binds
+  /// each as this session's own mints are bound (the session alias, one
+  /// way: the shell keeps its own mint), so `GetRowHeight` on `O12` reads
+  /// splitter 118 and `SetProperty` on `O29` reaches calendar 142.
+  void adoptReplayHandles(Map<String, String> handles) {
+    if (!offlineReplay) {
+      throw StateError('adoptReplayHandles needs replayLogin first');
+    }
+    for (final MapEntry(key: h, value: sh) in handles.entries) {
+      _ea.shellAlias[h.trim()] = sh.trim();
+    }
+  }
+
   /// Receive until the server's turn ends (a paint or a mode-control frame).
   /// On timeout, frames already read are still folded (never dropped) before
   /// the exception propagates.
@@ -654,17 +834,30 @@ class SapSession {
   Future<List<Uint8List>> _recvTurn(Duration timeout) async {
     if (state == SessionState.closed) throw SessionClosedError();
     if (_sock == null && !offlineReplay) {
-      throw StateError('session not connected');
+      throw _sockError ?? StateError('session not connected');
     }
     final deadline = DateTime.now().add(timeout);
     final out = <Uint8List>[];
+    var read = 0, readBytes = 0;
     try {
       while (true) {
         final payload = await _nextPayload(deadline);
+        // a turn that never ends is a broken peer: its frames are not
+        // buffered without bound (audit R-01)
+        read++;
+        readBytes += payload.length;
+        if (read > limits.turnFrames || readBytes > limits.turnBytes) {
+          final e = NiProtocolException(
+              'a server turn ran past $read frame(s) / $readBytes B '
+              'without ending (ceiling ${limits.turnFrames} frames / '
+              '${limits.turnBytes} B)');
+          _abortTransport(e);
+          throw e;
+        }
         // NI_PING first: its 8 bytes (`NI_PING\0`, 0x49 has the EOP bit)
         // read as a mode-control frame and went unanswered
         if (_isNiPing(payload)) {
-          _sock?.add(niPongFrame);
+          _pong();
           continue;
         }
         var frame = payload;
@@ -723,8 +916,11 @@ class SapSession {
   void _foldTurn(List<Uint8List> out) {
     for (final (win, run) in _runsByWindow(out)) {
       _inWindow(win, () {
-        _fold(run);
-        _bindTree();
+        // a malformed push or paint never escapes the receive: the turn's
+        // owed answers still go out (an unanswered flush blocks the
+        // kernel in OLE_FLUSH_CALL) — counted, the folded-so-far kept
+        _guarded('screen fold', () => _fold(run));
+        _guarded('tree bind', _bindTree);
       });
     }
     _notifyWindows();
@@ -762,9 +958,11 @@ class SapSession {
     // srv[12]) carry no items: folded alone, they read as an empty repaint
     // and wiped the fields the paint just delivered
     if (frames.every((f) => f.length <= diagHeaderLen)) return;
-    _observeIModes(frames); // a delIMode kills its controls first
-    _ingestTrees(frames);
+    // a delIMode kills its controls first
+    _guarded('imode fold', () => _observeIModes(frames));
+    _guarded('tree ingest', () => _ingestTrees(frames));
     final before = screen?.program;
+    final calendarBaseBefore = _calendarBase;
     final identityBefore = screen == null ? null : _screenIdentity(screen!);
     final fold = foldWindows(baseScreen, screen, frames);
     screen = fold.active;
@@ -783,6 +981,17 @@ class SapSession {
     }
     _mirrorAreaPairs(frames);
     baseScreen = fold.coveredBase ?? (screen!.modalLevel == 0 ? screen : baseScreen);
+    // the calendars the new BASE screen's creation wave built were folded
+    // under the base before it (sap_calendar.dart retag) — a popup over the
+    // same base (the F4 date picker's SAPLSCAC) moves no calendar
+    final calendarBase = _calendarBase;
+    if (calendarBaseBefore != null &&
+        calendarBase != null &&
+        calendarBase != calendarBaseBefore &&
+        _actionStartStep != null) {
+      _cal.tracker.retag(calendarBaseBefore, calendarBase,
+          since: _progSinceStep ?? _actionStartStep!);
+    }
     _noteGenerations();
     // mirror geometry into the action context
     for (final f in frames) {
@@ -871,7 +1080,29 @@ class SapSession {
 
   static void _printTrace(String line) => print('[diag] $line');
 
+  /// Whether trace lines are recorded at all ([traceLog], [tracePrinter]).
+  static bool traceEnabled = true;
+
+  /// Whether the action-turn trace lines carry the per-item dump of every
+  /// frame sent / received (`16/9/2(351) 10/1=…`). On in debug / JIT runs,
+  /// off in a product build: the dump walks and stringifies every item of
+  /// every frame per turn for a line nobody reads there (audit zcode P-07);
+  /// the line then names frame sizes only.
+  static bool traceItemDumps = !_productBuild;
+
+  /// The longest [traceLog] line kept (the rest is cut, marked `…`): the
+  /// ring holds [traceCapacity] lines, and multi-KB item dumps made it
+  /// retain megabytes over a long session.
+  static const int traceLineCap = 4096;
+
+  String _frameTrace(Uint8List frame) =>
+      traceItemDumps ? _itemIds(frame) : '${frame.length} B';
+
   void _trace(String what) {
+    if (!traceEnabled) return;
+    if (what.length > traceLineCap) {
+      what = '${what.substring(0, traceLineCap)}…';
+    }
     final m = screen;
     final line = '$what: tcode=${m?.tcode} program=${m?.program} '
         'modal=${m?.modalLevel} base=${baseScreen?.program} '
@@ -953,8 +1184,15 @@ class SapSession {
     // GUI[0]: the connect/capability frame — the WINDOWS GUI's (the kernel
     // refuses the Windows wall/EA envelopes from a non-Windows connect)
     await _send(fixture == null
-        ? buildConnectFrame(dialect: GuiDialect.windows, terminal: terminal)
-        : windowsConnectFrame(fixture[0]));
+        ? buildConnectFrame(
+            dialect: GuiDialect.windows,
+            terminal: terminal,
+            language: system.language,
+            // the recorded window: a device-sized WSIZE in the connect drew
+            // 'invalid gui data' from the test system at the credential submit (live
+            // 2026-10-13); re-enable only after a live A/B
+            window: null)
+        : windowsConnectFrame(fixture[0], language: system.language));
     await recvTurn();
     _trace('connect reply');
     // GUI[1]: credential submit
@@ -973,7 +1211,8 @@ class SapSession {
           language: system.language,
           screenRows: screenRows,
           screenCols: screenCols,
-          window: ctx);
+          window: ctx,
+          profile: guiProfile);
     } else {
       var patched = patchLoginFrame(fixture[1],
           client: system.client,
@@ -1149,11 +1388,12 @@ class SapSession {
             compress: false));
         sent++;
       }
-      for (final (value, closingStep) in folded.calls) {
+      for (final (k, (value, closingStep)) in folded.calls.indexed) {
         // keyed with the closing step: the same queue on a later screen is
         // a new call and must be answered again (a skipped answer hangs it)
         // (an exact key: a collision would skip an owed answer)
-        if (!String.fromCharCodes(value).contains('OLE_FLUSH_CALL')) continue;
+        // (every folded call carries OLE_FLUSH_CALL: a self-contained one
+        // is keyed on it, a joined one opens with its marked head)
         final key = AnsweredCalls.keyOf('flush', closingStep, value);
         if (!_answeredFlushes.add(key)) continue;
         // ONE parse of the call feeds every side model and the answer
@@ -1167,7 +1407,9 @@ class SapSession {
         Object? parseError;
         var editorsTouched = const <String>{};
         try {
-          parsed = parseFlushCall(value, dialect: answerDialect);
+          // the frame readers' parse of this item, re-typed for the answer
+          // (no second decode of the call's cells; audit #2)
+          parsed = flushCallOf(value, dialect: answerDialect);
         } catch (e) {
           parseError = e;
         }
@@ -1205,13 +1447,17 @@ class SapSession {
         // registry stamps run on the home clock (a relayed frame's
         // own step is another system's); the answer echoes closingStep
         final clock = _clockOf(f, closingStep);
-        _guarded('layout fold', () => _foldLayoutCall(call, clock));
+        final splitterReads =
+            _guarded('layout fold', () => _foldLayoutCall(call, clock));
         _guarded('html fold', () => _foldHtmlCall(value, call, clock));
+        _guarded('browser launch fold', () => _foldBrowserCall(call, clock));
         _guarded('toolbar fold', () => _foldToolbarCall(value, call));
         _guarded('cfw field fold', () => _foldCfwFieldCall(value, call));
+        _guarded('tree key pushes', () => _foldTreeKeyPushes(call, value));
         _guarded('value help fold', () => _foldValueHelpCall(call, value));
         final calendarAnswers =
-            _guarded('calendar fold', () => _foldCalendarCall(call, value));
+            _guarded('calendar fold',
+                () => _foldCalendarCall(call, value, step: clock));
         // a value help's result set into a grid cell: adopted in THIS
         // answer (sap_session_grid_edit.dart)
         final adoption =
@@ -1230,11 +1476,25 @@ class SapSession {
               'tree header props', () => _treeHeaderPropAnswers(call)),
           ...?adoption?.$2,
           ...?calendarAnswers,
+          ...?splitterReads,
         };
         _ea.step = closingStep; // the answer stamps the closing frame's step
-        final List<Uint8List>? items;
+        List<Uint8List>? items;
         try {
-          items = buildAnswer(_ea, call,
+          // a pulled DataProvider push joined across frames (the editor's
+          // LEXER_DATA after the creation answer's <BLOBS>): no verb, owed
+          // the empty execution ack (ea_responder.dart) — before the
+          // responder's queue echo, which its RFC_QUEUE (a > 64 KB cell,
+          // readable since rfcColumns reads the u32 length) would get
+          // otherwise (a recorded session gui[38])
+          if (folded.joinedCalls.contains(k)) {
+            items = buildExecutionAck(_ea, call);
+            if (items != null) {
+              _trace('pulled data push executed (${value.length} B, '
+                  'step $closingStep)');
+            }
+          }
+          items ??= buildAnswer(_ea, call,
               propStore: propStore,
               exportXml: adoption?.$1 ?? editorReport);
         } catch (e) {
@@ -1368,6 +1628,11 @@ class SapSession {
     final editorState = _guarded(
         'editor pending props', () => _pendingEditorControls(built));
     if (editorState != null) built = withGridStateXml(built, '', editorState);
+    // the cells a sash drag resized: their realized sizes, once
+    // (sap_session_layout.dart noteSplitterSash)
+    final sashState =
+        _guarded('sash drag props', () => _pendingSashControls());
+    if (sashState != null) built = withGridStateXml(built, '', sashState);
     // the Java GUI's OK mode = the acked paint's | the focus half the
     // round finally names (frontend_profile.withJavaOkMode); a Windows
     // round's builders decided it already (windowsOkMode)
@@ -1382,7 +1647,7 @@ class SapSession {
     _modes.actionCommand = modeCommand;
     final failuresBefore = answerFailures;
     try {
-      _trace('action send ${_itemIds(frame)}');
+      _trace('action send ${_frameTrace(frame)}');
       await _send(frame);
       if (staged != null) _gridStateFlushed();
       final all = <Uint8List>[];
@@ -1410,7 +1675,7 @@ class SapSession {
         final paints = _paintsScreen(got);
         _trace('action turn $i: ${got.length} frames, sent $sent, '
             'paints $paints${part == null ? '' : ' (partial: timed out)'} '
-            '${[for (final f in got) _itemIds(f)].join(' || ')}');
+            '${[for (final f in got) _frameTrace(f)].join(' || ')}');
         // the server logged the session off (EOC): the action is done,
         // nothing more is read or sent (sap_session_windows.dart)
         if (loggedOff) break;
@@ -1672,15 +1937,10 @@ class SapSession {
   }
 
   bool _paintsScreen(List<Uint8List> frames) {
+    // memoized per frame (frame_facts.dart): asked per action round over
+    // the round's growing frame list
     for (final f in frames) {
-      final dec = decompressFrame(f);
-      if (dec == null) continue;
-      for (final it in dec.walk.items) {
-        if (it.isAppl &&
-            ((it.id == applStR3Info && it.sid == 13) || it.id == applDynt)) {
-          return true;
-        }
-      }
+      if (frameFacts(f)?.paintsScreen ?? false) return true;
     }
     return false;
   }
@@ -1726,9 +1986,12 @@ class SapSession {
             [stepItem(at), buildApplItem(8, 1, selOpts), eomBytes]));
         continue;
       }
-      if (doiDocumentPullVerdict(_doi, v) == null) continue; // refused
+      // the DOI model's read-backs and the document save-back — a refused
+      // save-back is the front end's exception reply, never left
+      // unanswered (sap_session_office.dart)
       var rfc = doiAnswerPullRfc(_ea, _doi, v) ??
           doiAnswerDocumentPullRfc(_doi, v);
+      if (rfc != null && url != null) _loadedSinks.remove(url);
       final sink = rfc != null || url == null
           ? null
           : _propertySinks.remove(url);
@@ -1752,18 +2015,41 @@ class SapSession {
         // left on the client (sap_session_tree.dart noteTreeExpansion /
         // noteTreeSelection)
         final held = switch (sink?.prop) {
-          'ExpandedKeys' => _expandedKeys,
-          'SelectionKeys' => _w.selectionKeys,
+          expandedKeysProp => _expandedKeys,
+          selectionKeysProp => _w.selectionKeys,
           _ => null,
         };
         if (sink != null && held != null) {
-          final shell = _ea.shellAlias[sink.source] ?? sink.source;
+          final shell = _treeShellOfToken(sink.source) ??
+              _ea.shellAlias[sink.source] ??
+              sink.source;
           keys = held[shell] ?? held[sink.source] ?? keys;
-          // a node the tree no longer holds is neither open nor selected
+          // a node the tree no longer holds is neither open nor selected;
+          // the rest in the tree's display order, as the OCX reads them
+          // (a recorded session gui[67] `1, 4, 5, 6, 8`)
           final nodes = trees[shell]?.nodes;
           if (nodes != null && nodes.isNotEmpty) {
-            keys = [for (final k in keys) if (nodes.containsKey(k)) k];
+            keys = _inTreeOrder(shell, keys);
           }
+        }
+        // a calendar's Selection read-back: the interval the server last
+        // assigned it (sap_calendar.dart takeSelectionRead) — in the
+        // Windows OCX's envelope; the Java bean's is unrecorded
+        final selection = sink == null &&
+                url != null &&
+                answerDialect == GuiDialect.windows
+            ? _cal.tracker.takeSelectionRead(url)
+            : null;
+        if (selection != null) {
+          _loadedSinks.remove(url);
+          out.add(clientFrame([
+            stepItem(at),
+            buildApplItem(8, 1, calendarSelectionPullAnswer(v, selection)),
+            eomBytes,
+          ]));
+          _trace('client table pull answered ($url calendar Selection, '
+              '${selection.length} rows, step $at)');
+          continue;
         }
         final loaded = sink == null && _loadedSinks.remove(url);
         // an HTML viewer's sapevent POST body (sap_session_html.dart)
@@ -1858,14 +2144,20 @@ class SapSession {
     var which =
         endOtherSessions ? WallOption.endOthers : WallOption.keepOthers;
     if (onWall != null) {
-      which = await onWall!(wall).timeout(
-          const Duration(minutes: 3), onTimeout: () => WallOption.keepOthers);
+      _userWait.start(); // the user's time: not the logon deadline's
+      try {
+        which = await onWall!(wall).timeout(
+            const Duration(minutes: 3), onTimeout: () => WallOption.keepOthers);
+      } finally {
+        _userWait.stop();
+      }
     }
     if (which == WallOption.cancelLogon) {
       final cancelRow = wallRowFor(wall, WallOption.cancelLogon);
       if (cancelRow != null) {
         await _send(
-            clientFrame(_withFirstRound(windowsWallItems(step, wall, cancelRow))));
+            clientFrame(_withFirstRound(windowsWallItems(step, wall, cancelRow,
+                windowRect: windowsWindowRect(ctx)))));
       }
       throw StateError('logon cancelled at the multi-logon wall');
     }
@@ -1876,7 +2168,8 @@ class SapSession {
     }
     // step echoes the wall paint's own counter — the real GUI's answer
     // carries it unchanged (a recorded session gui raw[2])
-    await _send(clientFrame(_withFirstRound(windowsWallItems(step, wall, row))));
+    await _send(clientFrame(_withFirstRound(windowsWallItems(step, wall, row,
+        windowRect: windowsWindowRect(ctx)))));
     _wallHandled = true;
     final got = await recvTurn();
     await _driveAutomation(got);
@@ -1951,9 +2244,13 @@ class SapSession {
     // the pushes new since the last fold, by the cache's arrival counter
     // (an index into its order would shift under its eviction)
     final fresh = dp.addedSince(_dpSeen);
-    _dpSeen = dp.seq;
+    // the watermark advances only once the fresh pushes were decoded: a
+    // throw before it leaves them for the next fold, never dropped
+    final seenTo = dp.seq;
     for (final url in fresh) {
-      final t = decodeNamedDpTable(dp.byUrl[url]!);
+      final seg = dp.byUrl[url];
+      if (seg == null) continue;
+      final t = _guarded('tree push decode', () => decodeNamedDpTable(seg));
       if (t == null) continue;
       final isNodes = t.columns.contains('RELATKEY');
       final isItems = t.columns.contains('ITEM_NAME');
@@ -1970,10 +2267,12 @@ class SapSession {
         }
         _treeUnbound = true;
       }
+      if (!_treeTableFits(t)) continue; // the retained-bytes ceiling
       _treeTables.add(t);
       _noteTreeTable(url, t);
       changed = true;
     }
+    _dpSeen = seenTo;
     if (changed) {
       final m = SapTreeModel();
       for (final t in _treeTables) {
@@ -2002,12 +2301,9 @@ class SapSession {
   }
 
   bool _paintsProgram(List<Uint8List> frames) {
+    // memoized per frame (frame_facts.dart): every side fold asks it
     for (final f in frames) {
-      final dec = decompressFrame(f);
-      if (dec == null) continue;
-      for (final it in dec.walk.items) {
-        if (it.isAppl && it.id == applStR3Info && it.sid == 13) return true;
-      }
+      if (frameFacts(f)?.namesProgram ?? false) return true;
     }
     return false;
   }
@@ -2263,10 +2559,10 @@ class SapSession {
     // typed / ticked classic-list cells ride the list key round
     final listCells = _listCellKeyRound(vkey);
     if (listCells != null) return listCells;
-    // a paging key on a classic list: the list's own key round
+    // a key on a classic list window: the list's own key round
     // (sap_session_list_scroll.dart)
-    final paging = _listPagingKey(vkey);
-    if (paging != null) return paging;
+    final listKey = _listKey(vkey);
+    if (listKey != null) return listKey;
     // typed cells of one table control ride the key in its TABLE plane
     // (a recorded session gui[313]); cells beside other typed
     // values go first as their own Enter round ([_sendStagedCellsFirst])
@@ -2370,6 +2666,9 @@ class SapSession {
               cursorOnButton: cursorOnPushbutton(screen, ctx.paintedFocus)),
           dialectReady: true);
     }
+    // a code typed on a classic list window: the list's own round
+    final listOk = _listOkcode(cmd);
+    if (listOk != null) return listOk;
     return _act(okcodeItems(ctx, cmd));
   }
 
@@ -2553,6 +2852,7 @@ class SapSession {
     await _framesController.close();
     await _modes.changes.close();
     await _closedController.close();
+    await _closeBrowserLaunches();
   }
 }
 
@@ -2647,9 +2947,20 @@ void mirrorPaintGeometry(ActionContext ctx, Iterable<Uint8List> frames,
         .skip(top)
         .where((it) => it.isAppl && it.id == 12 && it.sid == 6)
         .firstOrNull;
+    // a DELTA repaint of the screen already shown (SES screen_flag bit 0x01
+    // clear, screen_model.dart sesIsDeltaPaint) resends the window pair but
+    // no 16/12/6: the screen's geometry stands — the real GUI's next round
+    // reports the same SCROLL_INFOS2 as before it (a recorded session
+    // _okcode_pick gui[5] after the type-ahead answer's body-less srv[7],
+    // as gui[3] before it); dropping it sent the fallback window cells
+    Uint8List? lastSes;
+    for (final it in all) {
+      if (it.type == itemSes && it.value.length >= 16) lastSes = it.value;
+    }
+    final delta = sesIsDeltaPaint(lastSes);
     if (geom != null) {
       ctx.paintedGeometry = Uint8List.fromList(geom.value);
-    } else if (windows.isNotEmpty) {
+    } else if (windows.isNotEmpty && !delta) {
       ctx.paintedGeometry = null;
     }
     if (windows.isNotEmpty) {
@@ -2664,10 +2975,13 @@ void mirrorPaintGeometry(ActionContext ctx, Iterable<Uint8List> frames,
           own == null ? null : Uint8List.fromList(own.value);
     }
     if (windows.isNotEmpty) {
-      // the window level this paint is of: its (last) SES modal byte
+      // the window level this paint is of: its (last) SES modal byte; the
+      // internal mode it runs in: the SES imode byte (10)
       var level = windows.length - 1;
+      int? imode;
       for (final it in all) {
         if (it.type == itemSes && it.value.length >= 10) level = it.value[7];
+        if (it.type == itemSes && it.value.length >= 11) imode = it.value[10];
       }
       _parkOrRestoreFocus(ctx, level, screen);
       ctx.paintedModalLevel = windows.length - 1;
@@ -2699,7 +3013,15 @@ void mirrorPaintGeometry(ActionContext ctx, Iterable<Uint8List> frames,
       }
       ctx
         ..paintedList = list
-        ..paintedListCursor = list ? listCursor : null;
+        ..paintedListCursor = list ? listCursor : null
+        // a main-window list opened in a DEEPER internal mode: the first
+        // round after it resends METRICS ([ActionContext.listMetricsOwed])
+        ..listMetricsSending = false
+        ..listMetricsOwed = list &&
+            level == 0 &&
+            imode != null &&
+            imode > ctx.paintedImode;
+      if (imode != null) ctx.paintedImode = imode;
     }
     for (var i = 0; i < all.length; i++) {
       final it = all[i];

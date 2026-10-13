@@ -147,7 +147,7 @@ String? _span(String doc, String tag) {
 
 String _unescape(String s) {
   if (!s.contains('&')) return s;
-  return s.replaceAllMapped(RegExp(r'&(#x[0-9a-fA-F]+|#\d+|\w+);'), (m) {
+  return s.replaceAllMapped(_unescapeRx, (m) {
     final e = m.group(1)!;
     if (e.startsWith('#x')) {
       return String.fromCharCode(int.parse(e.substring(2), radix: 16));
@@ -422,3 +422,7 @@ String? _documentOf(Uint8List seg) {
   final start = text.indexOf('<');
   return start < 0 ? null : text.substring(start).trimRight();
 }
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _unescapeRx = RegExp(r'&(#x[0-9a-fA-F]+|#\d+|\w+);');

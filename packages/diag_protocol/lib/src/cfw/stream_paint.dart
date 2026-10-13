@@ -21,6 +21,7 @@ library;
 import 'dart:typed_data';
 
 import '../framing/diag_frame.dart';
+import '../lzh/lzh.dart' show csMaxDecodedLength;
 
 /// The bracketed TLV parameter name that introduces the nested stream.
 const List<int> streamAnchor = [
@@ -61,6 +62,10 @@ int _indexOf(Uint8List hay, List<int> needle) {
     n = bd.getUint32(s);
     s += 4;
   }
+  // a declared stream past the decode cap is no paint: accepting it would
+  // classify every later sid-4 value as a continuation, buffered toward a
+  // length (up to 4 GB) that never arrives
+  if (n > csMaxDecodedLength) return null;
   return (s, n);
 }
 
@@ -144,7 +149,10 @@ class StreamPaintAssembler {
     final done = <Uint8List>[];
     for (final it in dec.walk.items) {
       if (!it.isAppl || it.id != 8) continue;
-      final v = Uint8List.fromList(it.value);
+      // the item's view: [_buf] copies what it keeps, and the classifier
+      // keeps nothing (a copy per id-8 value, the big non-paint ones
+      // discarded, was the double copy of audit #10)
+      final v = it.value;
       switch (_state.feed(it.sid, v)) {
         case PaintPart.head:
           final tok = streamToken(v)!;

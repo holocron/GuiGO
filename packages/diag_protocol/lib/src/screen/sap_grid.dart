@@ -19,6 +19,7 @@
 /// Pairing is by the bindings' kernel shell ([dpPushBindings]).
 library;
 
+import 'dart:collection';
 import 'dart:typed_data';
 
 import '../cfw/context_menu.dart' show SapMenuEntry;
@@ -47,6 +48,8 @@ class SapGridModel {
     this.optPacket,
     Map<int, Map<String, String>>? modifiedCells,
     Set<String>? hotspotColumns,
+    Map<int, Set<String>>? hotspotCells,
+    Map<int, Map<String, bool>>? checkboxCells,
     this.selectionMode,
     List<SapToolbarButton>? toolbar,
     Map<String, List<SapMenuEntry>>? toolbarMenus,
@@ -54,6 +57,8 @@ class SapGridModel {
        toolbar = toolbar ?? [],
        toolbarMenus = toolbarMenus ?? {},
        hotspotColumns = hotspotColumns ?? {},
+       hotspotCells = hotspotCells ?? {},
+       checkboxCells = checkboxCells ?? {},
        modifiedCells = modifiedCells ?? {},
        titles = titles ?? [],
        widths = widths ?? [],
@@ -146,6 +151,60 @@ class SapGridModel {
   /// (a recorded session srv[157]) or of SE16 (srv[15]) has it.
   Set<String> hotspotColumns;
 
+  /// The CELLS the server styled HOTSPOT one by one, beyond
+  /// [hotspotColumns]: 1-based line -> field names. A DataTableOnDemand
+  /// cell's own style (its 3rd field) carries the same MC_STYLE_HOTSPOT
+  /// bit 0x00200000 when the ALV's cell style table (LVC_S_STYL) sets it —
+  /// the DBA cockpit's load history KPI grid 281 (a recorded session
+  /// load_history srv[40..42]): column FLAG's catalog style 0x00121000
+  /// has no hotspot, every FLAG cell does (0x00240000 checked / 0x00220000
+  /// unchecked: the checkbox bits 0x00040000 / 0x00020000 beside it), and
+  /// the real GUI fired `%_GC 281 2` on a FLAG cell (gui[30]).
+  Map<int, Set<String>> hotspotCells;
+
+  /// The CHECKBOX cells (1-based line -> field name -> checked): a cell
+  /// style with the checkbox bit 0x00020000 (unchecked) or 0x00040000
+  /// (checked) — a recorded session srv[40..42], the KPI
+  /// grid's FLAG (0x00240000 + text `X` on the shown KPI, 0x00220000 + ''
+  /// on the others) and the hosts grid's ACTIVE (0x00040000 / 0x00020000).
+  Map<int, Map<String, bool>> checkboxCells;
+
+  /// The cell's CurrentCellText as the OCX reports it: a checkbox cell's
+  /// state `1` / `0` (a recorded session g[24]: `1` for the
+  /// checked FLAG / ACTIVE cell of row 1; g[30]: `0` for the unchecked FLAG
+  /// of row 2), any other cell its text; '' for an undelivered one.
+  String currentCellText(int line, String column) {
+    final box = checkboxCells[line]?[column];
+    if (box != null) return box ? '1' : '0';
+    final i = columns.indexOf(column);
+    final r = rowAt(line);
+    if (i < 0 || r == null) return '';
+    return i < r.length ? r[i] : '';
+  }
+
+  /// Whether cell ([line], [column]) fires the hotspot click: its column
+  /// or the cell itself is styled HOTSPOT.
+  bool isHotspot(int line, String column) =>
+      hotspotColumns.contains(column) ||
+      (hotspotCells[line]?.contains(column) ?? false);
+
+  /// How many of [rows] hold a non-blank cell (what the layout sizes the
+  /// grid's pane by). Memoized per rows list and per row: a built model's
+  /// rows never change, and a build after an on-demand fetch shares the
+  /// untouched row lists ([SapGridAssembler.build]) — the layout's scan
+  /// trimmed every cell of every row per composition (audit zcode P-03).
+  int get nonEmptyRowCount => _nonEmptyRows[rows] ??= () {
+        var n = 0;
+        for (final r in rows) {
+          if (_rowHasText[r] ??= r.any((c) => c.trim().isNotEmpty)) n++;
+        }
+        return n;
+      }();
+
+  /// Whether any cell of the grid is a hotspot.
+  bool get hasHotspots =>
+      hotspotColumns.isNotEmpty || hotspotCells.values.any((s) => s.isNotEmpty);
+
   /// The GridView's `SelectionMode` property as the creation queue last
   /// set it (null when no queue set it): 1 on the grids whose cell click
   /// also selects the row — their double-click / hotspot click flushes a
@@ -186,6 +245,9 @@ class SapGridModel {
       '${totalRows == null ? '' : '/$totalRows'} rows)';
 }
 
+final Expando<int> _nonEmptyRows = Expando('grid non-empty rows');
+final Expando<bool> _rowHasText = Expando('grid row has text');
+
 /// InfoTable line fields (0-based positions in its fixed 26-field FORMAT).
 const int _infoName = 0;
 const int _infoWidth = 4;
@@ -195,12 +257,18 @@ const int _infoColId = 17;
 /// ALV's MC_STYLE_HOTSPOT bit of the InfoTable style field (see
 /// [SapGridModel.hotspotColumns]).
 const int gridStyleHotspot = 0x00200000;
+
+/// A DataTableOnDemand cell style's checkbox bits ([SapGridModel
+/// .checkboxCells]): unchecked / checked.
+const int gridStyleCheckbox = 0x00020000;
+const int gridStyleCheckboxChecked = 0x00040000;
 const int _minLabelWidth = 40; // the header-text fields are the C(120) ones
 
 /// DataTableOnDemand cell fields (0-based positions in its 17-field FORMAT).
 const int _cellCol = 0;
 const int _cellRow = 1;
 const int _cellText = 3;
+const int _cellStyle = 2;
 
 const int _typeC = 0x43;
 const int _typeI = 0x49;
@@ -265,6 +333,13 @@ class SapGridAssembler {
 
   /// row (1-based grid line) -> column id -> text
   final Map<int, Map<int, String>> _cells = {};
+
+  /// row (1-based grid line) -> the column positions whose own cell style
+  /// is HOTSPOT ([SapGridModel.hotspotCells])
+  final Map<int, Set<int>> _hotspotCells = {};
+
+  /// row -> column position -> checked ([SapGridModel.checkboxCells])
+  final Map<int, Map<int, bool>> _checkboxCells = {};
   int? _rowCount;
   int? _cellCount;
   int _delivered = 0; // cell records folded in (row ids included)
@@ -303,6 +378,7 @@ class SapGridAssembler {
   /// server's confirmation of it.
   void setCellText(int line, int position, String text, {bool pending = true}) {
     _version++;
+    _dirtyRows.add(line);
     final cells = _cells[line] ??= {};
     if (!cells.containsKey(position)) _delivered++;
     cells[position] = text;
@@ -349,6 +425,9 @@ class SapGridAssembler {
     _contentStamp++;
     _version++;
     _cells.clear();
+    _allRowsDirty = true;
+    _hotspotCells.clear();
+    _checkboxCells.clear();
     _covered.clear();
     pendingEdits.clear();
     _delivered = 0;
@@ -359,7 +438,8 @@ class SapGridAssembler {
   void markRowsCovered(int first, int last) {
     _version++;
     for (var r = first; r <= last; r++) {
-      _covered.add(r);
+      // a row only changes if it was not covered yet and holds cells
+      if (_covered.add(r) && _cells.containsKey(r)) _dirtyRows.add(r);
     }
   }
 
@@ -432,6 +512,7 @@ class SapGridAssembler {
     final colKey = t.columns[_cellCol];
     final rowKey = t.columns[_cellRow];
     final textKey = t.columns[_cellText];
+    final styleKey = t.types[_cellStyle] == _typeI ? t.columns[_cellStyle] : null;
     final stride = cellsPerRow;
     for (var i = 0; i < t.rows.length; i++) {
       final r = t.rows[i];
@@ -441,9 +522,25 @@ class SapGridAssembler {
         row = (firstLine + i - 1) ~/ stride + 1;
       }
       if (col == null || row == null || row < 1) continue;
+      _dirtyRows.add(row);
       final cells = _cells[row] ??= {};
       if (!cells.containsKey(col)) _delivered++;
       cells[col] = (r[textKey] ?? '').trimRight();
+      if (col >= 1 && styleKey != null) {
+        final style = int.tryParse((r[styleKey] ?? '').trim()) ?? 0;
+        if ((style & gridStyleHotspot) != 0) {
+          (_hotspotCells[row] ??= {}).add(col);
+        } else {
+          _hotspotCells[row]?.remove(col);
+        }
+        if ((style & gridStyleCheckboxChecked) != 0) {
+          (_checkboxCells[row] ??= {})[col] = true;
+        } else if ((style & gridStyleCheckbox) != 0) {
+          (_checkboxCells[row] ??= {})[col] = false;
+        } else {
+          _checkboxCells[row]?.remove(col);
+        }
+      }
     }
     return true;
   }
@@ -488,40 +585,93 @@ class SapGridAssembler {
     return true;
   }
 
+  // The materialized whole rows, kept across builds (audit #3: every
+  // build — a firstVisibleRow / DATAREQUEST hop — re-sorted every line and
+  // copied every cell of every loaded row; an SE16-class grid a few
+  // thousand rows in copied > 1 M cell references per 40-row scroll hop).
+  // Only the lines a change touched ([_dirtyRows]) are re-materialized;
+  // everything is when the row rule itself moved (a reset, a new catalog
+  // width, the provider's every-cell-arrived verdict).
+  final SplayTreeMap<int, List<String>> _rowCache = SplayTreeMap();
+  final SplayTreeMap<int, String> _rowIdCache = SplayTreeMap();
+  final Set<int> _dirtyRows = {};
+  bool _allRowsDirty = true;
+  bool _cacheComplete = false;
+  int _cacheWidth = -1;
+
+  /// The row maps / head lists of the last build, reused while no row
+  /// changed (a model never changes once built, so sharing them is safe).
+  (Map<int, List<String>>, Map<int, String>, List<List<String>>, List<String>)?
+      _builtRows;
+
+  /// Re-materialize line [line] into the row cache.
+  void _materialize(int line, int n, bool complete) {
+    final cells = _cells[line];
+    if (n == 0 || cells == null) {
+      _rowCache.remove(line);
+      _rowIdCache.remove(line);
+      return;
+    }
+    // a packet may end mid-row (OptPacket cells): a row shows once
+    // whole — or once a DATAREQUEST reply covered its whole line span
+    var whole = complete || _covered.contains(line);
+    if (!whole) {
+      whole = true;
+      for (var c = 1; c <= n; c++) {
+        if (!cells.containsKey(c)) {
+          whole = false;
+          break;
+        }
+      }
+    }
+    if (!whole) {
+      _rowCache.remove(line);
+      _rowIdCache.remove(line);
+      return;
+    }
+    _rowCache[line] = [for (var c = 1; c <= n; c++) cells[c] ?? ''];
+    _rowIdCache[line] = cells[-1] ?? '';
+  }
+
   SapGridModel _build() {
     final n = _names.length;
     // every declared cell arrived (the provider omits initial cells — the
     // ST04 message grid: 5 records for a 13-column row): a gap is ''
     final complete = _cellCount != null && _delivered >= _cellCount!;
-    final loaded = <int, List<String>>{};
-    final loadedIds = <int, String>{};
-    if (n > 0) {
-      for (final line in _cells.keys.toList()..sort()) {
-        final cells = _cells[line]!;
-        // a packet may end mid-row (OptPacket cells): a row shows once
-        // whole — or once a DATAREQUEST reply covered its whole line span
-        var whole = complete || _covered.contains(line);
-        if (!whole) {
-          whole = true;
-          for (var c = 1; c <= n; c++) {
-            if (!cells.containsKey(c)) {
-              whole = false;
-              break;
-            }
-          }
+    var rowsChanged = _builtRows == null;
+    if (_allRowsDirty || complete != _cacheComplete || n != _cacheWidth) {
+      _rowCache.clear();
+      _rowIdCache.clear();
+      if (n > 0) {
+        for (final line in _cells.keys) {
+          _materialize(line, n, complete);
         }
-        if (!whole) continue;
-        loaded[line] = [for (var c = 1; c <= n; c++) cells[c] ?? ''];
-        loadedIds[line] = cells[-1] ?? '';
       }
+      rowsChanged = true;
+    } else if (_dirtyRows.isNotEmpty) {
+      for (final line in _dirtyRows) {
+        _materialize(line, n, complete);
+      }
+      rowsChanged = true;
     }
-    // the gap-free head (lines 1..k) is what [SapGridModel.rows] lists
-    final rows = <List<String>>[];
-    final rowIds = <String>[];
-    for (var line = 1; loaded.containsKey(line); line++) {
-      rows.add(loaded[line]!);
-      rowIds.add(loadedIds[line]!);
+    _dirtyRows.clear();
+    _allRowsDirty = false;
+    _cacheComplete = complete;
+    _cacheWidth = n;
+    if (rowsChanged) {
+      // line order, as the sorted scan built them
+      final loaded = Map<int, List<String>>.of(_rowCache);
+      final loadedIds = Map<int, String>.of(_rowIdCache);
+      // the gap-free head (lines 1..k) is what [SapGridModel.rows] lists
+      final head = <List<String>>[];
+      final headIds = <String>[];
+      for (var line = 1; loaded.containsKey(line); line++) {
+        head.add(loaded[line]!);
+        headIds.add(loadedIds[line]!);
+      }
+      _builtRows = (loaded, loadedIds, head, headIds);
     }
+    final (loaded, loadedIds, rows, rowIds) = _builtRows!;
     int? total = _rowCount;
     final cc = _cellCount;
     if (total == null && cc != null && n > 0 && cc % (n + 1) == 0) {
@@ -550,6 +700,22 @@ class SapGridAssembler {
           },
       },
       hotspotColumns: Set.of(_hotspots),
+      hotspotCells: {
+        for (final e in _hotspotCells.entries)
+          if (e.value.any((c) => c >= 1 && c <= n))
+            e.key: {
+              for (final c in e.value)
+                if (c >= 1 && c <= n) _names[c - 1],
+            },
+      },
+      checkboxCells: {
+        for (final e in _checkboxCells.entries)
+          if (e.value.isNotEmpty)
+            e.key: {
+              for (final c in e.value.entries)
+                if (c.key >= 1 && c.key <= n) _names[c.key - 1]: c.value,
+            },
+      },
       selectionMode: selectionMode,
       toolbar: _toolbar,
       toolbarMenus: Map.unmodifiable(_toolbarMenus),

@@ -110,7 +110,7 @@ ItemWalk walkItems(Uint8List body) {
       }
       i = body[off + 1];
       s = body[off + 2];
-    } else if (t == itemXmlBlob || t == itemAppl4) {
+    } else if (t == itemXmlBlob) {
       h = 5;
       if (off + h > n) return ItemWalk(out, Uint8List.sublistView(body, off));
       ln = bd.getUint32(off + 1);
@@ -153,3 +153,33 @@ Uint8List buildApplItem(int id, int sid, Uint8List value) {
 
 /// EOM marker (type 0x0c, no payload).
 final Uint8List eomBytes = Uint8List.fromList([itemEom]);
+
+// --- byte search -------------------------------------------------------------
+
+/// Whether [haystack] holds [needle]'s code units (latin-1 bytes) as a
+/// contiguous run — the allocation-free marker test (`OLE_FLUSH_CALL`,
+/// `DP_GET`, `<SVARS>` …). It replaces `String.fromCharCodes(value)
+/// .contains(needle)`, which copied a whole multi-MB call value into a String
+/// for one substring test (audit #8 / zcode P-08). Same answer for every
+/// input: a code unit over 0xff never matches a byte, as it never matched a
+/// latin-1 char either.
+bool containsBytes(Uint8List haystack, String needle) =>
+    indexOfBytes(haystack, needle) >= 0;
+
+/// The first index at or after [from] where [needle]'s code units start in
+/// [haystack], or -1 ([containsBytes]). An empty needle is found at [from].
+int indexOfBytes(Uint8List haystack, String needle, [int from = 0]) {
+  final n = needle.length;
+  if (n == 0) return from <= haystack.length ? from : -1;
+  final first = needle.codeUnitAt(0);
+  final last = haystack.length - n;
+  for (var i = from < 0 ? 0 : from; i <= last; i++) {
+    if (haystack[i] != first) continue;
+    var j = 1;
+    while (j < n && haystack[i + j] == needle.codeUnitAt(j)) {
+      j++;
+    }
+    if (j == n) return i;
+  }
+  return -1;
+}

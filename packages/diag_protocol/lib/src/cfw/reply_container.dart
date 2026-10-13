@@ -11,8 +11,8 @@ const String constGuiBuild = '753';
 /// The client address the reply descriptor names. Kept as the loopback on
 /// purpose: real GUIs send it too (the reference client's a recorded session oracle
 /// carries `0018 0009 "127.0.0.1"`; others carry the NIC address —
-/// a recorded session gui[2] `an address`, a recorded session
-/// `an address`), and the kernel does not re-validate it (reference client
+/// a recorded session gui[2] and a recorded session a private
+/// `10.x.x.x` LAN address), and the kernel does not re-validate it (reference client
 /// diag_reply_container CONST_CLIENT_ADDR, its `reply_client_addr` knob the
 /// A/B lever should a kernel ever check). [composeConstPrefix] takes
 /// another address when one is needed.
@@ -50,7 +50,8 @@ Uint8List composeConstPrefix(
   out.add(_hex('0006001700000017050000000500'));
   final res = out.takeBytes();
   // 128 bytes with the constant address; another address (the session's
-  // own, `an address` on a recorded session) sizes its 0018 token
+  // own, a `10.x.x.x` LAN address on a recorded session) sizes
+  // its 0018 token
   final want = 0x80 + codepad(clientAddr).length - codepad(constClientAddr).length;
   if (res.length != want) throw StateError('const prefix ${res.length}B != $want');
   return res;
@@ -78,16 +79,26 @@ const Set<String> dropColumns = {'RFC_QUEUE', 'ERROR_INFO', 'VERBS', 'IMPORT_XML
 const List<int> rfcTerm = [0xff, 0xff, 0x00, 0x00, 0xff, 0xff];
 const int tableInlineMax = cellSeg; // <= 250 B -> inline 03 04 rows
 
-Uint8List _tok(List<int> tag, Uint8List data) {
+/// One RFC reply token `<a> <b> <len u16> <data> <a> <b>` — the builder
+/// every reply / answer shares. A token's length is a u16: [data] past 64 KB
+/// throws instead of wrapping (a wrapped length desyncs the server's token
+/// walk); a bigger payload rides LZH `03 05` cells ([tableColumn]).
+Uint8List rfcToken(int a, int b, Uint8List data) {
+  if (data.length > 0xffff) {
+    throw ArgumentError.value(data.length, 'data.length',
+        'RFC token $a/$b exceeds the u16 length');
+  }
   final out = Uint8List(2 + 2 + data.length + 2);
-  out[0] = tag[0];
-  out[1] = tag[1];
+  out[0] = a;
+  out[1] = b;
   out.buffer.asByteData().setUint16(2, data.length);
   out.setRange(4, 4 + data.length, data);
-  out[out.length - 2] = tag[0];
-  out[out.length - 1] = tag[1];
+  out[out.length - 2] = a;
+  out[out.length - 1] = b;
   return out;
 }
+
+Uint8List _tok(List<int> tag, Uint8List data) => rfcToken(tag[0], tag[1], data);
 
 /// The body of one reply table column after its `03 02` dims: inline `03 04`
 /// rows when the table fits one segment, else one LZH `03 05` cell + `03 06`.
@@ -145,6 +156,13 @@ List<CallColumn> parseCallColumns(Uint8List callRfc) {
           Uint8List? desc;
           if (j + 4 <= n && b[j] == 0x03 && b[j + 1] == 0x02) {
             final dl = bd.getUint16(j + 2);
+            // a wire length past the buffer is a truncated/hostile call:
+            // skip this candidate rather than throw out of the reply build
+            // (an unanswered flush blocks the kernel in OLE_FLUSH_CALL)
+            if (j + 4 + dl > n) {
+              i += 1;
+              continue;
+            }
             desc = Uint8List.sublistView(b, j + 4, j + 4 + dl);
             j += 6 + dl;
           }
@@ -170,6 +188,7 @@ List<CallColumn> parseCallColumns(Uint8List callRfc) {
             rows = [];
             while (j + 4 <= n && b[j] == 0x03 && b[j + 1] == 0x04) {
               final rl = bd.getUint16(j + 2);
+              if (j + 4 + rl > n) break;
               rows.add(Uint8List.sublistView(b, j + 4, j + 4 + rl));
               j += 6 + rl;
             }

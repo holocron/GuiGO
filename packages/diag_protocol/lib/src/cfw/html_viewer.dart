@@ -31,6 +31,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'dp_cache.dart' show DpCache, dpColumnCells;
+import '../framing/envelope.dart' show containsBytes;
 import '../lzh/lzh.dart';
 import '../screen/screen_layout.dart' show CellRect, ScreenRegion;
 
@@ -100,17 +101,13 @@ class SapHtmlDocument {
 
   String? _title() {
     String? titleOf(String h) {
-      final m = RegExp(
-        r'<title[^>]*>(.*?)</title>',
-        caseSensitive: false,
-        dotAll: true,
-      ).firstMatch(h);
+      final m = _titleOfRx.firstMatch(h);
       final t = m == null ? '' : htmlToText(m.group(1)!).trim();
       return t.isEmpty ? null : t;
     }
 
     if (titleOf(html) case final t?) return t;
-    final frameRx = RegExp(r'<i?frame\b([^>]*)>', caseSensitive: false);
+    final frameRx = _frameTagRx;
     for (final f in frameRx.allMatches(html)) {
       final src = htmlAttributes(f.group(1)!)['src'] ?? '';
       final b = _partFor(src, url, parts);
@@ -138,6 +135,31 @@ class SapHtmlDocument {
       'SapHtmlDocument(shell $shell in ${container ?? '-'}'
       '${dialog != null ? ' dialog $dialog' : ''}, $url, ${html.length} chars)';
 }
+
+/// The browser control SAP.HTMLControl.1 hosts on the SAP GUI for Windows:
+/// Internet Explorer (the 8.00 default) or Edge / WebView2 (the 8.10
+/// default). The page the server sends and its sapevent handler are the
+/// same; what the control REPORTS for a form submit differs, and the
+/// server accepts both (it answered every submit of either capture):
+///
+/// * IE — PID0 the frame the form's page is shown in, PID2 the action's
+/// scheme lower-cased: `Frame0` / `sapevent:A1F1` (a recorded session
+/// aif, the test system, SAP GUI 8.00 patch 18 — its 16/04/09 `800`; a recorded session
+/// connect_su53, 800 / 18, the same);
+/// * Edge — no PID0, PID2 the action verbatim: `SAPEVENT:A1F1`
+/// (a recorded session, the test system, SAP GUI 8.10 patch 1 —
+/// `810` / `1`, the same /AIF/IFMON pages: HTML000004 framing
+/// HTML000003 as `Frame0`, `<form name="A1F1" action="SAPEVENT:A1F1">`;
+/// a recorded session, 810, `SAPEVENT:SEND`).
+///
+/// Every 8.00 capture on the wire is the IE shape and every 8.10 one the
+/// Edge shape: the release is the only client fact the two captures differ
+/// in (the server's pages, verbs and frame layout are the same), and 8.10
+/// made the Edge control the default. Links: the one link oracle
+/// (a recorded session raw gui[10], 810) is Edge's — the href
+/// verbatim, no PID0 for an untargeted anchor inside `Frame0`; no IE link
+/// is on the wire, so a link goes up that one way under both.
+enum HtmlBrowserControl { internetExplorer, edge }
 
 /// A `SAPEVENT:` link (`<a href>` or image-map `<area href>`) of a page.
 class SapHtmlLink {
@@ -204,12 +226,28 @@ class SapHtmlForm {
   /// The sapevent target after the scheme (`A1F2`).
   String get event => action.substring(action.indexOf(':') + 1);
 
-  /// The url the Windows browser reports for a submit: the action with the
-  /// scheme lower-cased — the page's `action="SAPEVENT:A1F1"` goes up as
-  /// `sapevent:A1F1` (a recorded session raw gui[27] / [40] / [54] /
-  /// [86]; a LINK's href goes up as the page spells it, a recorded session
-  /// sacm_quicklinks raw gui[10]).
+  /// The url the Windows browser reports for a submit under the Internet
+  /// Explorer control: the action with the scheme lower-cased — the page's
+  /// `action="SAPEVENT:A1F1"` goes up as `sapevent:A1F1` (a recorded session
+  /// aif raw gui[27] / [40] / [54] / [86], SAP GUI 8.00). The Edge
+  /// control reports the action verbatim ([submitUrl]).
   String get windowsUrl => 'sapevent:$event';
+
+  /// The url SAPEVENT PID2 carries for a submit of this form in [browser]:
+  /// IE the scheme lower-cased ([windowsUrl]), Edge the action as the page
+  /// spells it (a recorded session raw gui[30] / [43] /
+  /// [50] / [83] / [90] `SAPEVENT:A1F<n>`, SAP GUI 8.10; a recorded session
+  /// workflow `SAPEVENT:SEND`).
+  String submitUrl(HtmlBrowserControl browser) =>
+      browser == HtmlBrowserControl.edge ? action : windowsUrl;
+
+  /// The FrameName SAPEVENT PID0 carries for a submit in [browser]: IE the
+  /// frame the form's page is shown in ([frame], `Frame0` in a recorded session
+  /// aif); Edge none — the same frameset page (HTML000004 framing
+  /// HTML000003 as `Frame0`, the form `A1F1` inside it) goes up with no PID0
+  /// at all (a recorded session raw gui[30]).
+  String submitFrame(HtmlBrowserControl browser) =>
+      browser == HtmlBrowserControl.edge ? '' : frame;
 
   /// Whether [wanted] names button [id]: its full DOM id or the SAP control
   /// name after `NAME:` (reference client screen_html.control_matches),
@@ -252,6 +290,54 @@ class SapHtmlForm {
       out.add('$name=$v');
     }
     return out.join('&');
+  }
+
+  /// The body the browser posts when Enter is pressed in text input
+  /// [inputId] (its DOM id `A1F2I4NAME:INPUT_BEGINDT`, or its field name /
+  /// SAP name): the page's InputKeyDown submits with `sapbu_cl` = ' ' and
+  /// `sapin_cl` = the input's id + `sapENTER`, the fields their values
+  /// ([values] as in [postBody]). The real GUI: a recorded session raw
+  /// gui[89] (`sapbu_cl= &sapse_cl= &sapin_cl=A1F2I4NAME:INPUT_BEGINDTsap
+  /// ENTER&A1F2I1=1000&A1F2I4=18.06.2025&…`, the begin date typed over).
+  /// Throws [ArgumentError] when no input of the form is named so.
+  String enterBody(String inputId, {Map<String, String> values = const {}}) {
+    final id = inputOf(inputId);
+    if (id == null) {
+      throw ArgumentError('form $name has no input "$inputId"');
+    }
+    final out = <String>[];
+    for (final (field, value) in fields) {
+      var v = value;
+      if (field == 'sapbu_cl' || field == 'sapse_cl') {
+        v = ' ';
+      } else if (field == 'sapin_cl') {
+        v = '${id}sapENTER';
+      } else {
+        for (final e in values.entries) {
+          if (e.key == field || controlMatches(inputs[field] ?? '', e.key)) {
+            v = e.value;
+          }
+        }
+      }
+      out.add('$field=$v');
+    }
+    return out.join('&');
+  }
+
+  /// [enterBody] as the bytes the browser posts (UTF-8).
+  Uint8List enterBytes(
+    String inputId, {
+    Map<String, String> values = const {},
+  }) => Uint8List.fromList(utf8.encode(enterBody(inputId, values: values)));
+
+  /// The DOM id of the text input [wanted] names (its id, its field name,
+  /// or the SAP name after `NAME:`), or null.
+  String? inputOf(String wanted) {
+    final w = wanted.trim();
+    for (final e in inputs.entries) {
+      if (e.key == w || controlMatches(e.value, w)) return e.value;
+    }
+    return null;
   }
 
   /// [postBody] as the bytes the browser posts (UTF-8).
@@ -358,6 +444,13 @@ class HtmlPush {
   bool get isHtml =>
       subtype.toLowerCase().contains('htm') || looksLikeHtml(bytes);
 
+  /// A DataManager TABLE push (TYPE `APPLICATION`, SUBTYPE `X-R3TABLE` /
+  /// `X-SAPCTXMENU` / …: a tree's, a toolbar's, a calendar's DayInfo row) —
+  /// never a document a viewer loads.
+  bool get isDataTable =>
+      type.trim().toUpperCase() == 'APPLICATION' &&
+      subtype.trim().toUpperCase().startsWith('X-');
+
   /// The content as text (see [decodeHtmlBytes]).
   String get text => decodeHtmlBytes(bytes);
 
@@ -407,12 +500,22 @@ Map<String, Uint8List> dpScalars(Uint8List seg) {
     final value = BytesBuilder(copy: false);
     var tokens = 0;
     while (j + 4 <= seg.length && seg[j] == 0x02 && seg[j + 1] == 0x03) {
-      final vl = bd.getUint16(j + 2);
-      final end = j + 4 + vl;
+      var vl = bd.getUint16(j + 2);
+      var head = 4;
+      // a value of 64 KiB or more: the u16 length is the escape 0xFFFF and
+      // a u32 length follows (a recorded session srv[80]:
+      // the SAPLSPO1 popup's HTML000002.htm DATASTR `02 03 ff ff 00 06 ff
+      // fb`, 458 747 bytes, TOTALSIZE bounding the page — read as no value,
+      // the popup's question was blank)
+      if (vl == 0xffff && j + 8 <= seg.length) {
+        vl = bd.getUint32(j + 4);
+        head = 8;
+      }
+      final end = j + head + vl;
       if (end + 2 > seg.length || seg[end] != 0x02 || seg[end + 1] != 0x03) {
         break;
       }
-      value.add(Uint8List.sublistView(seg, j + 4, end));
+      value.add(Uint8List.sublistView(seg, j + head, end));
       tokens++;
       j = end + 2;
     }
@@ -430,8 +533,8 @@ final RegExp _adminHeader = RegExp(
 );
 
 Uint8List stripDpAdminHeaders(Uint8List b) {
+  if (!containsBytes(b, 'SAPGUI')) return b;
   final s = latin1.decode(b);
-  if (!s.contains('SAPGUI')) return b;
   return Uint8List.fromList(latin1.encode(s.replaceAll(_adminHeader, '')));
 }
 
@@ -466,12 +569,17 @@ HtmlPush? htmlPushOf(Uint8List seg) {
 }
 
 /// Every viewer content push nested in one RFC value (an OLE flush call's
-/// RFC_QUEUE, or a standalone DP push), in queue order.
+/// RFC_QUEUE, or a standalone DP push), in queue order — the DataManager
+/// table pushes ([HtmlPush.isDataTable]) left out: /AIF/IFMON's calendar
+/// show sends 828 one-row DayInfo pushes after the selection page's
+/// ShowData (a recorded session raw s74..s84 / s115..s125),
+/// which, kept as viewer pushes, pushed the page out of the newest-pages
+/// window and the form vanished after the second show.
 List<HtmlPush> htmlPushesOf(Uint8List rfc) {
   final c = DpCache()..ingestValue(rfc);
   return [
     for (final u in c.order)
-      if (htmlPushOf(c.byUrl[u]!) case final p?) p,
+      if (htmlPushOf(c.byUrl[u]!) case final p? when !p.isDataTable) p,
   ];
 }
 
@@ -566,7 +674,7 @@ String decodeHtmlBytes(Uint8List b) {
   final head = latin1
       .decode(Uint8List.sublistView(b, 0, b.length < 2048 ? b.length : 2048))
       .toLowerCase();
-  final cs = RegExp(r'charset\s*=\s*"?([a-z0-9_-]+)').firstMatch(head);
+  final cs = _charsetRx.firstMatch(head);
   final charset = cs?.group(1) ?? 'utf-8';
   if (charset.contains('8859') || charset.contains('latin')) {
     return latin1.decode(b);
@@ -596,7 +704,7 @@ const Map<String, String> _entities = {
 };
 
 String _unescape(String s) =>
-    s.replaceAllMapped(RegExp(r'&(#x[0-9a-fA-F]+|#\d+|[A-Za-z]+);'), (m) {
+    s.replaceAllMapped(_unescapeRx, (m) {
       final e = m.group(1)!;
       if (e.startsWith('#x')) {
         return String.fromCharCode(int.parse(e.substring(2), radix: 16));
@@ -611,32 +719,25 @@ String _unescape(String s) =>
 /// tags break lines, tags stripped, entities decoded, whitespace collapsed.
 String htmlToText(String html) {
   var s = html.replaceAll(
-    RegExp(
-      r'<(head|script|style)\b[^>]*>.*?</\1\s*>',
-      caseSensitive: false,
-      dotAll: true,
-    ),
+    _htmlToTextRx,
     ' ',
   );
-  s = s.replaceAll(RegExp(r'<!--.*?-->', dotAll: true), ' ');
+  s = s.replaceAll(_htmlCommentRx, ' ');
   s = s.replaceAll(
-    RegExp(
-      r'<\s*(br|/?p|/?div|/?h[1-6]|/?li|/?tr|/?table|/?ul|/?ol)\b[^>]*>',
-      caseSensitive: false,
-    ),
+    _htmlToTextRx3,
     '\n',
   );
-  s = s.replaceAll(RegExp(r'<[^>]*>'), ' ');
+  s = s.replaceAll(_anyTagRx, ' ');
   s = _unescape(s);
   final lines = [
     for (final l in s.split('\n'))
-      if (l.replaceAll(RegExp(r'[ \t\r\f ]+'), ' ').trim() case final t
+      if (l.replaceAll(_htmlToTextRx5, ' ').trim() case final t
           when t.isNotEmpty)
         t,
   ];
   return lines
       .join('\n')
-      .replaceAllMapped(RegExp(r' ([.,;:)])'), (m) => m.group(1)!);
+      .replaceAllMapped(_htmlToTextRx6, (m) => m.group(1)!);
 }
 
 /// A `sapevent:` url inside a script (an onclick, a `javascript:` href).
@@ -651,11 +752,7 @@ final RegExp _scriptSapEvent = RegExp(
 /// screen_html.sapevent_links).
 List<SapHtmlLink> sapEventLinks(String html) {
   final out = <SapHtmlLink>[];
-  final rx = RegExp(
-    r'<(a|area)\b([^>]*)>(?:(.*?)</a\s*>)?',
-    caseSensitive: false,
-    dotAll: true,
-  );
+  final rx = _sapEventLinksRx;
   for (final m in rx.allMatches(html)) {
     // quoted or bare values, entities decoded — the url the browser
     // navigates to (and the app's link run carries)
@@ -692,10 +789,7 @@ final RegExp _attrRx = RegExp(
 /// entity-decoded.
 Map<String, String> htmlAttributes(String raw) => {
   // a bare boolean attribute (`selected`, `checked`) reads as ''
-  for (final b in RegExp(
-    r'(?:^|\s)(checked|selected|disabled|readonly)(?=\s|/|$)',
-    caseSensitive: false,
-  ).allMatches(raw))
+  for (final b in _htmlAttributesRx.allMatches(raw))
     b.group(1)!.toLowerCase(): '',
   for (final a in _attrRx.allMatches(raw))
     a.group(1)!.toLowerCase(): _unescape(
@@ -711,15 +805,8 @@ Map<String, String> htmlAttributes(String raw) => {
 /// ([SapHtmlForm.frame]: its `target=`, else the inlined frame it sits in).
 List<SapHtmlForm> sapEventForms(String html) {
   final out = <SapHtmlForm>[];
-  final formRx = RegExp(
-    r'<form\b([^>]*)>(.*?)</form\s*>',
-    caseSensitive: false,
-    dotAll: true,
-  );
-  final tagRx = RegExp(
-    r'<(input|button|select|textarea)\b([^>]*)>',
-    caseSensitive: false,
-  );
+  final formRx = _sapEventFormsRx;
+  final tagRx = _sapEventFormsRx2;
   for (final m in formRx.allMatches(html)) {
     final fa = htmlAttributes(m.group(1)!);
     final action = fa['action'] ?? '';
@@ -744,10 +831,7 @@ List<SapHtmlForm> sapEventForms(String html) {
           final inner = close < 0 ? '' : body.substring(t.end, close);
           label = htmlToText(inner).replaceAll('\n', ' ').trim();
           if (label.isEmpty) {
-            final img = RegExp(
-              r'<img\b([^>]*)>',
-              caseSensitive: false,
-            ).firstMatch(inner);
+            final img = _sapEventFormsRx3.firstMatch(inner);
             final ia = img == null
                 ? const <String, String>{}
                 : htmlAttributes(img.group(1)!);
@@ -765,10 +849,7 @@ List<SapHtmlForm> sapEventForms(String html) {
       if (tag == 'select') {
         final close = body.toLowerCase().indexOf('</select', t.end);
         final opts = close < 0 ? '' : body.substring(t.end, close);
-        final o = RegExp(
-          r'<option\b([^>]*)>',
-          caseSensitive: false,
-        ).allMatches(opts).map((x) => htmlAttributes(x.group(1)!)).toList();
+        final o = _sapEventFormsRx4.allMatches(opts).map((x) => htmlAttributes(x.group(1)!)).toList();
         final sel =
             o.where((x) => x.containsKey('selected')).firstOrNull ??
             o.firstOrNull;
@@ -809,7 +890,7 @@ String inlineHtmlFrames(
   Map<String, Uint8List> parts, {
   int depth = 0,
 }) {
-  if (depth > 3 || !RegExp(r'<i?frame', caseSensitive: false).hasMatch(html)) {
+  if (depth > 3 || !_anyFrameRx.hasMatch(html)) {
     return html;
   }
   String? bodyOf(String src) {
@@ -817,33 +898,26 @@ String inlineHtmlFrames(
     if (bytes == null) return null;
     final text = decodeHtmlBytes(bytes);
     if (!looksLikeHtml(bytes) &&
-        !RegExp(r'<[a-z]', caseSensitive: false).hasMatch(text)) {
+        !_anyTagOpenRx.hasMatch(text)) {
       return null;
     }
     final inner = inlineHtmlFrames(text, src, parts, depth: depth + 1);
-    final b = RegExp(
-      r'<body\b[^>]*>(.*?)(?:</body\s*>|$)',
-      caseSensitive: false,
-      dotAll: true,
-    ).firstMatch(inner);
+    final b = _bodyOfRx2.firstMatch(inner);
     if (b != null) return b.group(1)!;
     // a frameset page inlined above, or a fragment: drop its head
     return inner.replaceAll(
-      RegExp(r'<head\b.*?</head\s*>', caseSensitive: false, dotAll: true),
+      _headElementRx,
       '',
     );
   }
 
   String srcOf(String attrs) => (htmlAttributes(attrs)['src'] ?? '').trim();
-  final frameRx = RegExp(r'<frame\b([^>]*)>', caseSensitive: false);
+  final frameRx = _frameOnlyTagRx;
   var s = html;
   // the frameset (with its nested framesets): its frames' bodies in order
-  final fs = RegExp(r'<frameset\b', caseSensitive: false).firstMatch(s);
+  final fs = _framesetOpenRx.firstMatch(s);
   if (fs != null) {
-    final lastClose = RegExp(
-      r'</frameset\s*>',
-      caseSensitive: false,
-    ).allMatches(s).lastOrNull;
+    final lastClose = _srcOfRx3.allMatches(s).lastOrNull;
     final end = lastClose?.end ?? s.length;
     final block = s.substring(fs.start, end);
     final bodies = <String>[];
@@ -865,11 +939,7 @@ String inlineHtmlFrames(
   }
   // inline frames
   s = s.replaceAllMapped(
-    RegExp(
-      r'<iframe\b([^>]*)>(?:.*?</iframe\s*>)?',
-      caseSensitive: false,
-      dotAll: true,
-    ),
+    _srcOfRx4,
     (m) {
       final b = bodyOf(srcOf(m.group(1)!));
       return b == null
@@ -924,3 +994,72 @@ Uint8List? _partFor(String src, String base, Map<String, Uint8List> parts) {
   }
   return null;
 }
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _titleOfRx = RegExp(
+        r'<title[^>]*>(.*?)</title>',
+        caseSensitive: false,
+        dotAll: true,
+      );
+final RegExp _frameTagRx = RegExp(r'<i?frame\b([^>]*)>', caseSensitive: false);
+final RegExp _charsetRx = RegExp(r'charset\s*=\s*"?([a-z0-9_-]+)');
+final RegExp _unescapeRx = RegExp(r'&(#x[0-9a-fA-F]+|#\d+|[A-Za-z]+);');
+final RegExp _htmlToTextRx = RegExp(
+      r'<(head|script|style)\b[^>]*>.*?</\1\s*>',
+      caseSensitive: false,
+      dotAll: true,
+    );
+final RegExp _htmlCommentRx = RegExp(r'<!--.*?-->', dotAll: true);
+final RegExp _htmlToTextRx3 = RegExp(
+      r'<\s*(br|/?p|/?div|/?h[1-6]|/?li|/?tr|/?table|/?ul|/?ol)\b[^>]*>',
+      caseSensitive: false,
+    );
+final RegExp _anyTagRx = RegExp(r'<[^>]*>');
+final RegExp _htmlToTextRx5 = RegExp(r'[ \t\r\f ]+');
+final RegExp _htmlToTextRx6 = RegExp(r' ([.,;:)])');
+final RegExp _sapEventLinksRx = RegExp(
+    r'<(a|area)\b([^>]*)>(?:(.*?)</a\s*>)?',
+    caseSensitive: false,
+    dotAll: true,
+  );
+final RegExp _htmlAttributesRx = RegExp(
+    r'(?:^|\s)(checked|selected|disabled|readonly)(?=\s|/|$)',
+    caseSensitive: false,
+  );
+final RegExp _sapEventFormsRx = RegExp(
+    r'<form\b([^>]*)>(.*?)</form\s*>',
+    caseSensitive: false,
+    dotAll: true,
+  );
+final RegExp _sapEventFormsRx2 = RegExp(
+    r'<(input|button|select|textarea)\b([^>]*)>',
+    caseSensitive: false,
+  );
+final RegExp _sapEventFormsRx3 = RegExp(
+              r'<img\b([^>]*)>',
+              caseSensitive: false,
+            );
+final RegExp _sapEventFormsRx4 = RegExp(
+          r'<option\b([^>]*)>',
+          caseSensitive: false,
+        );
+final RegExp _anyFrameRx = RegExp(r'<i?frame', caseSensitive: false);
+final RegExp _anyTagOpenRx = RegExp(r'<[a-z]', caseSensitive: false);
+final RegExp _bodyOfRx2 = RegExp(
+      r'<body\b[^>]*>(.*?)(?:</body\s*>|$)',
+      caseSensitive: false,
+      dotAll: true,
+    );
+final RegExp _headElementRx = RegExp(r'<head\b.*?</head\s*>', caseSensitive: false, dotAll: true);
+final RegExp _frameOnlyTagRx = RegExp(r'<frame\b([^>]*)>', caseSensitive: false);
+final RegExp _framesetOpenRx = RegExp(r'<frameset\b', caseSensitive: false);
+final RegExp _srcOfRx3 = RegExp(
+      r'</frameset\s*>',
+      caseSensitive: false,
+    );
+final RegExp _srcOfRx4 = RegExp(
+      r'<iframe\b([^>]*)>(?:.*?</iframe\s*>)?',
+      caseSensitive: false,
+      dotAll: true,
+    );

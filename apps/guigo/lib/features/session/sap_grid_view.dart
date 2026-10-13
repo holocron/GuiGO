@@ -28,6 +28,7 @@ class SapGridView extends StatefulWidget {
     this.onCellValueHelp,
     this.onCellDoubleTap,
     this.hotspotColumns = const {},
+    this.hotspotCells = const {},
     this.onHotspotTap,
     this.modifiedCells = const {},
   });
@@ -74,6 +75,11 @@ class SapGridView extends StatefulWidget {
   /// The columns whose cells are hotspots (drawn as links): a single tap
   /// on one fires [onHotspotTap] instead of toggling the row.
   final Set<String> hotspotColumns;
+
+  /// Single hotspot CELLS beyond [hotspotColumns] (1-based line -> column
+  /// ids): the cell style the server set one by one — the DBA cockpit's
+  /// KPI checkboxes (SapGridModel.hotspotCells).
+  final Map<int, Set<String>> hotspotCells;
   final void Function(int line, String columnId)? onHotspotTap;
 
   /// Cells the server changed and the client adopted but not yet
@@ -341,9 +347,12 @@ class _SapGridViewState extends State<SapGridView> {
     ]);
   }
 
-  bool _isHotspot(int i) =>
+  /// Whether cell ([r] 0-based row, column [i]) is a hotspot.
+  bool _isHotspot(int r, int i) =>
       widget.onHotspotTap != null &&
-      widget.hotspotColumns.contains(widget.columns[i]);
+      (widget.hotspotColumns.contains(widget.columns[i]) ||
+          (widget.hotspotCells[r + 1]?.contains(widget.columns[i]) ??
+              false));
 
   void _toggleRow(int r) {
     setState(() => _rows.contains(r) ? _rows.remove(r) : _rows.add(r));
@@ -427,6 +436,19 @@ class _SapGridViewState extends State<SapGridView> {
       fontSize: 13,
     );
 
+    // one rule and one decoration per fill for every cell of the build
+    // (each cell allocated its own BoxDecoration, Border and BorderSide)
+    final rule = Border(
+      right: BorderSide(color: scheme.outlineVariant, width: 0.5),
+    );
+    final decorations = <Color?, BoxDecoration>{};
+    final hotspotStyle = mono.copyWith(
+      color: scheme.primary,
+      decoration: TextDecoration.underline,
+    );
+    final numStyle = TextStyle(color: scheme.onSurfaceVariant, fontSize: 12);
+    final selectedFill = scheme.primaryContainer.withValues(alpha: 0.35);
+
     Widget cell(
       String text,
       double w, {
@@ -439,11 +461,9 @@ class _SapGridViewState extends State<SapGridView> {
         height: _rowH,
         alignment: align,
         padding: const EdgeInsets.symmetric(horizontal: 6),
-        decoration: BoxDecoration(
+        decoration: decorations[fill] ??= BoxDecoration(
           color: fill,
-          border: Border(
-            right: BorderSide(color: scheme.outlineVariant, width: 0.5),
-          ),
+          border: rule,
         ),
         child: SapIconAtlas.tokenRx.hasMatch(text)
             // an icon cell: the glyph, its quick info the tooltip
@@ -550,6 +570,7 @@ class _SapGridViewState extends State<SapGridView> {
                               }
                               final row = loaded ?? const <String>[];
                               final sel = _rows.contains(r);
+                              final modified = widget.modifiedCells[r + 1];
                               return Material(
                                 color: sel
                                     ? scheme.secondaryContainer
@@ -563,20 +584,18 @@ class _SapGridViewState extends State<SapGridView> {
                                       cell(
                                         '${r + 1}',
                                         _numW,
-                                        style: TextStyle(
-                                          color: scheme.onSurfaceVariant,
-                                          fontSize: 12,
-                                        ),
+                                        style: numStyle,
                                         align: Alignment.centerRight,
                                       ),
                                       if (skip > 0) SizedBox(width: skip),
                                       for (var i = c0; i < c1; i++)
+                                        if (_isHotspot(r, i) case final hot)
                                         GestureDetector(
                                           behavior: HitTestBehavior.opaque,
                                           // a hotspot cell's single tap is
                                           // its own (the inner detector
                                           // wins over the row's InkWell)
-                                          onTap: loaded != null && _isHotspot(i)
+                                          onTap: loaded != null && hot
                                               ? () => widget.onHotspotTap!(
                                                   r + 1,
                                                   widget.columns[i],
@@ -603,23 +622,15 @@ class _SapGridViewState extends State<SapGridView> {
                                                 ? row[i].trimRight()
                                                 : '',
                                             widths[i],
-                                            style: _isHotspot(i)
-                                                ? mono.copyWith(
-                                                    color: scheme.primary,
-                                                    decoration: TextDecoration
-                                                        .underline,
-                                                  )
-                                                : mono,
+                                            style: hot ? hotspotStyle : mono,
                                             fill:
-                                                widget.modifiedCells[r + 1]
-                                                        ?.containsKey(
+                                                modified?.containsKey(
                                                           widget.columns[i],
                                                         ) ==
                                                     true
                                                 ? scheme.tertiaryContainer
                                                 : _cols.contains(i)
-                                                ? scheme.primaryContainer
-                                                      .withValues(alpha: 0.35)
+                                                ? selectedFill
                                                 : null,
                                           ),
                                         ),

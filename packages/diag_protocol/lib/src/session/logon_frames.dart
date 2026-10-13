@@ -29,14 +29,43 @@ import 'frontend_profile.dart'
         uiEventFunctionKeyJava,
         winCodepageValue,
         winIdentity,
-        winLogonIdentity,
         windowsFirstRoundAtoms;
+import 'gui_profile.dart';
 import 'login.dart' show loginAtoms;
 import 'table_cell.dart' show windowsEventWindowPx;
 
 /// The terminal name a logon presents when the caller names none (the DP
 /// head's `terminal`, the label SM04 / AL08 show for the front end).
 const String defaultLogonTerminal = 'GUIGO';
+
+/// The message-server-less dispatcher port a connection names when it
+/// names none (32NN, instance 00).
+const int defaultSapPort = 3200;
+
+/// The logon language a connection names when it names none.
+const String defaultLogonLanguage = 'EN';
+
+/// The SAP one-letter language keys and their ISO 639-1 codes (the
+/// standard T002 pairs) — [connectLanguage] for a one-letter logon
+/// language.
+const Map<String, String> _isoOfSapLanguage = {
+  'E': 'EN', 'D': 'DE', 'F': 'FR', 'S': 'ES', 'I': 'IT', 'P': 'PT',
+  'N': 'NL', 'J': 'JA', 'R': 'RU', 'L': 'PL', 'K': 'DA', 'V': 'SV',
+  'O': 'NO', 'U': 'FI', 'C': 'CS', 'Q': 'SK', 'H': 'HR', 'T': 'TR',
+  '1': 'ZH', '3': 'KO', 'A': 'AR', 'B': 'HE', 'G': 'EL', 'W': 'BG',
+};
+
+/// The ISO language (2 letters) the connect frame's ST_USER 39 names for
+/// the logon [language]: a 2-letter code as is (upper case), a SAP
+/// one-letter key mapped, anything else (an empty language: the user's
+/// default) [defaultLogonLanguage].
+String connectLanguage(String language) {
+  final l = language.trim().toUpperCase();
+  if (l.length == 2 && l.codeUnits.every((c) => c >= 0x41 && c <= 0x5a)) {
+    return l;
+  }
+  return _isoOfSapLanguage[l] ?? defaultLogonLanguage;
+}
 
 // ---------------------------------------------------------------------------
 // The DP (dispatcher) head
@@ -458,20 +487,35 @@ Uint8List userConnectItem({
   required int wsType,
 }) => buildApplItem(4, 2, _u32s([protocolVersion, codePage, wsType]));
 
+/// The WSIZE a Windows connect announces when the caller knows no window:
+/// the reference GUI's 45 x 272 cells (a recorded session gui
+/// raw[0]).
+const (int, int) recordedConnectWindowCells = (45, 272);
+
 /// The ST_USER items of a connect frame, in the sending GUI's wire order.
-List<Uint8List> connectItems(GuiDialect dialect) => switch (dialect) {
+/// Windows: ST_USER 39 names [language] ([connectLanguage]), WSIZE the
+/// client [window] (rows, cols — the device-derived window the logon then
+/// reports; [recordedConnectWindowCells] when null).
+List<Uint8List> connectItems(
+  GuiDialect dialect, {
+  String language = defaultLogonLanguage,
+  (int, int)? window,
+}) => switch (dialect) {
   // a recorded session gui raw[0]
   GuiDialect.windows => [
     userConnectItem(wsType: 3000),
     buildApplItem(4, 11, supportBitmap(windowsSupportFlags)),
     // WSIZE (pysap SAPDiagWindowSize): window rows x cols, area rows x cols
-    buildApplItem(4, 13, _u32s([45, 272, 45, 272])),
+    buildApplItem(4, 13, () {
+      final (rows, cols) = window ?? recordedConnectWindowCells;
+      return _u32s([rows, cols, rows, cols]);
+    }()),
     // FONTMETRIC: cell height / width, char height / width (px)
     buildApplItem(4, 4, _u16s([21, 7, 15, 7])),
     buildApplItem(4, 23, _u16(34)), // TOOLBAR_HEIGHT (px)
     buildApplItem(4, 22, _u16(17)), // SCROLLBAR_WIDTH (px)
     // ST_USER 39 (past pysap's table): the GUI's ISO language
-    buildApplItem(4, 39, Uint8List.fromList('FR'.codeUnits)),
+    buildApplItem(4, 39, Uint8List.fromList(connectLanguage(language).codeUnits)),
   ],
   // the reference fixture's frame 0 (SAP GUI for Java 8.10)
   GuiDialect.java => [
@@ -484,17 +528,20 @@ List<Uint8List> connectItems(GuiDialect dialect) => switch (dialect) {
 
 /// The DIAG CONNECT frame (frame 0 of a logon): the DP head, then the
 /// uncompressed DIAG payload — the 8-byte header (mode 0, com_flag
-/// TERM_INI) and the dialect's ST_USER items ([connectItems]). [terminal]
-/// replaces the head's terminal name ([defaultLogonTerminal] when null);
-/// [head] the whole head (tests, A/B probes).
+/// TERM_INI) and the dialect's ST_USER items ([connectItems]: the logon
+/// [language], the client [window]). [terminal] replaces the head's
+/// terminal name ([defaultLogonTerminal] when null); [head] the whole head
+/// (tests, A/B probes).
 Uint8List buildConnectFrame({
   required GuiDialect dialect,
   String? terminal,
   DpHead? head,
+  String language = defaultLogonLanguage,
+  (int, int)? window,
 }) {
   final body = BytesBuilder(copy: false)
     ..add(Uint8List.fromList([0, comFlagTermIni, 0, 0, 0, 0, 0, 0]));
-  for (final it in connectItems(dialect)) {
+  for (final it in connectItems(dialect, language: language, window: window)) {
     body.add(it);
   }
   final payload = body.takeBytes();
@@ -527,8 +574,8 @@ class LogonGeometry {
     this.scrollRow = 19,
     this.scrollCol = 91,
     this.passwordCursorOffset = 8,
-    this.cellWidth = 8,
-    this.cellHeight = 29,
+    this.cellWidth = metricsCellX,
+    this.cellHeight = metricsCellY,
   });
 
   /// 16/4/23 TOOLBAR_HEIGHT, 16/4/22 SCROLLBAR_WIDTH (px).
@@ -580,9 +627,8 @@ Uint8List logonMetricsXml(
   LogonGeometry g = const LogonGeometry(),
 ]) => Uint8List.fromList(
   ('<?xml version="1.0" encoding="sap*"?>\n<DATAMANAGER>'
-          '<COPY id="copy"><GUI id="gui"><METRICS id="metrics" '
-          'X3="${cols * g.cellWidth}" X2="${g.cellWidth}" X1="8" X0="283" '
-          'Y3="${rows * g.cellHeight}" Y2="${g.cellHeight}" Y1="17" Y0="283"/>'
+          '<COPY id="copy"><GUI id="gui">'
+          '${metricsElement(rows, cols, cellX: g.cellWidth, cellY: g.cellHeight)}'
           '</GUI></COPY></DATAMANAGER>')
       .codeUnits,
 );
@@ -595,7 +641,9 @@ Uint8List logonMetricsXml(
 /// windowsFirstRoundAtoms: mode 0's first round IS the logon submit, so no
 /// later round of the logon window owes them), 16/4/23 TOOLBAR_HEIGHT,
 /// 16/4/22 SCROLLBAR_WIDTH, the Windows codepage, the logon-only identity
-/// 16/4/31 / 32 / 33 / 37 ([winLogonIdentity]) then the per-frame
+/// 16/4/31 / 32 / 33 / 37 (the [profile]'s EmulatedGuiProfile
+/// .logonIdentity; the host's — EmulatedGuiProfile.host — when null) then
+/// the per-frame
 /// [winIdentity], the OK event, 16/12/8 the window pixels (the session
 /// window's — [window], the reference 853 x 1880 unless sized), the
 /// container reset, the credential atoms, the cursor, the METRICS XML.
@@ -613,8 +661,10 @@ List<Uint8List> logonItems({
   int step = 1,
   LogonGeometry geometry = const LogonGeometry(),
   ActionContext? window,
+  EmulatedGuiProfile? profile,
 }) {
   final g = geometry;
+  final identity = (profile ?? EmulatedGuiProfile.host()).logonIdentity;
   final w = window ?? ActionContext();
   final ses = Uint8List(17)
     ..[0] = itemSes
@@ -639,7 +689,7 @@ List<Uint8List> logonItems({
     buildApplItem(4, 23, _u16(g.toolbarHeight)),
     buildApplItem(4, 22, _u16(g.scrollbarWidth)),
     buildApplItem(6, 35, winCodepageValue),
-    for (final (sid, value) in winLogonIdentity) buildApplItem(4, sid, value),
+    for (final (sid, value) in identity) buildApplItem(4, sid, value),
     for (final (sid, value) in winIdentity) buildApplItem(4, sid, value),
     buildApplItem(4, 42, _u32s([g.viewportPx.$1, g.viewportPx.$2])),
     buildApplItem(5, 1, _logonOkEvent(g)),
@@ -691,6 +741,7 @@ Uint8List buildLogonFrame({
   int step = 1,
   LogonGeometry geometry = const LogonGeometry(),
   ActionContext? window,
+  EmulatedGuiProfile? profile,
 }) => clientFrame(
   logonItems(
     client: client,
@@ -702,5 +753,6 @@ Uint8List buildLogonFrame({
     step: step,
     geometry: geometry,
     window: window,
+    profile: profile,
   ),
 );

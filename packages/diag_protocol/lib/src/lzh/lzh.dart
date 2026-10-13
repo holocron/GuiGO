@@ -15,8 +15,10 @@
 /// * compressor: zlib raw DEFLATE (16K window, dynamic Huffman as the real
 /// GUI emits it, fixed Huffman as the first fallback) shifted behind the
 /// 5-bit noise prefix, plus an 8-zero footer the kernel reads past the
-/// final block for look-ahead; falls back to a literal fixed-Huffman block
-/// when the self-verify fails (STORED-block alignment hazard).
+/// final block for look-ahead; no back-reference past [lzhMaxDistance]
+/// (an 8K window re-encode otherwise); falls back to a literal
+/// fixed-Huffman block when the self-verify fails (STORED-block
+/// alignment hazard).
 library;
 
 import 'dart:typed_data';
@@ -35,6 +37,12 @@ const int _lzhNoiseMask = 3;
 /// payloads stay far below.
 const int csMaxDecodedLength = 64 << 20;
 
+/// The per-object output bound of a NOT declared-bound (cell/stream)
+/// decode: [csMaxCellExpansion] x its header's declared length, never
+/// under [csMinCellLimit] (and never over the decode's maxOutput).
+const int csMaxCellExpansion = 16;
+const int csMinCellLimit = 1 << 20;
+
 /// The output limit of one decode. A DIAG frame's CsObject must inflate to
 /// exactly its declared length ([declaredBound]: capped at `declared + 1`,
 /// so an overrun shows as a length mismatch, never as a silently truncated
@@ -44,7 +52,15 @@ const int csMaxDecodedLength = 64 << 20;
 /// whole output — those are capped at [maxOutput] only. Null: a
 /// declared-bound decode whose declared length is over [maxOutput].
 int? _outputLimit(int declared, bool declaredBound, int maxOutput) {
-  if (!declaredBound) return maxOutput;
+  if (!declaredBound) {
+    // the per-object amplification bound: legitimate cell objects inflate
+    // up to ~8.6x their header length, so 16x (never under 1 MB) keeps
+    // every one while a crafted max-expansion stream (~1032x) with a small
+    // header stops long before [maxOutput]
+    final ratio = declared * csMaxCellExpansion;
+    final bound = ratio > csMinCellLimit ? ratio : csMinCellLimit;
+    return bound < maxOutput ? bound : maxOutput;
+  }
   if (declared > maxOutput) return null;
   return declared + 1;
 }
@@ -234,7 +250,9 @@ class LzhInflater {
         _initialCapacity(
             declared + 1 < limit ? declared + 1 : limit, _deflateBound(head.length)),
         limit);
-    _inf = RawInflate(windowBits: -15, dictionary: zeroWindowDict);
+    // pooled: a reset context, not a fresh one + 32 KB dictionary copy per
+    // object (every frame and every `03 05` cell; audit #9 / P-06)
+    _inf = RawInflate.pooled(windowBits: -15, dictionary: zeroWindowDict);
     _feed(Uint8List.sublistView(head, csHeaderLen));
   }
 
@@ -247,7 +265,8 @@ class LzhInflater {
   bool failed = false;
   String? error;
 
-  bool get eof => _inf?.finished ?? false;
+  bool get eof => _inf?.finished ?? _eofAtDispose;
+  bool _eofAtDispose = false;
   bool get cleanTruncation => !failed && !eof;
 
   /// The bytes decoded so far — a COPY: decoding goes on into the same
@@ -293,7 +312,15 @@ class LzhInflater {
     return _out.toBytes();
   }
 
-  void dispose() => _inf?.dispose();
+  /// Hands the native inflater back to the pool: feeding stops, [eof] keeps
+  /// its last answer.
+  void dispose() {
+    final inf = _inf;
+    if (inf == null) return;
+    _eofAtDispose = inf.finished;
+    _inf = null;
+    inf.release();
+  }
 }
 
 /// One-shot: the decompressed bytes of the complete LZH CsObject at comp[0],
@@ -307,6 +334,10 @@ Uint8List? lzhInflate(Uint8List comp,
   try {
     inf = LzhInflater(comp, declaredBound: declaredBound, maxOutput: maxOutput);
     return inf.result();
+  } on OutOfMemoryError {
+    // not a refused stream: the callers' reference-decoder fallback would
+    // only repeat the allocation — surface it instead
+    rethrow;
   } catch (_) {
     return null;
   } finally {
@@ -604,6 +635,17 @@ const int _lzhEndBlock = 256;
 const int _lzhLitLast = 255;
 const int _lzhLengthFirst = 257;
 
+/// The longest back-reference distance SAP's LZH accepts: its 16K ring
+/// window minus the encoder's look-ahead (MAX_MATCH + MIN_MATCH + 1 = 262),
+/// = 16 122. pysapcompress (the RE of CsRComprLZH/CsRDecomprLZH) defines
+/// `_LZH_MAX_DISTANCE = _LZH_WINDOW_SIZE - _LZH_MIN_LOOKAHEAD`; its encoder
+/// never searches further back and its decoder raises "invalid match
+/// distance" past it. A longer distance is resolved by the kernel against
+/// the wrong ring bytes (the reference client's 32K-window cells decoded to garbage:
+/// CONVT_NO_NUMBER in SAPLOLEA AC_FLUSH_CALL_INTERNAL, the test system). Every stream
+/// [lzhCompress] emits stays at or under it.
+const int lzhMaxDistance = _lzhWindowSize - (_lzhMaxMatch + _lzhMinMatch + 1);
+
 const List<int> _lenExtra = [
   0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
   3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0, 99, 99
@@ -680,7 +722,9 @@ final _HuffTree _staticDist = _HuffTree([
 
 class LzhReferenceDecoder {
   LzhReferenceDecoder(this.data,
-      {this.declaredBound = false, this.maxOutput = csMaxDecodedLength});
+      {this.declaredBound = false,
+      this.maxOutput = csMaxDecodedLength,
+      this.maxDistance});
 
   final Uint8List data;
 
@@ -688,6 +732,14 @@ class LzhReferenceDecoder {
   /// [maxOutput] (see [_outputLimit]).
   final bool declaredBound;
   final int maxOutput;
+
+  /// Reject (throw) a back-reference longer than this — [lzhMaxDistance]
+  /// when checking what WE emit for the kernel ([lzhCompress]'s verify).
+  /// Null (server streams): any distance resolves from the full history.
+  final int? maxDistance;
+
+  /// The longest back-reference distance decoded so far.
+  int maxSeenDistance = 0;
 
   /// Output so far; an overrun of the cap fills to it, then fails.
   _ByteBuf out = _ByteBuf(0, 0);
@@ -842,6 +894,15 @@ class LzhReferenceDecoder {
       }
       final dc = dist.readCode(_r).value;
       final distance = _maps.distStarts[dc] + _r.readBits(_distExtra[dc]);
+      if (distance > maxSeenDistance) {
+        maxSeenDistance = distance;
+        final cap = maxDistance;
+        if (cap != null && distance > cap) {
+          throw LzhDecodeException(
+              'match distance $distance exceeds the SAP LZH maximum $cap '
+              'at output ${out.length}');
+        }
+      }
       final st = out.length - distance;
       // SAP LZH decodes against a window pre-initialised to zeros: a back-
       // reference reaching before the output start legitimately copies zeros.
@@ -886,15 +947,32 @@ void _lzCopy(_ByteBuf ob, int st, int distance, int length) {
 
 /// Reference decode with partial-on-error: returns (output, error?) where
 /// output holds everything decoded before the failure.
+/// [maxDistance] (e.g. [lzhMaxDistance]) fails a back-reference past it.
 (Uint8List, String?) lzhReferenceDecodePartial(Uint8List comp,
-    {bool declaredBound = false, int maxOutput = csMaxDecodedLength}) {
+    {bool declaredBound = false,
+    int maxOutput = csMaxDecodedLength,
+    int? maxDistance}) {
   final d = LzhReferenceDecoder(comp,
-      declaredBound: declaredBound, maxOutput: maxOutput);
+      declaredBound: declaredBound,
+      maxOutput: maxOutput,
+      maxDistance: maxDistance);
   try {
     return (d.decode(), null);
   } on LzhDecodeException catch (e) {
     return (d.out.toBytes(), e.message);
   }
+}
+
+/// The longest back-reference distance in the SAP-LZH stream [comp] (0: no
+/// match), or null when it does not decode.
+int? lzhMaxMatchDistance(Uint8List comp) {
+  final d = LzhReferenceDecoder(comp);
+  try {
+    d.decode();
+  } on LzhDecodeException {
+    return null;
+  }
+  return d.maxSeenDistance;
 }
 
 // ---------------------------------------------------------------------------
@@ -1133,6 +1211,17 @@ Uint8List _fixedHuffmanLiteral(Uint8List data) {
 /// reference decoder. Without native zlib the literal encoder is the whole
 /// compressor, and its output is verified with the reference decoder — a
 /// stream that does not round-trip is never returned.
+///
+/// No emitted back-reference is longer than [lzhMaxDistance] (16 122), the
+/// kernel's limit. Stock zlib at windowBits -14 already stops there — its
+/// `MAX_DIST(s) = w_size - MIN_LOOKAHEAD` is the same gzip-lineage
+/// 16 384 - 262 as SAP's — but the linked libz is the platform's (Apple's,
+/// Android's, zlib-ng), so the limit is checked, not assumed: an input
+/// longer than [lzhMaxDistance] has its emission walked by the reference
+/// decoder (a shorter one cannot hold such a distance: no preset dictionary,
+/// so a match never reaches before the input start), and one that reaches
+/// further is re-encoded with an 8K window (-13: 8 192 - 262), then the
+/// fallbacks as above.
 Uint8List lzhCompress(Uint8List data, {int level = 6}) {
   if (data.isEmpty) {
     // noise=0 + BFINAL=1 + BTYPE=00 -> byte 0x04, then empty stored block
@@ -1141,16 +1230,20 @@ Uint8List lzhCompress(Uint8List data, {int level = 6}) {
   }
   const footer = 8; // zero footer for kernel look-ahead
   if (zlibAvailable) {
+    final deflate = lzhRawDeflateOverride ?? _nativeRawDeflate;
     for (final strategy in const [zDefaultStrategy, zFixed]) {
-      final stream = _noiseShiftDeflate(
-          rawDeflate(data, level: level, strategy: strategy), data.length,
-          footer: footer);
-      final fast = lzhInflate(stream, declaredBound: true);
-      if (fast == null || !_bytesEqual(fast, data)) continue;
-      assert(_referenceRoundTrips(stream, data),
-          'lzhCompress: the zlib fast path accepted a stream the reference '
-          'decoder rejects (${data.length} B)');
-      return stream;
+      for (final windowBits in const [-14, -13]) {
+        final stream = _noiseShiftDeflate(
+            deflate(data,
+                level: level, windowBits: windowBits, strategy: strategy),
+            data.length,
+            footer: footer);
+        final fast = lzhInflate(stream, declaredBound: true);
+        // misaligned STORED block: the next strategy, as with a 16K window
+        if (fast == null || !_bytesEqual(fast, data)) break;
+        if (!_withinSapDistance(stream, data)) continue;
+        return stream;
+      }
     }
     return _noiseShiftDeflate(_fixedHuffmanLiteral(data), data.length,
         footer: footer);
@@ -1164,9 +1257,49 @@ Uint8List lzhCompress(Uint8List data, {int level = 6}) {
 }
 
 bool _referenceRoundTrips(Uint8List stream, Uint8List data) {
-  final (back, err) = lzhReferenceDecodePartial(stream, declaredBound: true);
+  final (back, err) = lzhReferenceDecodePartial(stream,
+      declaredBound: true, maxDistance: lzhMaxDistance);
   return err == null && _bytesEqual(back, data);
 }
+
+/// Whether the fast-path-verified [stream] of [data] keeps every
+/// back-reference within [lzhMaxDistance]. Debug builds (asserts on) also
+/// require the reference decoder to agree with the fast path.
+bool _withinSapDistance(Uint8List stream, Uint8List data) {
+  if (data.length <= lzhMaxDistance) {
+    // a distance is at most the match's output position (< data.length)
+    assert(_referenceRoundTrips(stream, data),
+        'lzhCompress: the zlib fast path accepted a stream the reference '
+        'decoder rejects (${data.length} B)');
+    return true;
+  }
+  final d = LzhReferenceDecoder(stream, declaredBound: true);
+  final Uint8List back;
+  try {
+    back = d.decode();
+  } on LzhDecodeException catch (e) {
+    assert(false,
+        'lzhCompress: the zlib fast path accepted a stream the reference '
+        'decoder rejects (${data.length} B): ${e.message}');
+    return false; // distances unchecked: never shipped
+  }
+  assert(_bytesEqual(back, data),
+      'lzhCompress: the reference decoder disagrees with the fast path '
+      '(${data.length} B)');
+  return d.maxSeenDistance <= lzhMaxDistance;
+}
+
+/// The raw deflate [lzhCompress] runs; a test hook — e.g. a 32K-window
+/// encoder standing in for a zlib build whose match finder reaches past
+/// [lzhMaxDistance]. Null: native zlib ([rawDeflate]).
+Uint8List Function(Uint8List data,
+    {required int level,
+    required int windowBits,
+    required int strategy})? lzhRawDeflateOverride;
+
+Uint8List _nativeRawDeflate(Uint8List data,
+        {required int level, required int windowBits, required int strategy}) =>
+    rawDeflate(data, level: level, windowBits: windowBits, strategy: strategy);
 
 /// SAP-LZH of [data] as STORED deflate blocks — never compresses, always
 /// valid; the carrying DIAG item must be APPL4 (4-byte length).

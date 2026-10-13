@@ -4,6 +4,8 @@ library;
 import 'dart:convert';
 import 'dart:typed_data';
 
+import '../framing/decode_stats.dart';
+import '../framing/envelope.dart' show indexOfBytes;
 import '../lzh/lzh.dart';
 import 'rfc_cells.dart';
 
@@ -12,7 +14,6 @@ const int varsW = 337;
 const int verbsW = 53;
 
 final RegExp _fourDigits = RegExp(r'^\d{4}$');
-final RegExp _svarsRe = RegExp('<SVARS>(.*?)</SVARS>', dotAll: true);
 final RegExp _valueRe = RegExp('<VALUE>(.*?)</VALUE>', dotAll: true);
 final RegExp _charRefRe = RegExp(r'&#(\d+);');
 
@@ -152,15 +153,21 @@ Map<String, SvarsColumn> rfcColumns(Uint8List rfc, {Set<String>? only}) {
     String? name = w != null ? _nameBefore(rfc, o - _geomBlock) : null;
     name ??= _scanNameBack(rfc, o);
     if (only != null && !only.contains(name)) continue;
+    // the u32 BE at [4:8] (parse0305Cell): a cell past 64 KB declares its
+    // high half there — /AIF/IFMON's step-38 RFC_QUEUE (a recorded session
+    // aif raw srv[25..32], the date navigator's 711 DayInfo pushes:
+    // `00 01 45 04` = 83204 bytes) read as u16 0x4504 did not inflate and
+    // every push of the call was lost
     final lzhLen = cell.bytes.buffer
         .asByteData(cell.bytes.offsetInBytes, cell.bytes.lengthInBytes)
-        .getUint16(6);
+        .getUint32(4);
     // the declared length can overrun the cell by a few bytes (the 88-verb
     // the test system Easy Access queue's VARS: 995 declared, 992 present) — read what
     // the cell holds, as the engine's slice `cell[8:8+lzh_len]` does;
     // skipping the cell lost VARS and the answer went out without it
     // (SAPLOLEA SYSTEM_FAILURE at the logon flush)
     final end = 8 + lzhLen < cell.bytes.length ? 8 + lzhLen : cell.bytes.length;
+    DecodeStats.cellInflates++;
     final blob = lzhInflate(Uint8List.sublistView(cell.bytes, 8, end));
     if (blob == null) continue;
     // first cell with a given name wins (setdefault)
@@ -343,11 +350,16 @@ void _blank(BytesBuilder out, int width) {
 
 /// The long-string values a call ships in its SVARS XML column.
 List<String> parseSvarsItems(Uint8List rfc) {
-  final s = String.fromCharCodes(rfc);
-  final m = _svarsRe.firstMatch(s);
-  if (m == null) return [];
+  // the first `<SVARS>` and the first `</SVARS>` after it bound the match
+  // `<SVARS>(.*?)</SVARS>` finds (non-greedy, dotAll): only that region is stringified,
+  // not the whole multi-MB call value per parse (audit #8)
+  final open = indexOfBytes(rfc, '<SVARS>');
+  if (open < 0) return [];
+  final close = indexOfBytes(rfc, '</SVARS>', open + 7);
+  if (close < 0) return [];
+  final inner = String.fromCharCodes(rfc, open + 7, close);
   return [
-    for (final v in _valueRe.allMatches(m.group(1)!))
+    for (final v in _valueRe.allMatches(inner))
       _xmlUnescape(v.group(1) ?? '')
   ];
 }

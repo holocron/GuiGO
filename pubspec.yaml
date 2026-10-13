@@ -4,4 +4,5 @@ environment:
   sdk: ^3.13.0
 workspace:
   - packages/diag_protocol
+  - packages/office_doc
   - apps/guigo

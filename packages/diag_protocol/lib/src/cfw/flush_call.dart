@@ -165,6 +165,18 @@ const Map<String, int> methodType = {
   'setRegDWValueEx': 20, 'setRegValue': 20, 'setRegValueEx': 20,
   'setTimer': 3, 'shellExecute': 20, 'shellExecuteEx': 20,
   'showDocument': 8, 'showURL': 20, 'unregisterServer': 20, 'winHelp': 20,
+  // DOI (doi.dart doiMethodTypes): the real Office 16 GUI's VT_I4 '0' on
+  // every one (a recorded session — the chart / spreadsheet / Word 97 /
+  // pivot demos; SO10 / SMARTFORMS's SAPscript Word editor; the SFP
+  // Designer). Unmapped, each was answered a fresh object handle where the
+  // ABAP reads an int (the CONVT_NO_NUMBER / UC_OBJECTS_NOT_CONVERTIBLE
+  // dump family).
+  'StartLinkServer': 3, 'AddTableItem': 3, 'AddBinaryItem': 3,
+  'InsertRange2': 3, 'InsertRangeDim2': 3, 'InsertOneTable': 3,
+  'SetFieldtype': 3, 'SetSelection2': 3, 'SetSourceTable': 3, 'SetFrame': 3,
+  'FitWidest': 3, 'DrillUp': 3, 'DrillDown': 3,
+  'InstallReadOnlyTemplate': 3, 'SetTemplate': 3, 'ExecuteMacro2': 3,
+  'SetInPlaceBorderSpace': 3,
 };
 
 /// The frontend dialect a session speaks (the connect frame's profile).
@@ -182,6 +194,14 @@ const List<String> _winI4 = [
   'SecureSaveDataToUrl', 'SecureSetDataFromUrl', 'Count', 'ShowData', 'ShowUrl',
   'EnableSAPSSO', 'loadImageFromURL', 'LoadImageFromURL', 'GetWindow', 'LoadBitmap',
   'SetSelection2', 'SetSourceTable',
+  // the browser launches (browser_launch.dart): the real SAP GUI for
+  // Windows stamps VT_I4 — ShowURLInDetachedBrowser '0'
+  // (a recorded session srv[80] -> gui[65]; unmapped it was
+  // answered a blank VT_BSTR), ShellExecute '42' (a recorded session
+  // srv[102] -> gui[91], a recorded session srv[1565] -> gui[1285];
+  // the base table's VT_I8 is the Java GuiSapInfo's long). ShowURLInBrowser
+  // / ShellExecuteEx: the same OCX families, unrecorded.
+  'ShowURLInDetachedBrowser', 'ShowURLInBrowser', 'ShellExecute', 'ShellExecuteEx',
 ];
 const List<String> _winUi4 = [
   'BackColor', 'ForeColor', 'Color', 'Effect', 'SelPosStartCol', 'FirstVisibleLine',
@@ -199,6 +219,10 @@ final Map<GuiDialect, Map<String, int>> methodTypeByDialect = {
     'loadImageFromURL': 11, 'LoadImageFromURL': 11, 'PublishUrl': 11,
     'TextModified': 11, 'Count': 20, 'Effect': 20, 'SetColumnMode': 20,
     'SecureSetDataFromUrl': 20, 'ShowData': 8, 'ShowUrl': 8, 'EnableSAPSSO': 8,
+    // SapBrowser's void launches (javap rev14), stamped like their ShowUrl /
+    // EnableSAPSSO siblings; GuiSapInfo.shellExecute* return long (base 20)
+    'ShowURLInDetachedBrowser': 8, 'ShowURLInBrowser': 8,
+    'ShowDataInBrowser': 8,
   },
   GuiDialect.windows: {
     for (final m in _winI2) m: 2,
@@ -252,6 +276,54 @@ class FlushCall {
   /// -> handle; set by the responder) — what a later queue names the object
   /// by (a DATAREQUEST reply's `InsertPacket` on its provider)
   Map<int, int> resultHandles = {};
+
+  /// This parse re-keyed on [dialect] — what [parseFlushCall] of [raw] with
+  /// that dialect returns, without decoding the call again: the tables
+  /// (columns, PARAMS / VARS / VERBS rows, SVARS) are the dialect-free
+  /// decode and are SHARED (no reader writes them; [verbMeta]'s derived
+  /// tables stay valid), only the `_RESULT` types are re-typed. The
+  /// collections the answer path WRITES (cached / set properties, the mint
+  /// side channel) are the copy's own, so the answer's additions never show
+  /// up in this parse (audit #2: the answer re-parsed — re-inflating
+  /// every cell of — a call the frame's readers had just parsed).
+  FlushCall withDialect(GuiDialect? dialect) {
+    final c = FlushCall(raw)
+      ..dialect = dialect
+      ..columns = columns
+      ..svars = svars
+      ..params = params
+      ..vars = vars
+      ..verbs = verbs
+      ..verbCalls = verbCalls
+      ..verbKinds = verbKinds
+      ..verbObjects = verbObjects
+      ..cachedProps = [...cachedProps]
+      ..setProps = {...setProps}
+      ..registeredEvents = [...registeredEvents]
+      ..metricsShell = metricsShell;
+    // a verb-less call returns from the parse before its results are typed
+    if (_typed) _typeResults(c);
+    return c;
+  }
+
+  bool _typed = false;
+}
+
+/// The concrete VARIANT type per `_RESULT` PARAMS row of [call], for its
+/// [FlushCall.dialect].
+void _typeResults(FlushCall call) {
+  call._typed = true;
+  for (var pI = 0; pI < call.params.length; pI++) {
+    final p = call.params[pI];
+    if (p.name != '_RESULT' && p.name != '_RESULT_QUEUEONLY') continue;
+    final oid = p.objid.trim();
+    String? meth;
+    if (_isDigits(oid)) {
+      final i = int.parse(oid);
+      if (i >= 1 && i <= call.verbs.length) meth = call.verbs[i - 1];
+    }
+    call.resultTypes[pI] = methodTypeOf(meth, call.dialect) ?? 9;
+  }
 }
 
 /// Parse an OLE_FLUSH_CALL RFC_TR value (parse_flush_call port).
@@ -306,28 +378,15 @@ FlushCall parseFlushCall(Uint8List rfc, {GuiDialect? dialect}) {
   call.verbObjects = [for (final v in vrecs) _name(v, 0, 10)];
 
   // result types: the concrete VARIANT type per _RESULT PARAMS row
-  final slotsByVerb = <int, List<String>>{};
   final resultSlotByVerb = <int, String>{};
   for (final p in call.params) {
     final oid = p.objid.trim();
     if (!_isDigits(oid)) continue;
     if (p.name == '_RESULT' || p.name == '_RESULT_QUEUEONLY') {
       resultSlotByVerb.putIfAbsent(int.parse(oid), () => p.slot.trim());
-    } else {
-      slotsByVerb.putIfAbsent(int.parse(oid), () => []).add(p.slot.trim());
     }
   }
-  for (var pI = 0; pI < call.params.length; pI++) {
-    final p = call.params[pI];
-    if (p.name != '_RESULT' && p.name != '_RESULT_QUEUEONLY') continue;
-    final oid = p.objid.trim();
-    String? meth;
-    if (_isDigits(oid)) {
-      final i = int.parse(oid);
-      if (i >= 1 && i <= call.verbs.length) meth = call.verbs[i - 1];
-    }
-    call.resultTypes[pI] = methodTypeOf(meth, dialect) ?? 9;
-  }
+  _typeResults(call);
 
   String? val(String slot) {
     if (_isDigits(slot) && int.parse(slot) < call.vars.length) {
@@ -345,27 +404,19 @@ FlushCall parseFlushCall(Uint8List rfc, {GuiDialect? dialect}) {
         call.cachedProps.add((shell!, prop!));
       }
     } else if (name == 'GetProperty') {
-      final vals = [for (final s in slotsByVerb[i] ?? const []) val(s)];
-      final nums = vals.where((v) => v != null && _isDigits(v)).toList();
-      // an EMPTY value is no property name (the reference client's `if v and …`):
-      // the read-ahead of a numeric GetProperty(135, 300) — the DBA
-      // cockpit's dock-width read after a nav-tree item double-click,
-      // a recorded session srv[39] — yields ['300', ''],
-      // and taking '' as the name echoed a phantom `<CONTROL SHELLID="300">
-      // <PROPERTY VALUE="" NAME=""/>` the server's CL_GUI_DATAMANAGER
-      // rejects: CNDP 008 "balise act.: PROPERTY" (live 2026-10-12 after
-      // `%_GC 148 22`). The real GUI echoes no PROPERTY for it (gui[31]):
-      // the value rides the _RESULT var.
-      final strs = vals
-          .where((v) => v != null && v.isNotEmpty && !_isDigits(v))
-          .toList();
-      final shell = nums.isNotEmpty ? nums.last : call.verbCalls[i - 1];
-      for (final prop in strs) {
-        if (!_isDigits(shell) || (prop ?? '').startsWith(RegExp(r'[012]-'))) {
-          continue;
-        }
-        call.cachedProps.add((shell as String, prop!));
-      }
+      // a property READ, never a cached-prop registration: the real GUI
+      // answers it on the verb's _RESULT var and echoes no PROPERTY for it
+      // (a recorded session srv[39] -> gui[31], the DBA
+      // cockpit's dock-width read GetProperty(135, 300) after a nav-tree
+      // item double-click; the corpus' 37 GetProperty verbs, numeric
+      // propIds and `GetProperty(Control, Version)` alike). Taking its
+      // values as (shell, name) pairs echoed phantom blocks the server's
+      // CL_GUI_DATAMANAGER rejects — CNDP 008 "balise act.: PROPERTY"
+      // (live 2026-10-12 `%_GC 148 22`: `<CONTROL SHELLID="300"><PROPERTY
+      // VALUE="" NAME=""/>`; live 2026-10-13 `%_GC 150 22` the same dump):
+      // [val] reads the row AFTER a slot (the reference client's `_val`), so the read
+      // took the propId for the shell and whatever followed — the _RESULT
+      // row, or the next verb's argument mid-queue — for a property name.
     } else if (name == 'SetProperty') {
       final argv = verbNamedArgs(call, i);
       final shell = argv['#1'], prop = argv['#2'], v = argv['#3'];
@@ -580,7 +631,7 @@ List<DpPushBinding> _dpPushBindings(FlushCall call) {
       final args = verbArgs(call, i);
       final cls = args
           .map((a) => a.$2)
-          .firstWhere((v) => v.isNotEmpty && v.contains(RegExp(r'[A-Za-z]')), orElse: () => '');
+          .firstWhere((v) => v.isNotEmpty && v.contains(_letterRx), orElse: () => '');
       if (cls.toLowerCase().contains('ondemand')) {
         flush();
         ondemand = DpPushBinding(owner: null, role: null, urls: [], cls: cls);
@@ -724,3 +775,7 @@ class DpPushBinding {
   String? attach;
   String? field;
 }
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _letterRx = RegExp(r'[A-Za-z]');

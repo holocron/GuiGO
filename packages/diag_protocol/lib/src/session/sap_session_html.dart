@@ -30,9 +30,14 @@ extension SapSessionHtml on SapSession {
           st.pushes.remove(u);
         }
       }
+      // the external-browser verbs load nothing INTO the viewer (the jar's
+      // ShowURLInBrowser / ShowURLInDetachedBrowser open the system
+      // browser: sap_session_browser.dart)
       final loads = [
         for (var i = 1; i <= call.verbs.length; i++)
-          if (isHtmlLoadVerb(call.verbs[i - 1])) i,
+          if (isHtmlLoadVerb(call.verbs[i - 1]) &&
+              !detachedBrowserVerbs.contains(call.verbs[i - 1]))
+            i,
       ];
       final buttons = call.verbs.any(
         (v) =>
@@ -163,7 +168,9 @@ extension SapSessionHtml on SapSession {
   /// SAP name after `NAME:`) of a `SAPEVENT:` form in [doc] (a dynamic
   /// document's form, [SapHtmlForm]s — /AIF/IFMON's selection pane): the
   /// browser's submit — `%_GC <viewer> 1` with (the form's frame `Frame0`,
-  /// the POST length, `sapevent:<form>`) and the POST body armed for the
+  /// the POST length, `sapevent:<form>`; under the Edge control no frame
+  /// and `SAPEVENT:<form>` — [EmulatedGuiProfile.htmlBrowser],
+  /// [HtmlBrowserControl]) and the POST body armed for the
   /// server's PostData / SaveDataToUrl / DP_GET pull, answered with the
   /// Windows OCX's object ([htmlWindowsPostAnswer]) — the real SAP GUI for
   /// Windows, a recorded session raw gui[27] + gui[30]. [values]
@@ -189,10 +196,48 @@ extension SapSessionHtml on SapSession {
       );
     }
     await _flushStagedFirst();
-    final body = form.postBytes(id, values: values);
-    final url = form.windowsUrl;
+    return _submitHtmlForm(doc, form, id, form.postBytes(id, values: values));
+  }
+
+  /// Enter in text input [input] (its DOM id `A1F2I4NAME:INPUT_BEGINDT`,
+  /// its field name `A1F2I4`, or the SAP name after `NAME:`) of a
+  /// `SAPEVENT:` form in [doc]: the page's InputKeyDown submit — the same
+  /// `%_GC <viewer> 1` as a button's, its body with `sapbu_cl` blank and
+  /// `sapin_cl` = the input's id + `sapENTER` ([SapHtmlForm.enterBody];
+  /// the real GUI, a recorded session raw gui[86] + gui[89]). [values]
+  /// carries what the user typed, by field name or control id.
+  Future<List<Uint8List>> htmlFormEnter(
+    SapHtmlDocument doc,
+    String input, {
+    Map<String, String> values = const {},
+  }) async {
+    _windowsOnly('an HTML form submit');
+    for (final f in doc.forms) {
+      final id = f.inputOf(input);
+      if (id == null) continue;
+      await _flushStagedFirst();
+      return _submitHtmlForm(doc, f, id, f.enterBytes(id, values: values));
+    }
+    throw ArgumentError('no SAPEVENT form of ${doc.url} has an input "$input"');
+  }
+
+  /// The browser's submit of [form] with [body] (a button's or an input's
+  /// Enter, [id] the control): the viewer's event + the POST body armed
+  /// for the server's pull.
+  Future<List<Uint8List>> _submitHtmlForm(
+    SapHtmlDocument doc,
+    SapHtmlForm form,
+    String id,
+    Uint8List body,
+  ) {
+    // the shape the emulated GUI's browser control reports
+    // ([HtmlBrowserControl]: IE `Frame0` / `sapevent:`, Edge no frame /
+    // the action verbatim)
+    final browser = guiProfile.htmlBrowser;
+    final url = form.submitUrl(browser);
+    final frame = form.submitFrame(browser);
     _ea.recordEvent(doc.shell, {
-      if (form.frame.isNotEmpty) 0: form.frame,
+      if (frame.isNotEmpty) 0: frame,
       1: '${body.length}',
       2: url,
     });
@@ -204,7 +249,7 @@ extension SapSessionHtml on SapSession {
         viewerShell: doc.shell,
         url: url,
         postLength: body.length,
-        frame: form.frame,
+        frame: frame,
         sourcePath: _hostedSourcePath(doc.shell),
       ),
       dialectReady: true,
@@ -478,7 +523,7 @@ extension SapSessionHtml on SapSession {
     final reg = _layoutState.registry;
     String? sh = shell;
     for (var i = 0; i < 16 && sh != null; i++) {
-      if (reg.props[sh]?['290'] == '0') return false;
+      if (reg.props[sh]?[propVisible] == '0') return false;
       sh = reg.parents[sh];
     }
     return true;
@@ -544,8 +589,8 @@ extension SapSessionHtml on SapSession {
       final rowPx = ctx.winPxHeight / (screenRows == 0 ? 1 : screenRows);
       final colPx = ctx.winPxWidth / (screenCols == 0 ? 1 : screenCols);
       int px(String id) => int.tryParse((p[id] ?? '').trim()) ?? 0;
-      var rows = (px('120') / rowPx).round();
-      var cols = (px('300') / colPx).round();
+      var rows = (px(propControlHeight) / rowPx).round();
+      var cols = (px(propControlWidth) / colPx).round();
       if (rows <= 0) rows = screenRows ~/ 2;
       if (cols <= 0) cols = screenCols ~/ 2;
       final top = (px('270') / rowPx).round().clamp(0, screenRows);

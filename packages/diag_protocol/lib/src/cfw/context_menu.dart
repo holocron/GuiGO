@@ -238,7 +238,7 @@ SapMenuEntry? _record(Uint8List rec) {
   final level = ByteData.sublistView(rec, 0, 4).getUint32(0, Endian.little);
   if (level < 1 || level > contextMenuMaxLevel) return null;
   final flag = String.fromCharCode(rec[4]);
-  if (!RegExp(r'^[A-Za-z]$').hasMatch(flag)) return null;
+  if (!_singleLetterRx.hasMatch(flag)) return null;
   final fc = Uint8List.sublistView(rec, 5, 75);
   final tx = Uint8List.sublistView(rec, 79, 199);
   final fcode = _blank(fc) ? '' : latin1.decode(fc).trimRight();
@@ -353,6 +353,12 @@ const List<String> treeSelectionProps = [
 /// FORMNAME` between ABAPSelItemKey and ABAPSelItemName, the server holding
 /// gui[7]'s `HDEFAULTS` (reference client 534a50c §1). Tracked like the selection.
 const String topNodeKeyProp = 'TopNodeKey';
+
+/// The SapTree node-key tables the server reads back (AssignProperty2
+/// `ExpandedKeys` / `SelectionKeys`): the folders open and the nodes
+/// selected on the client.
+const String expandedKeysProp = 'ExpandedKeys';
+const String selectionKeysProp = 'SelectionKeys';
 const List<String> _trackedTreeProps = [...treeSelectionProps, topNodeKeyProp];
 
 /// The SapTree property that keeps the selection on a right-click (the
@@ -426,18 +432,18 @@ class ContextMenuTracker {
         }
       } else if (verb == 'CreateControl' || verb == 'CreateControl2') {
         final sh = (named['#1'] ?? '').trim();
-        if (res.isNotEmpty && RegExp(r'^\d+$').hasMatch(sh)) rowShell[res] = sh;
+        if (res.isNotEmpty && _digitsOnlyRx.hasMatch(sh)) rowShell[res] = sh;
       } else if (verb == setContextMenuVerb) {
         var shell = (named['#1'] ?? '').trim();
         var slot = (m.slots['#2'] ?? '').trim();
-        if (!RegExp(r'^\d+$').hasMatch(shell)) {
+        if (!_digitsOnlyRx.hasMatch(shell)) {
           // the grid form: run on the grid object, #1 = the menu object
           // (a recorded session srv[20] v7 on handle 15)
           shell = objShell(i) ?? trackShell ?? '';
           slot = (m.slots['#1'] ?? '').trim();
         }
         final url = rowUrl[slot] ?? pendingMenuUrl ?? lastUrl;
-        if (RegExp(r'^\d+$').hasMatch(shell) && url != null) {
+        if (_digitsOnlyRx.hasMatch(shell) && url != null) {
           var seg = segment?.call(url);
           if (seg == null) {
             own ??= DpCache()..ingestValue(value);
@@ -516,7 +522,7 @@ class ContextMenuTracker {
       // verb's object token maps to no shell (an offline replay whose
       // mints differ)
       final sh = rowShell[v.objRow] ?? shellOf?.call(v.handle) ?? trackShell;
-      if (sh == null || !RegExp(r'^\d+$').hasMatch(sh)) continue;
+      if (sh == null || !_digitsOnlyRx.hasMatch(sh)) continue;
       var seg = segment?.call(v.url);
       if (seg == null) {
         own ??= DpCache()..ingestValue(value);
@@ -558,3 +564,8 @@ class ContextMenuTracker {
     ];
   }
 }
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _singleLetterRx = RegExp(r'^[A-Za-z]$');
+final RegExp _digitsOnlyRx = RegExp(r'^\d+$');

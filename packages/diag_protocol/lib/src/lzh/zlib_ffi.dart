@@ -8,6 +8,8 @@ import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
+import '../framing/decode_stats.dart';
+
 // zlib stream constants (zlib.h).
 const int zOk = 0;
 const int zStreamEnd = 1;
@@ -165,6 +167,13 @@ class RawInflate {
   String? error;
   int totalOut = 0;
 
+  // pooled inflaters only: the window bits and the dictionary a reset
+  // re-primes with (its native copy, made once per dictionary)
+  int _windowBits = -15;
+  Uint8List? _dictionary;
+  bool _pooled = false;
+  bool _inPool = false;
+
   // the library resolves FIRST: an unavailable zlib throws before any
   // native allocation (nothing to leak)
   RawInflate({int windowBits = -15, Uint8List? dictionary})
@@ -172,6 +181,7 @@ class RawInflate {
         _strm = calloc<ZStream>(),
         _outBuf = malloc<Uint8>(_outCap) {
     final z = _z;
+    DecodeStats.inflaterInits++;
     _strm.ref
       ..nextIn = nullptr
       ..availIn = 0
@@ -179,7 +189,11 @@ class RawInflate {
       ..zfree = nullptr
       ..opaque = nullptr;
     var ret = z.inflateInit2_(_strm, windowBits, z.version, z.sizeofStream);
-    if (ret != zOk) _fail('inflateInit2_ -> $ret');
+    if (ret != zOk) {
+      // nothing past a failed init: no dictionary on an unset stream
+      _fail('inflateInit2_ -> $ret');
+      return;
+    }
     if (dictionary != null && dictionary.isNotEmpty) {
       final dict = malloc<Uint8>(dictionary.length)
         ..asTypedList(dictionary.length).setAll(0, dictionary);
@@ -187,6 +201,119 @@ class RawInflate {
       malloc.free(dict);
       if (ret != zOk) _fail('inflateSetDictionary -> $ret');
     }
+  }
+
+  /// The idle pooled inflaters ([RawInflate.pooled] / [release]).
+  static final List<RawInflate> _pool = [];
+
+  /// How many idle inflaters the pool keeps (each holds a zlib state, its
+  /// 32 KB window and the 64 KB output buffer).
+  static const int poolCap = 4;
+
+  /// The native copies of the dictionaries pooled inflaters are primed
+  /// with, made once per dictionary object for the process (the LZH zero
+  /// window: one 32 KB copy, not a malloc + copy + free per `03 05` cell).
+  static final Map<Uint8List, Pointer<Uint8>> _nativeDicts = Map.identity();
+
+  static Pointer<Uint8> _nativeDict(Uint8List d) =>
+      _nativeDicts[d] ??= malloc<Uint8>(d.length)
+        ..asTypedList(d.length).setAll(0, d);
+
+  /// An inflater from the pool — a fresh one (as [RawInflate.new]) when none
+  /// with the same [windowBits] and [dictionary] object is idle, else an idle
+  /// one `inflateReset` and re-primed with [dictionary]: the same state as a
+  /// fresh one (zlib's reset keeps only the allocations). Hand it back with
+  /// [release]. [dictionary]'s bytes must not change while the process runs
+  /// (its native copy is kept; the LZH zero window is constant).
+  /// Audit #9 / zcode P-06: every frame and every `03 05` cell built a
+  /// fresh context, 64 KB buffer and 32 KB dictionary copy.
+  factory RawInflate.pooled({int windowBits = -15, Uint8List? dictionary}) {
+    for (var i = _pool.length - 1; i >= 0; i--) {
+      final p = _pool[i];
+      if (p._windowBits != windowBits || !identical(p._dictionary, dictionary)) {
+        continue;
+      }
+      _pool.removeAt(i);
+      p._inPool = false;
+      if (p._reset()) return p;
+      p._destroy(); // a reset zlib refused: never handed out again
+    }
+    final inf = RawInflate._pooled(windowBits, dictionary);
+    return inf;
+  }
+
+  RawInflate._pooled(int windowBits, Uint8List? dictionary)
+      : _z = _ZlibLib.instance,
+        _strm = calloc<ZStream>(),
+        _outBuf = malloc<Uint8>(_outCap) {
+    DecodeStats.inflaterInits++;
+    _windowBits = windowBits;
+    _dictionary = dictionary;
+    _pooled = true;
+    _strm.ref
+      ..nextIn = nullptr
+      ..availIn = 0
+      ..zalloc = nullptr
+      ..zfree = nullptr
+      ..opaque = nullptr;
+    final ret =
+        _z.inflateInit2_(_strm, windowBits, _z.version, _z.sizeofStream);
+    if (ret != zOk) {
+      _fail('inflateInit2_ -> $ret');
+      return;
+    }
+    _prime();
+  }
+
+  void _prime() {
+    final d = _dictionary;
+    if (d == null || d.isEmpty) return;
+    final ret = _z.inflateSetDictionary(_strm, _nativeDict(d), d.length);
+    if (ret != zOk) _fail('inflateSetDictionary -> $ret');
+  }
+
+  /// Back to the fresh state: false when zlib refuses the reset.
+  bool _reset() {
+    _finished = false;
+    _failed = false;
+    error = null;
+    totalOut = 0;
+    _strm.ref
+      ..nextIn = nullptr
+      ..availIn = 0;
+    if (_z.inflateReset(_strm) != zOk) return false;
+    _prime();
+    return !_failed;
+  }
+
+  /// Free the idle pooled inflaters and the native dictionary copies (an
+  /// isolate about to exit: what the pool holds is native memory the
+  /// isolate's death does not return — at most [poolCap] inflaters of
+  /// ~100 KB and one 32 KB dictionary per isolate). Inflaters in use are
+  /// freed when released.
+  static void drainPool() {
+    for (final p in _pool) {
+      p._inPool = false;
+      p._destroy();
+    }
+    _pool.clear();
+    for (final d in _nativeDicts.values) {
+      malloc.free(d);
+    }
+    _nativeDicts.clear();
+  }
+
+  /// Done with a [RawInflate.pooled] inflater: back to the pool (or freed
+  /// when the pool is full); the caller must not touch it again. A
+  /// non-pooled inflater is simply disposed.
+  void release() {
+    if (_disposed || _inPool) return;
+    if (!_pooled || _pool.length >= poolCap) {
+      dispose();
+      return;
+    }
+    _inPool = true;
+    _pool.add(this);
   }
 
   bool get finished => _finished;
@@ -271,6 +398,11 @@ class RawInflate {
   }
 
   void dispose() {
+    if (_disposed || _inPool) return;
+    _destroy();
+  }
+
+  void _destroy() {
     if (_disposed) return;
     _disposed = true;
     _z.inflateEnd(_strm);

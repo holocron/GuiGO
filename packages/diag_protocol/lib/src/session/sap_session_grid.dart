@@ -196,15 +196,19 @@ extension SapSessionGridClick on SapSession {
   /// Click hotspot cell ([row], [columnId]) of grid [shell] — EVENTID 2,
   /// the double-click's envelope with the hotspot id (a recorded session
   /// enjoy gui[133], ME23N PO history 148 BELNR row 1). [columnId] must be
-  /// one of the grid's [SapGridModel.hotspotColumns].
+  /// a hotspot cell of the grid ([SapGridModel.isHotspot]: its column, or
+  /// the cell's own style — the load history's KPI FLAG checkboxes,
+  /// a recorded session gui[30] `%_GC 281 2` on FLAG row 2).
   Future<List<Uint8List>> gridHotspotClick(
     String shell,
     int row,
     String columnId,
   ) {
     final g = grids[shell];
-    if (g != null && !g.hotspotColumns.contains(columnId)) {
-      throw ArgumentError('column $columnId of grid $shell is no hotspot');
+    if (g != null && !g.isHotspot(row, columnId)) {
+      throw ArgumentError(
+        'cell $row / $columnId of grid $shell is no hotspot',
+      );
     }
     return _gridCellEvent(shell, row, columnId, gridEventHotspotClick);
   }
@@ -241,11 +245,10 @@ extension SapSessionGridClick on SapSession {
         'SAP GUI does not fire it',
       );
     }
-    final cells = g.rowAt(row)!;
     final target = <String, String>{
       'CurrentCellCol': '$pos',
       'CurrentCellRow': '$row',
-      'CurrentCellText': pos <= cells.length ? cells[pos - 1] : '',
+      'CurrentCellText': g.currentCellText(row, columnId),
       'CurrentCellColID': columnId,
       'CurrentCellRowID': gridRowIdText(g, row),
       'CurrentCellRowIDNumeric': '${gridRowIdNumeric(g, row)}',
@@ -307,6 +310,8 @@ extension SapSessionGridClick on SapSession {
         eventId: eventId,
         xml: xml,
         path: _hostedSourcePath(shell),
+        // a checkbox cell's click keeps the painted focus (g[30])
+        keepFocus: g.checkboxCells[row]?.containsKey(columnId) ?? false,
       ),
       controlEvent: true,
       dialectReady: true,

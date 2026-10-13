@@ -329,14 +329,7 @@ DpContent? dpPutContent(Uint8List seg) {
   var column = name;
   var blobs = cells;
   var (w, cnt) = dims;
-  var totalsize = 0;
-  // TOTALSIZE scalar (u32 LE) bounds the content when the server fills it
-  final ts = _scalarValue(seg, 'TOTALSIZE');
-  if (ts != null && ts.length >= 4) {
-    totalsize = ts.buffer
-        .asByteData(ts.offsetInBytes, ts.lengthInBytes)
-        .getUint32(0, Endian.little);
-  }
+  final totalsize = dpTotalSize(seg);
   if (blobs.isEmpty) {
     final b = dpColumnCells(seg, 'DATABIN');
     column = b.$1;
@@ -353,6 +346,16 @@ DpContent? dpPutContent(Uint8List seg) {
       expected: expected,
       column: column,
       complete: joined.length == expected);
+}
+
+/// The push's TOTALSIZE scalar (u32 LE) — the content length when the
+/// server fills it — else 0.
+int dpTotalSize(Uint8List seg) {
+  final ts = _scalarValue(seg, 'TOTALSIZE');
+  if (ts == null || ts.length < 4) return 0;
+  return ts.buffer
+      .asByteData(ts.offsetInBytes, ts.lengthInBytes)
+      .getUint32(0, Endian.little);
 }
 
 /// [w] x [n] table dims, or (0, 0) when their product passes the decode
@@ -522,7 +525,7 @@ List<FmtColumn>? placeholderColumns(Uint8List dec) {
     final n1 = _txt(dec, off + 30, off + 60);
     String? real;
     for (final n in [n0, n1]) {
-      if (n.isNotEmpty && n != xUnknown && !RegExp(r'^\d+$').hasMatch(n)) {
+      if (n.isNotEmpty && n != xUnknown && !_digitsOnlyRx.hasMatch(n)) {
         real = n;
         break;
       }
@@ -569,14 +572,15 @@ String _txt(Uint8List r, int start, int end) =>
 String decodeRsField(Uint8List raw, int ftype) {
   if (raw.isEmpty) return '';
   if (ftype == 10 || ftype == 11) {
-    // WCHAR / WSTRING -> UTF-16LE
-    var out = '';
+    // WCHAR / WSTRING -> UTF-16LE (code units gathered, one String built:
+    // `out +=` per unit was O(n²); audit zcode P-15)
+    final units = <int>[];
     for (var i = 0; i + 1 < raw.length; i += 2) {
       final cu = raw[i] | (raw[i + 1] << 8);
       if (cu == 0) break;
-      out += String.fromCharCode(cu);
+      units.add(cu);
     }
-    return out.trimRight();
+    return String.fromCharCodes(units).trimRight();
   }
   const intTypes = {1, 2, 3, 4, 8, 9, 13, 14};
   if (intTypes.contains(ftype)) {
@@ -597,15 +601,19 @@ String decodeRsField(Uint8List raw, int ftype) {
   if (ftype == 15) {
     return raw.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
-  // CHAR / DATE / TIME / STRING / unknown -> text
-  var s = '';
-  for (final b in raw) {
-    if (b == 0) break;
-    s += String.fromCharCode(b);
+  // CHAR / DATE / TIME / STRING / unknown -> text, up to the first NUL
+  // (sliced, not built char by char and transcoded back: audit P-15)
+  var end = 0;
+  var ascii = true;
+  while (end < raw.length && raw[end] != 0) {
+    if (raw[end] >= 0x80) ascii = false;
+    end++;
   }
+  if (ascii) return String.fromCharCodes(raw, 0, end).trimRight();
   // UTF-8 re-read with latin1 fallback
-  final bytes = Uint8List.fromList(s.codeUnits);
-  return String.fromCharCodes(_utf8DecodeLenient(bytes)).trimRight();
+  return String.fromCharCodes(
+          _utf8DecodeLenient(Uint8List.sublistView(raw, 0, end)))
+      .trimRight();
 }
 
 List<int> _utf8DecodeLenient(Uint8List bytes) {
@@ -684,3 +692,7 @@ List<int> _utf8DecodeLenient(Uint8List bytes) {
   }
   return (cols, rows);
 }
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _digitsOnlyRx = RegExp(r'^\d+$');

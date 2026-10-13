@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import 'dynpro_view.dart';
 import 'sap_toolbar.dart';
+import 'session_busy.dart';
 
 /// A modal dynpro window: any paint with modalLevel > 0 renders as this
 /// overlay card over the dimmed base window. The content is the generic
@@ -28,6 +29,7 @@ class ModalDynproWindow extends StatelessWidget {
     this.onEdit,
     this.onValueHelp,
     this.onListPick,
+    this.onListCursor,
     this.onListCell,
     this.onListScroll,
     this.onFocusField,
@@ -54,6 +56,7 @@ class ModalDynproWindow extends StatelessWidget {
   final void Function(ScreenField f, String text)? onEdit;
   final Future<void> Function(ScreenField f)? onValueHelp;
   final Future<void> Function(ListLine line)? onListPick;
+  final void Function(int row, int col)? onListCursor;
   final void Function(ListLine line, ListSegment cell, String text)?
   onListCell;
   final Future<void> Function(int firstLine)? onListScroll;
@@ -87,10 +90,13 @@ class ModalDynproWindow extends StatelessWidget {
           wrap: true,
         ),
       if (extraActions.isEmpty && toolbar.isEmpty && !ownButtons)
-        FilledButton.icon(
-          onPressed: busy ? null : () => onPress(0),
-          icon: const Icon(Icons.check),
-          label: const Text('OK'),
+        BusyBuilder(
+          busy: busy,
+          builder: (_, busy) => FilledButton.icon(
+            onPressed: busy ? null : () => onPress(0),
+            icon: const Icon(Icons.check),
+            label: const Text('OK'),
+          ),
         ),
     ];
     return ConstrainedBox(
@@ -143,6 +149,7 @@ class ModalDynproWindow extends StatelessWidget {
                   onEdit: onEdit,
                   onValueHelp: onValueHelp,
                   onListPick: onListPick,
+                  onListCursor: onListCursor,
                   onListCell: onListCell,
                   onListScroll: onListScroll,
                   onFocusField: onFocusField,

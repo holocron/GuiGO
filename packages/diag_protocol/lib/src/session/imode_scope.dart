@@ -36,10 +36,10 @@ import '../framing/diag_frame.dart';
 /// and progress-indicator frames over the SAME connection, mode and window
 /// — with that system's 16/6/2 DBNAME / 16/6/3 CPUNAME, its own Step
 /// counter from 1 and an extra imode uuid appended to the home list
-/// (a recorded session recv/62326731d295 SAPMSYST_1: the test system
-/// `the application server`, step 1, IMODEUUIDS2 A | B | C under the test system's A | B; the
-/// same shape in a recorded session SAPMSYST_1 frame 2, the test system, and
-/// a recorded session SAPMSYST_1, the test system). Such a frame is
+/// (a recorded session recv/62326731d295 SAPMSYST_1: <SID2>
+/// `<host2>`, step 1, IMODEUUIDS2 A | B | C under the logon system's A | B;
+/// the same shape in a recorded session SAPMSYST_1 frame 2, another
+/// SID, and a recorded session SAPMSYST_1). Such a frame is
 /// [lastFrameForeign]: it moves neither the live list nor the current
 /// imode (its IMODENUMBER 0 indexes the HOME list's A — read as a home
 /// frame, the Easy Access menu would be "current" on the remote logon
@@ -174,7 +174,8 @@ class IModeScope {
   /// logon's window and the ones it opens, the RFC target's for a window
   /// a REMOTE LOGON opened in a new DIAG mode (SM59 *Connexion à
   /// distance*: a recorded session raw srv[29..42], every
-  /// mode-1 frame the test system under the the test system logon, its own Step clock from 1).
+  /// mode-1 frame the target SID under the logon's own, its own Step clock
+  /// from 1).
   /// Null before that frame.
   SystemIdentity? own;
 
@@ -228,6 +229,10 @@ class IModeScope {
     if (u != null) _shellIMode[shell.trim()] = u;
   }
 
+  /// Forget [shell]'s stamp: a DestroyWindow ended it (the map never
+  /// outgrows the live controls).
+  void forget(String shell) => _shellIMode.remove(shell.trim());
+
   /// The shells whose newest creation rode one of [uuids] — what a
   /// `delIMode` of them destroys. Their stamps are dropped: a dead imode is
   /// never current again.
@@ -248,10 +253,10 @@ class IModeScope {
 class SystemIdentity {
   const SystemIdentity(this.sid, this.host, [this.client = '']);
 
-  /// The system id (DBNAME: `the test system`, `the test system`).
+  /// The system id (DBNAME: `<SID>`).
   final String sid;
 
-  /// The application server (CPUNAME: `the application server`).
+  /// The application server (CPUNAME: `<host>`).
   final String host;
 
   /// The frame's client (`200`; `000` on a remote logon paint — nobody is

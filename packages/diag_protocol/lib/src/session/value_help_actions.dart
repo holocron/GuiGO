@@ -146,7 +146,7 @@ List<Uint8List> valueHelpEventItems(
     buildApplItem(6, 35, winCodepageValue),
     buildApplItem(12, 4, wireText('%_GC $shell $eventId')),
     if (windowsModalWindowRectOwed(ctx, geometry: geometry))
-      buildApplItem(4, 36, winIdentity36),
+      buildApplItem(4, 36, windowsWindowRect(ctx)),
     for (final (sid, value) in winIdentity) buildApplItem(4, sid, value),
     buildApplItem(5, 1, Uint8List(22)..[1] = mode),
     buildApplItem(12, 6, geometry),

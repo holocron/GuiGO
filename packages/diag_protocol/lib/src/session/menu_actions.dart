@@ -308,7 +308,11 @@ Uint8List listCursorValue(int line, int col) => Uint8List.fromList([
 /// SAPGUI.NetPlanGraphics.1, SAPbarc.OCX SAPGUI.BarChartGraphics.1): a
 /// menu round with the focus on such a control goes out OK `00 03`
 /// ([windowsMenuSelectItems]).
-bool isSapGraphicsClass(String cls) => RegExp(
+bool isSapGraphicsClass(String cls) => _isSapGraphicsClassRx.hasMatch(cls.trim());
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _isSapGraphicsClassRx = RegExp(
   r'^SAPGUI\.(?:NetPlan|BarChart)Graphics\.\d+$',
   caseSensitive: false,
-).hasMatch(cls.trim());
+);

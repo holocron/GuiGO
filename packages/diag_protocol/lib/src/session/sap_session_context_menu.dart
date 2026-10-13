@@ -217,10 +217,8 @@ extension SapSessionContextMenu on SapSession {
     }
     _requireGridEvent(sh, gridEventContextMenu);
     final pos = columnId == null ? 0 : g.columns.indexOf(columnId) + 1;
-    String cellText() {
-      final cells = g.rowAt(row!) ?? const <String>[];
-      return pos >= 1 && pos <= cells.length ? cells[pos - 1] : '';
-    }
+    String cellText() =>
+        pos >= 1 ? g.currentCellText(row!, columnId!) : '';
 
     final target = <String, String>{
       'CurrentCellCol': '$pos',

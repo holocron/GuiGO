@@ -90,7 +90,11 @@ extension SapSessionCalendar on SapSession {
   /// answer is what the server cannot read as a date: it aborts the
   /// transaction (the test system ME2N F4 on an empty S_BEDAT-LOW, 2026-10-11:
   /// SAPMSDYP "DATE_FROM possède la valeur non valide").
-  Map<int, Uint8List> _foldCalendarCall(FlushCall call, Uint8List value) {
+  Map<int, Uint8List> _foldCalendarCall(
+    FlushCall call,
+    Uint8List value, {
+    int step = 0,
+  }) {
     try {
       final t = _cal.tracker;
       t.foldCall(
@@ -99,13 +103,14 @@ extension SapSessionCalendar on SapSession {
         shellOf: (t) => _ea.shellAlias[t],
         base: _calendarBase,
         dialect: answerDialect,
+        step: step,
       );
       return {
         for (final e in t.answers.entries)
           e.key: Uint8List.fromList(e.value.codeUnits),
       };
     } catch (e) {
-      _trace('calendar ingest failed: $e');
+      _noteIngestFailure('calendar ingest', e);
       return const {};
     }
   }
@@ -183,7 +188,7 @@ extension SapSessionCalendar on SapSession {
           final set = reg.props[sh] ?? const <String, String>{};
           final values = <(String, String)>[
             for (final p in props)
-              if ((p == '120' || p == '300') && !set.containsKey(p))
+              if ((p == propControlHeight || p == propControlWidth) && !set.containsKey(p))
                 (p, areaContainerPx(g, p)!),
           ];
           if (values.isNotEmpty) out[sh] = values;

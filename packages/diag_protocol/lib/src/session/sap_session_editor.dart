@@ -84,10 +84,11 @@ extension SapSessionEditor on SapSession {
   Uint8List? _editorFlushReport(FlushCall call, Set<String> touched) {
     if (answerDialect != GuiDialect.windows) return null;
     if (call.cachedProps.isNotEmpty) return _editorCreationAnswer(call);
-    if (touched.isEmpty) return null;
+    // a tree fill's TopNodeKey rides the same report (sap_session_tree.dart)
+    final reports = _treeTopNodeReports(call).toList();
+    if (touched.isEmpty && reports.isEmpty) return null;
     final t = _editorTracker;
     final reg = _layoutState.registry;
-    final reports = <ControlReport>[];
     final shells = touched.toList()
       ..sort((a, b) => (int.tryParse(a) ?? 0).compareTo(int.tryParse(b) ?? 0));
     for (final sh in shells) {
@@ -112,6 +113,10 @@ extension SapSessionEditor on SapSession {
       reports.add(ControlReport(sh, props: props));
     }
     if (reports.isEmpty) return null;
+    reports.sort(
+      (a, b) =>
+          (int.tryParse(a.shell) ?? 0).compareTo(int.tryParse(b.shell) ?? 0),
+    );
     _trace(
       'flush answer reports '
       '${[for (final r in reports) '${r.shell} ${r.props.map((p) => p.$1).join('/')}'].join(', ')}',
@@ -542,7 +547,7 @@ extension SapSessionEditor on SapSession {
           final set = reg.props[sh] ?? const <String, String>{};
           final values = <(String, String)>[
             for (final p in props)
-              if ((p == '120' || p == '300') && !set.containsKey(p))
+              if ((p == propControlHeight || p == propControlWidth) && !set.containsKey(p))
                 (p, areaContainerPx(g, p)!),
           ];
           if (values.isNotEmpty) out[sh] = values;
@@ -566,7 +571,7 @@ extension SapSessionEditor on SapSession {
       final set = reg.props[sh] ?? const <String, String>{};
       final done = reg.flushedSizes[sh] ?? const <String, String>{};
       for (final p in props) {
-        if ((p == '120' || p == '300') &&
+        if ((p == propControlHeight || p == propControlWidth) &&
             !set.containsKey(p) &&
             !done.containsKey(p)) {
           return false;
@@ -604,7 +609,7 @@ extension SapSessionEditor on SapSession {
         continue;
       }
       final x = wireDecode(Uint8List.fromList(walk.items.single.value));
-      for (final m in RegExp(r'<CONTROL SHELLID\s*="([^"]*)"').allMatches(x)) {
+      for (final m in _pendingEditorControlsRx.allMatches(x)) {
         named.add(m[1]!);
       }
     }
@@ -968,3 +973,7 @@ const Set<String> _methodMovedProps = {
 };
 
 final Expando<SapTextEditorTracker> _editorTrackers = Expando('editorTracker');
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _pendingEditorControlsRx = RegExp(r'<CONTROL SHELLID\s*="([^"]*)"');

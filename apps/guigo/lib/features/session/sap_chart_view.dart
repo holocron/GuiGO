@@ -49,11 +49,15 @@ ChartKind chartKindOf(String type) {
   return ChartKind.line;
 }
 
+/// An 8-digit date key (compiled once: [categoryLabel] runs per label per
+/// paint).
+final RegExp _dateKeyRx = RegExp(r'^\d{8}$');
+
 /// A category key as an axis label: 8-digit dates (20231223) read as
 /// 2023-12-23; anything else as is.
 String categoryLabel(String c) {
   final s = c.trim();
-  if (RegExp(r'^\d{8}$').hasMatch(s)) {
+  if (_dateKeyRx.hasMatch(s)) {
     return '${s.substring(0, 4)}-${s.substring(4, 6)}-${s.substring(6)}';
   }
   return s;

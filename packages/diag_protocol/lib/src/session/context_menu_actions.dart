@@ -245,7 +245,7 @@ List<Uint8List> windowsContextMenuEventItems(
     buildApplItem(
       12,
       8,
-      _u32s([ctx.winPxHeight, ctx.winPxWidth, ctx.winPxHeight, ctx.winPxWidth]),
+      ctx.windowAreaPx(ctx.winPxHeight, ctx.winPxWidth),
     ),
     buildApplItem(
       12,

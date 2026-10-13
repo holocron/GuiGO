@@ -48,10 +48,24 @@ class SourceToken {
 /// Split one ABAP line into highlighted tokens: a `*` in column 1 or a `"`
 /// starts a comment, '…' / `…` / |…| are literals, keywords by the table.
 List<SourceToken> tokenizeAbap(String line) {
+  // once per line text: a caret tap, a selection drag or a scroll rebuilt
+  // the rows on screen, each re-tokenized (a bounded memo)
+  final known = _tokensMemo[line];
+  if (known != null) return known;
+  if (_tokensMemo.length >= 4096) _tokensMemo.clear();
+  return _tokensMemo[line] = _tokenize(line);
+}
+
+final Map<String, List<SourceToken>> _tokensMemo = {};
+
+final RegExp _abapTokenRx = RegExp(r'''("[^\n]*$)|('(?:[^']|'')*'?)|(`(?:[^`]|``)*`?)|(\|[^|]*\|?)|(\b\d+\b)|([A-Za-z_/][A-Za-z0-9_/\-~>=]*)|(\s+|.)''');
+
+final RegExp _abapWordRx = RegExp(r'[A-Za-z0-9_/\-~>=]+');
+
+List<SourceToken> _tokenize(String line) {
   if (line.startsWith('*')) return [SourceToken(line, 'comment')];
   final out = <SourceToken>[];
-  final rx = RegExp(r'''("[^\n]*$)|('(?:[^']|'')*'?)|(`(?:[^`]|``)*`?)|(\|[^|]*\|?)|(\b\d+\b)|([A-Za-z_/][A-Za-z0-9_/\-~>=]*)|(\s+|.)''');
-  for (final m in rx.allMatches(line)) {
+  for (final m in _abapTokenRx.allMatches(line)) {
     final t = m.group(0)!;
     if (m.group(1) != null) {
       out.add(SourceToken(t, 'comment'));
@@ -72,8 +86,7 @@ List<SourceToken> tokenizeAbap(String line) {
 /// with its start column — what a double-click navigates on.
 (String, int)? wordAt(String line, int col) {
   if (col < 0 || col >= line.length) return null;
-  final rx = RegExp(r'[A-Za-z0-9_/\-~>=]+');
-  for (final m in rx.allMatches(line)) {
+  for (final m in _abapWordRx.allMatches(line)) {
     if (col >= m.start && col < m.end) return (m.group(0)!, m.start);
   }
   return null;
@@ -369,6 +382,22 @@ class _SapSourceViewState extends State<SapSourceView> {
 
   void _hideOnScroll() {
     if (!_dragging && _toolbar.isShown) _toolbar.remove();
+  }
+
+  /// The longest line's length, once per text (every build — a caret tap,
+  /// a drag — folded over the whole document); the length guards a list
+  /// grown in place.
+  List<String>? _longestFor;
+  int _longestLen = -1;
+  int _longest = 0;
+
+  int _longestOf(List<String> lines) {
+    if (identical(lines, _longestFor) && lines.length == _longestLen) {
+      return _longest;
+    }
+    _longestFor = lines;
+    _longestLen = lines.length;
+    return _longest = lines.fold<int>(0, (a, l) => l.length > a ? l.length : a);
   }
 
   @override
@@ -949,8 +978,17 @@ class _SapSourceViewState extends State<SapSourceView> {
     final digits = '${widget.lines.length}'.length;
     final double gutterW = digits * _cw + 28;
     _gutterW = gutterW;
-    final longest = widget.lines.fold<int>(0, (a, l) => l.length > a ? l.length : a);
+    final longest = _longestOf(widget.lines);
     final double codeW = (longest + 2) * _cw;
+    // one style per token kind for every row of the build
+    final styles = {
+      for (final e in colors.entries)
+        e.key: _mono.copyWith(
+          color: e.value,
+          fontStyle: e.key == 'comment' ? FontStyle.italic : null,
+          fontWeight: e.key == 'kw' ? FontWeight.w600 : null,
+        ),
+    };
 
     Widget row(BuildContext context, int i) {
       final line = i + 1;
@@ -1011,11 +1049,12 @@ class _SapSourceViewState extends State<SapSourceView> {
                       for (final t in tokenizeAbap(widget.lines[i]))
                         TextSpan(
                           text: t.text,
-                          style: _mono.copyWith(
-                            color: colors[t.kind],
-                            fontStyle: t.kind == 'comment' ? FontStyle.italic : null,
-                            fontWeight: t.kind == 'kw' ? FontWeight.w600 : null,
-                          ),
+                          style: styles[t.kind] ??
+                              _mono.copyWith(
+                                color: colors[t.kind],
+                                fontStyle: t.kind == 'comment' ? FontStyle.italic : null,
+                                fontWeight: t.kind == 'kw' ? FontWeight.w600 : null,
+                              ),
                         ),
                     ]),
                     softWrap: false,

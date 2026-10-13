@@ -17,6 +17,7 @@ import '../screen/field_routing.dart' show windowsTabstripState;
 import 'actions.dart';
 import 'frames.dart';
 import 'grid_edit_actions.dart' show uiEventControlAt;
+import 'gui_profile.dart';
 import 'logon_frames.dart';
 
 const int dpHeaderLen = 200;
@@ -33,9 +34,11 @@ Uint8List _hexBytes(String h) {
 /// REPLAYED logon: the built Windows connect ([buildConnectFrame]) with the
 /// recorded frame's connection words (rq_id, terminal, unused10) spliced
 /// in, as the reference client's frontend_profile.connect_frame does with its
-/// fixture. A live logon sends [buildConnectFrame] itself.
-Uint8List windowsConnectFrame(Uint8List fixtureFrame0) {
-  final out = buildConnectFrame(dialect: GuiDialect.windows);
+/// fixture. A live logon sends [buildConnectFrame] itself. [language]: the
+/// connect's ST_USER 39 ([connectLanguage]).
+Uint8List windowsConnectFrame(Uint8List fixtureFrame0,
+    {String language = defaultLogonLanguage}) {
+  final out = buildConnectFrame(dialect: GuiDialect.windows, language: language);
   if (fixtureFrame0.length < dpHeaderLen) return out;
   out.setRange(39, 41, fixtureFrame0.sublist(39, 41));
   out.setRange(81, 97, fixtureFrame0.sublist(81, 97));
@@ -58,8 +61,8 @@ final Uint8List winCodepageValue = _hexBytes('0000100e0134313130007574662d3800')
 /// The per-frame `16/04/*` identity atoms of a Windows client frame, in wire
 /// order (the Java set is 16/04/43 OS + 16/04/44 + 16/04/25 + 16/04/04).
 final List<(int, Uint8List)> winIdentity = [
-  (9, _hexBytes('383030')), // 16/04/09 "800"
-  (29, _hexBytes('3138')), // 16/04/29 GUI patch level "18"
+  (9, wireText(emulatedGuiRelease)), // 16/04/09 "800"
+  (29, wireText(emulatedGuiPatchLevel)), // 16/04/29 GUI patch level "18"
   (15, _hexBytes('0000005d')), // 16/04/15 (u32 93)
   (25, _hexBytes('0000')), // 16/04/25
 ];
@@ -101,10 +104,20 @@ Uint8List patchLoginFrameWindows(Uint8List rawFrame) {
   return clientFrame(out, mode: plain[0]);
 }
 
-/// The `16/04/36` identity atom of a Windows client action frame (8 bytes;
-/// the reference client's accepted value — a recorded session, its
-/// `/nSE16` round; a real Windows GUI sends its own window figures here).
-final Uint8List winIdentity36 = _hexBytes('0000040900000781');
+/// The `16/04/36` window rect of a Windows client action frame (8 bytes,
+/// height / width px u32 BE): [ActionContext.winWindowRectPx] — the
+/// device's display when the app reports one (EmulatedGuiProfile
+/// .displayPx), else the reference GUI's `0000 0409 0000 0781` (the
+/// reference client's accepted value — a recorded session, its okcode
+/// round). [ctx] null: the reference value.
+Uint8List windowsWindowRect(ActionContext? ctx) {
+  final (h, w) = ctx?.winWindowRectPx ?? ActionContext.recordedWindowRectPx;
+  return (ByteData(8)
+        ..setUint32(0, h)
+        ..setUint32(4, w))
+      .buffer
+      .asUint8List();
+}
 
 /// The three window atoms of a Windows window's first round, in wire order:
 /// 16/4/4 FONTMETRIC, 16/4/36 DISPLAY_SIZE, 16/4/40 MAINAREA_SIZE
@@ -132,19 +145,14 @@ List<Uint8List> windowsFirstRoundAtoms(ActionContext ctx) {
   ];
 }
 
-/// The `16/04/*` atoms the SAP GUI for Windows sends ONCE, in the first
-/// round of the logon (the logon submit — a recorded session
-/// gui[1], a recorded session gui[1]; a ticket logon's first SES
-/// round — a recorded session gui[3]), right before the
-/// [winIdentity] block: 16/04/31 GUI_OS_VERSION, 16/04/32
-/// BROWSER_VERSION, 16/04/33 OFFICE_VERSION, 16/04/37 GUI_TYPE — the
-/// recording PC's own (the same bytes in all three captures).
-final List<(int, Uint8List)> winLogonIdentity = [
-  (31, Uint8List.fromList('Windows 10.0 (22631) '.codeUnits)),
-  (32, Uint8List.fromList('IE 9.11.22621.0'.codeUnits)),
-  (33, Uint8List.fromList('Office 16'.codeUnits)),
-  (37, _hexBytes('0001')),
-];
+// The `16/04/*` atoms the SAP GUI for Windows sends ONCE, in the first
+// round of the logon (the logon submit — a recorded session
+// gui[1], a recorded session gui[1]; a ticket logon's first SES
+// round — a recorded session gui[3]), right before the
+// [winIdentity] block — 16/04/31 GUI_OS_VERSION, 16/04/32
+// BROWSER_VERSION, 16/04/33 OFFICE_VERSION, 16/04/37 GUI_TYPE — are the
+// session's EmulatedGuiProfile.logonIdentity (gui_profile.dart; the
+// recording PC's own: EmulatedGuiProfile.recordedWindowsGui).
 
 /// The FIRST round the SAP GUI for WINDOWS sends in a window carries
 /// 16/4/4 FONTMETRIC + 16/4/36 DISPLAY_SIZE + 16/4/40 MAINAREA_SIZE
@@ -362,8 +370,7 @@ Uint8List uiEventSelectWindows(List<int> cursor) {
 /// CONTROLS copy is a different session's state.
 Uint8List liveMetricsXml(int rows, int cols) => Uint8List.fromList(
     ('<?xml version="1.0" encoding="sap*"?><DATAMANAGER><COPY id="copy">'
-            '<GUI id="gui"><METRICS id="metrics" X3="${cols * 8}" X2="8" '
-            'X1="8" X0="283" Y3="${rows * 29}" Y2="29" Y1="17" Y0="283"/>'
+            '<GUI id="gui">${metricsElement(rows, cols)}'
             '</GUI></COPY></DATAMANAGER>')
         .codeUnits);
 
@@ -678,7 +685,7 @@ List<Uint8List> windowsActionItems(List<Uint8List> items,
       // (menu_focus raw gui[8] / [10] / [18], f4 raw gui[10] / [15],
       // selection_options_buttons raw gui[30] / [37]: `0000 0409 0000
       // 0781`; 147 of the corpus' 179 Windows popup key rounds)
-      if (keyModal) out.add(buildApplItem(4, 36, winIdentity36));
+      if (keyModal) out.add(buildApplItem(4, 36, windowsWindowRect(ctx)));
     } else if (it.isAppl && it.id == 6 && it.sid == 35) {
       out.add(buildApplItem(6, 35, winCodepageValue));
     } else if (it.isAppl && it.id == 4 && const {43, 44, 25, 4}.contains(it.sid)) {
@@ -690,7 +697,7 @@ List<Uint8List> windowsActionItems(List<Uint8List> items,
         // the window rect rides only the first round after a logon /
         // resize (su53 gui[5] vs gui[70], gui[103] … — edfd931 §2)
         if (okcodeRound && modal) {
-          out.add(buildApplItem(4, 36, winIdentity36));
+          out.add(buildApplItem(4, 36, windowsWindowRect(ctx)));
         }
         for (final (sid, value) in winIdentity) {
           out.add(buildApplItem(4, sid, value));
@@ -1423,7 +1430,7 @@ bool windowsIsControlHostPopup(ActionContext ctx, {List<int>? geometry}) {
 /// * that host popup nested over another popup (level >= 2,
 /// [windowsModalLevel]) → a rect is owed (su53 gui[22], alv gui[33],
 /// a recorded session gui[48]); its VALUE there is `0000 0419 0000
-/// 0f01`, not the main window's — unsettled, [winIdentity36] is sent.
+/// 0f01`, not the main window's — unsettled, [windowsWindowRect] is sent.
 ///
 /// Unsettled, not guessed: the FIRST host popup of a logon carries that
 /// `0419 0f01` rect too (a recorded session gui[19],
@@ -1862,7 +1869,7 @@ List<Uint8List> windowsControlEventEnvelope(
       out.add(buildApplItem(5, 1, Uint8List(it.value.length)..[1] = mode));
     } else if (it.id == 12 && it.sid == 4) {
       out.add(raw);
-      if (rectOwed) out.add(buildApplItem(4, 36, winIdentity36));
+      if (rectOwed) out.add(buildApplItem(4, 36, windowsWindowRect(ctx)));
     } else if (it.id == 4 && it.sid == 36) {
       // re-placed after the okcode when owed; none on a main window
     } else if (it.id == 12 && (it.sid == 8 || it.sid == 14)) {
@@ -1879,14 +1886,8 @@ List<Uint8List> windowsControlEventEnvelope(
   return out;
 }
 
-Uint8List _winPxValue(ActionContext ctx) {
-  final px = ByteData(16)
-    ..setUint32(0, ctx.winPxHeight)
-    ..setUint32(4, ctx.winPxWidth)
-    ..setUint32(8, ctx.winPxHeight)
-    ..setUint32(12, ctx.winPxWidth);
-  return px.buffer.asUint8List();
-}
+Uint8List _winPxValue(ActionContext ctx) =>
+    ctx.windowAreaPx(ctx.winPxHeight, ctx.winPxWidth);
 
 Uint8List _winSesItem(ActionContext ctx, {int eventArray = 0, int vkey = 0}) {
   final ses = Uint8List(16);
@@ -1990,7 +1991,8 @@ List<Uint8List> windowsPushbuttonItems(
     _winSesItem(ctx),
     buildApplItem(6, 35, winCodepageValue),
     buildApplItem(12, 4, wireText(fc)),
-    if (windowsModalWindowRectOwed(ctx)) buildApplItem(4, 36, winIdentity36),
+    if (windowsModalWindowRectOwed(ctx))
+      buildApplItem(4, 36, windowsWindowRect(ctx)),
     for (final (sid, value) in winIdentity) buildApplItem(4, sid, value),
     buildApplItem(5, 1, Uint8List(22)..[1] = okMode),
     if (!modal) buildApplItem(12, 8, _winPxValue(ctx)),

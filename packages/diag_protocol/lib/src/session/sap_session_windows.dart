@@ -60,6 +60,7 @@ class SapWindow {
     required this.closed,
     required this.active,
     required this.step,
+    this.suspect = false,
   });
 
   /// The DIAG mode byte (frame header byte 0) — the window's identity on
@@ -91,11 +92,18 @@ class SapWindow {
   /// The window's own dialog step.
   final int step;
 
+  /// Frames the server sent this window while it was in the background
+  /// were dropped (its parked queue overflowed,
+  /// [TransportLimits.parkedFramesPerWindow]): its screen may be stale and
+  /// an answer the kernel waits for may be lost — if it does not respond,
+  /// close it.
+  final bool suspect;
+
   @override
   String toString() =>
       'SapWindow(mode $mode, ($number) $program/$dynpro, '
-      '${origin.name}${closed ? ', closed' : ''}${active ? ', active' : ''}, '
-      'step $step)';
+      '${origin.name}${closed ? ', closed' : ''}${active ? ', active' : ''}'
+      '${suspect ? ', suspect' : ''}, step $step)';
 }
 
 /// The client's own window command an action carries (reference client
@@ -156,6 +164,9 @@ class _WindowState {
   /// resumed.
   final List<Uint8List> queue = [];
 
+  /// Parked frames dropped on overflow ([SapWindow.suspect] when any).
+  int parkedDropped = 0;
+
   // --- screen state (SCREEN_ATTRS) ---
   int step = 0;
 
@@ -164,7 +175,7 @@ class _WindowState {
   /// the window's latest step-bearing frame was relayed from another one
   /// (an RFC remote logon's SAPMSYST/0029 and progress frames carry the
   /// target's own Step counter from 1 — a recorded session
-  /// recv/62326731d295 SAPMSYST_1 / _8: steps 1, 2, 4 … under the test system's 21).
+  /// recv/62326731d295 SAPMSYST_1 / _8: steps 1, 2, 4 … under the logon's 21).
   /// [step] stays the wire step (every reply echoes it); generation
   /// arithmetic runs on [SapSession.clockStep].
   int homeStep = 0;
@@ -252,6 +263,7 @@ class _WindowState {
     closed: closed,
     active: active,
     step: step,
+    suspect: parkedDropped > 0,
   );
 }
 
@@ -448,6 +460,10 @@ extension SapSessionWindows on SapSession {
       'step ${win.step}',
     );
     await _deliverParked(win);
+    if (win.parkedDropped > 0) {
+      _trace('[mode] window (${win.number}) selected with '
+          '${win.parkedDropped} parked frame(s) lost: it may not respond');
+    }
     _notifyWindows();
   }
 
@@ -489,7 +505,7 @@ extension SapSessionWindows on SapSession {
   /// Keyed on the MODE BYTE alone, never on a step reset: a remote logon's
   /// frames relayed from its RFC target restart at Step 1 in the SAME mode
   /// and window (a recorded session SAPMSYST_1, mode 0 step 1
-  /// under the test system's 21) — the step clock holds (imode_scope.dart), no window
+  /// under the logon's 21) — the step clock holds (imode_scope.dart), no window
   /// is born (foreign_step_clock_test.dart).
   _WindowState? _routeFrame(Uint8List payload, Uint8List frame) {
     final (step, title) = _stepAndTitle(frame);
@@ -501,7 +517,7 @@ extension SapSessionWindows on SapSession {
     } else if (m != _modes.liveMode) {
       if (!_modes.followNext) {
         win.queue.add(payload);
-        if (win.queue.length > 256) win.queue.removeAt(0);
+        _parkedQueued(win);
         _trace(
           '[mode] frame of window (${win.number}) (DIAG mode $m, step '
           '$step) parked while window (${_modes.live.number}) is addressed',
@@ -562,6 +578,7 @@ extension SapSessionWindows on SapSession {
       ..winFontMetric = parent.ctx.winFontMetric
       ..winDisplayPx = parent.ctx.winDisplayPx
       ..winMainAreaPx = parent.ctx.winMainAreaPx
+      ..winWindowRectPx = parent.ctx.winWindowRectPx
       ..os = parent.ctx.os;
     if (parent.ctx.windowSized) {
       // the client's window size, in the kernel's 22 x 7 cell (the one

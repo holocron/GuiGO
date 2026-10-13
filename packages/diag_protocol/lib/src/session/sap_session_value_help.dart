@@ -219,18 +219,29 @@ extension SapSessionValueHelp on SapSession {
   /// visible channel, ascending shell — what every Windows event round
   /// reports beside its event (f4_modes gui[25]: SU53's grid 125; me51n
   /// gui[13]: 123). A grid with a staged selection is left out: its block
-  /// rides the staged state ([withGridStateXml]).
+  /// rides the staged state ([withGridStateXml]). A live grid that never
+  /// got content reports the empty `0 / 0` (a recorded session
+  /// history g[17] / g[30]: the DB50 overview's grid 180 — cell (2, 1) of
+  /// splitter 175, rows 100 / 0 — beside the load history's grids).
   List<GridControlState> _gridGenericBlocks({Set<String> skip = const {}}) {
     final all = grids;
     final reg = _layoutState.registry;
-    final shells = all.keys.toList()
+    final kinds = reg.kinds();
+    final shells = {
+      ...all.keys,
+      for (final sh in reg.cachedProps.keys)
+        if (kinds[sh] == 'grid' && _onScreen(sh)) sh,
+    }.toList()
       ..sort((a, b) => (int.tryParse(a) ?? 0).compareTo(int.tryParse(b) ?? 0));
     return [
       for (final sh in shells)
         if (!skip.contains(sh) &&
             !(gridSelections[sh]?.pending ?? false) &&
             (reg.cachedProps[sh]?.contains('FirstVisibleRow') ?? false))
-          GridControlState(sh, generic: gridFirstVisible(all[sh]!)),
+          GridControlState(
+            sh,
+            generic: all[sh] == null ? (0, 0) : gridFirstVisible(all[sh]!),
+          ),
     ];
   }
 }

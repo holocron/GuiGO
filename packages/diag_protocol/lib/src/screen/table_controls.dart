@@ -391,7 +391,7 @@ List<String> _cStrings(Uint8List b, int start, {int? count}) {
 /// 18/9/21: NUL-separated `<Propertybag><DefaultTooltip>TEXT</…>` blocks,
 /// one per column (reference client _grid_tooltips).
 List<String> parseTcTooltips(Uint8List raw) {
-  final re = RegExp(r'<DefaultTooltip>(.*?)</DefaultTooltip>', dotAll: true);
+  final re = _parseTcTooltipsRx;
   return [
     for (final chunk in utf8.decode(raw, allowMalformed: true).split('\x00'))
       _htmlUnescape(re.firstMatch(chunk)?.group(1) ?? ''),
@@ -560,12 +560,14 @@ class TcBuilder {
   /// else the first (reference client column_etype / column_protected).
   List<int>? recordFor(Map<int, List<int>> recs, int line) {
     if (recs.isEmpty) return null;
-    final lines = recs.keys.toList()..sort();
-    var pick = lines.first;
-    for (final l in lines) {
-      if (l <= line) pick = l;
+    // one pass, no sorted key copy per painted line (audit #10): the
+    // greatest line <= [line], else the smallest
+    int? below, first;
+    for (final l in recs.keys) {
+      if (first == null || l < first) first = l;
+      if (l <= line && (below == null || l > below)) below = l;
     }
-    return recs[pick];
+    return recs[below ?? first];
   }
 
   /// Decode the buffers once the catalog is known.
@@ -637,3 +639,7 @@ class TcBuilder {
     );
   }
 }
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _parseTcTooltipsRx = RegExp(r'<DefaultTooltip>(.*?)</DefaultTooltip>', dotAll: true);

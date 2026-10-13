@@ -1,6 +1,8 @@
 import 'package:diag_protocol/diag_protocol.dart';
 import 'package:flutter/material.dart';
 
+import 'session_busy.dart';
+
 /// The date picker the server hosts for F4 on a date field
 /// (SAP.CalendarControl.1, [SapCalendarModel]) drawn as a native month
 /// grid in its region: it opens on the month of the field's date (selected),
@@ -37,7 +39,7 @@ class SapCalendarView extends StatelessWidget {
     return Semantics(
       label: 'Calendar ${calendar.shell}',
       child: AbsorbPointer(
-        absorbing: busy,
+        absorbing: busy || SessionBusy.of(context),
         child: FittedBox(
           fit: BoxFit.contain,
           child: SizedBox.fromSize(

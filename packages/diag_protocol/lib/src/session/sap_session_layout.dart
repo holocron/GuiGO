@@ -55,7 +55,22 @@ extension SapSessionLayout on SapSession {
   /// it. Null before the first paint that carries one.
   (int, int)? get windowExtent => _layoutState.window;
 
-  List<ScreenRegion> get regions {
+  List<ScreenRegion> get regions => _composeBase();
+
+  /// Every sash of the splitters the current base window composes, free
+  /// ones and fixed ones ([SplitterSash]: its line and the extents of the
+  /// cells it divides, in window cells) — what the client draws a grip on
+  /// and lets the user drag ([noteSplitterSash]).
+  List<SplitterSash> get splitterSashes {
+    final out = <SplitterSash>[];
+    _composeBase(sashes: out);
+    return out;
+  }
+
+  List<ScreenRegion> _composeBase({
+    List<SplitterSash>? sashes,
+    Map<String, CellRect>? boxes,
+  }) {
     final s = (screen?.modalLevel ?? 0) > 0 ? baseScreen : screen;
     if (s == null || s.program == null) return const [];
     final st = _layoutState;
@@ -91,7 +106,10 @@ extension SapSessionLayout on SapSession {
         isLive: _onScreen,
         sinceStep: st.baseSinceStep ?? _progSinceStep,
         dockFraction: st.dockFraction,
+        splitterHeld: st.sashHeld,
       ),
+      sashes: sashes,
+      boxesOut: boxes,
     );
     // then the CFW modal dialogs floating over it (the F1 Performance
     // Assistant's toolbar + HTML viewer; sap_session_html.dart)
@@ -132,6 +150,7 @@ extension SapSessionLayout on SapSession {
         calendarShells: _calendarShells.where(mine).toSet(),
         isLive: mine,
         sinceStep: since,
+        splitterHeld: st.sashHeld,
       ),
     );
   }
@@ -141,10 +160,7 @@ extension SapSessionLayout on SapSession {
       if (keep(e.key)) LayoutTable(e.key, _visibleNodes(e.value), tree: true),
     for (final e in grids.entries)
       if (keep(e.key))
-        LayoutTable(
-          e.key,
-          e.value.rows.where((r) => r.any((c) => c.trim().isNotEmpty)).length,
-        ),
+        LayoutTable(e.key, e.value.nonEmptyRowCount),
   ];
 
   /// After a fold: the step the BASE window's program generation began at
@@ -344,6 +360,7 @@ extension SapSessionLayout on SapSession {
       if (dead.isEmpty) continue;
       for (final sh in dead) {
         _ea.destroyedControls.add(sh);
+        _forgetShellState(sh);
         if (_ea.shellAlias[sh] case final a? when a != sh) {
           _ea.destroyedControls.add(a);
         }
@@ -403,7 +420,7 @@ extension SapSessionLayout on SapSession {
   Future<bool> _resizeDock(String dock, double cols) async {
     final st = _layoutState;
     final w = st.window, a = st.area;
-    final side = st.registry.props[dock]?['470'];
+    final side = st.registry.props[dock]?[propDockSide];
     if (w == null || a == null || w.$2 <= 1) {
       _trace('dock $dock resize ignored: no AREASIZE painted');
       return false;
@@ -424,6 +441,16 @@ extension SapSessionLayout on SapSession {
       ..dockFraction = c / w.$2
       ..reportedDocks = null; // the realized extent changed: owed again
     st.registry.draggedDelta[dock] = w.$2 - a.$2;
+    // the dynpro area every later round reports (16/12/8) is the window
+    // less the dragged pane until the server re-lays out (the reference client's
+    // docked_layout.realized_area_px: the user's drag wins on its axis)
+    final sideDocks = [
+      for (final d in _shownDocks())
+        if (st.registry.props[d]?[propDockSide] case '1' || '2') d,
+    ];
+    if (sideDocks.length == 1 && sideDocks.single == dock) {
+      ctx.dockedCells = (ctx.dockedCells.$1, c);
+    }
     _trace('dock $dock dragged to $c of ${w.$2} cols');
     String? refusal() {
       if (answerDialect != GuiDialect.windows) return 'not Windows';
@@ -490,22 +517,7 @@ extension SapSessionLayout on SapSession {
     if (s.modalLevel > 0) return skip('a popup is up');
     if (scroll == null) return skip('no SCROLL_INFOS2 painted');
     final reg = st.registry;
-    final latest = <String, String>{};
-    for (final c in reg.created) {
-      latest[c.shell] = c.cls;
-    }
-    // a HIDDEN dock (SetProperty 290 = 0, ControlRegistry.hidden) takes
-    // no window space and owes no report: SM12's server-administration
-    // dock 130 (a recorded session srv[114]) — the real GUI sends no
-    // `%_GS 0 3` after the paint (srv[115]); it is reported, under its
-    // `…:1` signature, once the toolbar button shows it
-    final docks = [
-      for (final e in latest.entries)
-        if (e.value.toUpperCase().contains('DOCKING') &&
-            _onScreen(e.key) &&
-            !reg.hidden(e.key))
-          e.key,
-    ];
+    final docks = _shownDocks();
     if (docks.isEmpty) {
       st.reportedDocks = null; // the docks a round reported are gone
       return skip('no docking container shown');
@@ -514,7 +526,7 @@ extension SapSessionLayout on SapSession {
       for (final d in docks)
         [
           d,
-          for (final p in const ['470', '300', '120', '290'])
+          for (final p in const [propDockSide, propControlWidth, propControlHeight, propVisible])
             reg.props[d]?[p] ?? '',
         ].join(':'),
     ].join(';');
@@ -541,7 +553,7 @@ extension SapSessionLayout on SapSession {
     if (w0 != null) {
       // the pair at the report: a later different one is the re-layout
       for (final d in docks) {
-        final side = reg.props[d]?['470'];
+        final side = reg.props[d]?[propDockSide];
         if (side == '1' || side == '2') reg.reportedDelta[d] = w0.$2 - a.$2;
       }
     }
@@ -594,6 +606,77 @@ extension SapSessionLayout on SapSession {
     await _drainPending();
   }
 
+  /// The docking containers shown on the current screen, in creation
+  /// order. A HIDDEN dock (SetProperty 290 = 0, ControlRegistry.hidden)
+  /// takes no window space and owes no report: SM12's server-administration
+  /// dock 130 (a recorded session srv[114]) — the real GUI sends no
+  /// `%_GS 0 3` after the paint (srv[115]); it is reported, under its
+  /// `…:1` signature, once the toolbar button shows it.
+  List<String> _shownDocks() {
+    final reg = _layoutState.registry;
+    final latest = <String, String>{};
+    for (final c in reg.created) {
+      latest[c.shell] = c.cls;
+    }
+    return [
+      for (final e in latest.entries)
+        if (e.value.toUpperCase().contains('DOCKING') &&
+            _onScreen(e.key) &&
+            !reg.hidden(e.key))
+          e.key,
+    ];
+  }
+
+  /// The item-17 CONTROLS report a RESIZE round to [rows] x [cols] cells
+  /// carries on a docked screen ([windowsResizeRoundItems]): the layout
+  /// round's report ([_controlsReport]) for the new window, its area the
+  /// window less the docked panes ([ActionContext.dockedCells]), cut to
+  /// what the window change itself moved — the real GUI's g[28] of
+  /// a recorded session: the docks' extents ALONG the window
+  /// (bottom dock 117 `300`, left dock 135 `120`; a side dock keeps its
+  /// width, a top / bottom one its height) and the grids' GENERIC. A
+  /// dynpro-area container is not in it: it follows the server's re-layout
+  /// and is reported with the next round (g[30]: 261 `120` / `300`). Null
+  /// without a shown dock (the SE71 resize rounds carry no item 17) or
+  /// nothing to report.
+  String? _resizeControlsXml(int rows, int cols) {
+    final s = screen;
+    if (s == null || s.program == null || _shownDocks().isEmpty) return null;
+    final (dr, dc) = ctx.dockedCells;
+    final area = CellRect(
+      0,
+      0,
+      (rows - dr < 1 ? 1 : rows - dr).toDouble(),
+      (cols - dc < 1 ? 1 : cols - dc).toDouble(),
+    );
+    final reg = _layoutState.registry;
+    final classes = reg.classes();
+    final linked = {for (final l in reg.areaLinks.values) l.$1};
+    final report = [
+      for (final c in _controlsReport(s, area, (rows, cols)))
+        if (ControlReport(
+              c.shell,
+              generic: c.generic,
+              props: [
+                for (final p in c.props)
+                  if (!linked.contains(c.shell))
+                    if ((classes[c.shell] ?? '').toUpperCase().contains(
+                          'DOCKING',
+                        ))
+                      if (switch (reg.props[c.shell]?[propDockSide]) {
+                        '1' || '2' => p.$1 == propControlHeight,
+                        '3' || '4' => p.$1 == propControlWidth,
+                        _ => false,
+                      })
+                        p,
+              ],
+            )
+            case final r when r.generic != null || r.props.isNotEmpty)
+          r,
+    ];
+    return report.isEmpty ? null : windowsControlsXml(report);
+  }
+
   /// The item-17 CONTROLS report of the layout round: per shell (numeric
   /// order, as gui[15]) the first-visible cell of a grid that registered
   /// FirstVisibleRow (FVCID/FVRID 1/1 with rows, 0/0 without — gui[15]
@@ -632,17 +715,17 @@ extension SapSessionLayout on SapSession {
       final docking = (classes[sh] ?? '').toUpperCase().contains('DOCKING');
       // a hidden dock realizes no extent (see _maybeLayoutRound)
       if (docking && reg.hidden(sh) && generic == null) continue;
-      final side = set['470'];
+      final side = set[propDockSide];
       final values = <(String, String)>[];
       for (final p in props) {
-        if (p != '120' && p != '300') continue;
+        if (p != propControlHeight && p != propControlWidth) continue;
         // a side dock's width the server set but we realize differently
         // (dockFraction): reported, like gui[15]'s 135 300 = 845
         final f = _layoutState.dockFraction;
-        if (docking && p == '300' && (side == '1' || side == '2')) {
+        if (docking && p == propControlWidth && (side == '1' || side == '2')) {
           if (f != null && window != null) {
             final v = (f * window.$2 * 8).round();
-            if ('$v' != set['300']) values.add((p, '$v'));
+            if ('$v' != set[propControlWidth]) values.add((p, '$v'));
           }
           continue;
         }
@@ -651,10 +734,10 @@ extension SapSessionLayout on SapSession {
         final g = linked[sh];
         if (g != null) {
           v = areaContainerPx(g, p);
-        } else if (docking && set['290'] != '0') {
-          if ((side == '1' || side == '2') && p == '120') {
+        } else if (docking && set[propVisible] != '0') {
+          if ((side == '1' || side == '2') && p == propControlHeight) {
             v = '${area.rows.toInt() * 13 + 17}';
-          } else if ((side == '3' || side == '4') && p == '300') {
+          } else if ((side == '3' || side == '4') && p == propControlWidth) {
             v = '${(window?.$2 ?? area.cols.toInt()) * 8}';
           }
         }
@@ -689,6 +772,11 @@ extension SapSessionLayout on SapSession {
             st
               ..window = w
               ..area = a;
+            // the docked panes' cells: what every later main-window round
+            // reports beside the window as the dynpro area (16/12/8)
+            ctx.dockedCells = _shownDocks().isEmpty
+                ? (0, 0)
+                : (w.$1 > a.$1 ? w.$1 - a.$1 : 0, w.$2 > a.$2 ? w.$2 - a.$2 : 0);
           } else {
             st
               ..modalWindow = w
@@ -701,10 +789,89 @@ extension SapSessionLayout on SapSession {
     }
   }
 
+  /// The user dragged the sashes of splitter [splitter] (its kernel
+  /// shell): its rows ([rows]) or columns now span [extents] (one per row /
+  /// column in order, any one unit — cells, pixels). A splitter sash is the
+  /// client's own: the drag sends nothing (a recorded session KEY
+  /// DECODE 1, 5), but the server's next size READ of that splitter
+  /// (`GetRowHeight` / `GetColumnWidth`, /AIF/IFMON's every form submit)
+  /// is answered with it — in the splitter's units, the values it holds
+  /// rescaled ([splitterValuesFromExtents]) — until the server sets that
+  /// axis again ([splitterSizeReads], a recorded session
+  /// raw s43 / s64). Returns the values held, or null when the splitter is
+  /// unknown or not a relative one (nothing held then).
+  ///
+  /// An ABSOLUTE axis (SetRowMode / SetColumnMode 0: pixels) holds the
+  /// cells' extents in its pixels (a cell's [metricY2] / [metricX2] px —
+  /// the composition's own conversion), its last row (column) left to take
+  /// the rest unless the server declared it. The regions re-lay out from
+  /// the held values at once ([regions]); the next client round carries
+  /// the realized size (120 / 300) of every size-registered shell the
+  /// drag resized ([_pendingSashControls]) and nothing else — no read-back,
+  /// no sash event (a recorded session g[28] / g[30],
+  /// a recorded session KEY DECODE 1).
+  Map<int, double>? noteSplitterSash(
+    String splitter, {
+    required bool rows,
+    required List<num> extents,
+  }) {
+    final st = _layoutState;
+    final sp = splitter.trim();
+    final f = st.registry.splitters[sp];
+    if (f == null) return null;
+    final axis = (sp, rows);
+    final current = st.sashHeld[axis] ?? (rows ? f.rowPct : f.colPct);
+    final v = splitterHeldValues(
+      current,
+      extents,
+      absolute: (rows ? f.rowMode : f.colMode) == 0,
+      rows: rows,
+    );
+    if (v == null) return null;
+    st.sashHeld[axis] = v;
+    st.sashDragged.add(sp);
+    _trace('splitter $sp ${rows ? 'rows' : 'columns'} dragged: $v');
+    return v;
+  }
+
+  /// The CONTROLS a round owes after a sash drag: per shell, ascending,
+  /// the realized size (120 height / 300 width, the session's METRICS:
+  /// cols x 8, rows x 13.64 — [areaContainerPx]) of every shell inside a
+  /// dragged splitter that registered it as a cached prop, the server did
+  /// not set itself and whose value differs from the one last flushed
+  /// ([ControlRegistry.flushedSizes]) — the real GUI's dirty report
+  /// (a recorded session (4) / (7): `CONTROLS 262 300=1799 only`).
+  /// Splitter cells that registered nothing (/AIF/IFMON's, ST04's load
+  /// history: a recorded session s[26] / s[40]) owe nothing.
+  /// Null when nothing is owed; the drag is reported once.
+  String? _pendingSashControls() {
+    final st = _layoutState;
+    if (st.sashDragged.isEmpty || answerDialect != GuiDialect.windows) {
+      return null;
+    }
+    final dragged = Set.of(st.sashDragged);
+    st.sashDragged.clear();
+    final boxes = <String, CellRect>{};
+    _composeBase(boxes: boxes);
+    final out = splitterDragSizes(
+      st.registry,
+      boxes,
+      dragged,
+      isLive: _onScreen,
+    );
+    if (out.isEmpty) return null;
+    _trace('sash drag: ${[for (final c in out) c.$1].join(', ')} resized');
+    return windowsControlBlocks(out);
+  }
+
   /// Fold one answered flush call into the layout registry and bind its
   /// tree pushes (AddR3Table / AddItemTable on a tree object) to the
   /// tree's shell by the url the preceding SetDataFromUrl named.
-  void _foldLayoutCall(FlushCall call, int closingStep) {
+  ///
+  /// Returns the call's splitter size-read answers by VARS row
+  /// ([splitterSizeReads]: what the splitters held when the call arrived,
+  /// its own earlier Set* verbs included) — the responder's prop store.
+  Map<int, Uint8List> _foldLayoutCall(FlushCall call, int closingStep) {
     final st = _layoutState;
     final meta = verbMeta(call);
     final verbs = [
@@ -717,6 +884,23 @@ extension SapSessionLayout on SapSession {
           i <= meta.length ? (meta[i - 1].result ?? '') : '',
         ),
     ];
+    final reads = splitterSizeReads(
+      verbs,
+      st.registry,
+      shellOfHandle: (h) => _ea.shellAlias[h],
+      held: st.sashHeld,
+    );
+    // the server's own set of a splitter axis is its new baseline: a drag
+    // the client held there is over
+    if (st.sashHeld.isNotEmpty) {
+      for (final axis in splitterAxesSet(
+        verbs,
+        st.registry,
+        shellOfHandle: (h) => _ea.shellAlias[h],
+      )) {
+        st.sashHeld.remove(axis);
+      }
+    }
     st.registry.foldCall(
       verbs,
       program: screen?.program,
@@ -729,12 +913,13 @@ extension SapSessionLayout on SapSession {
     // own DestroyWindow verbs (the frame-level fold misses a chunked call)
     for (final v in verbs) {
       final sh = (v.args['#1'] ?? '').trim();
-      if (!RegExp(r'^\d+$').hasMatch(sh)) continue;
+      if (!_digitsOnlyRx.hasMatch(sh)) continue;
       if (v.verb.startsWith('CreateControl')) {
         st.imodes.stamp(sh, step: closingStep);
         _ea.destroyedControls.remove(sh);
       } else if (v.verb == 'DestroyWindow') {
         _ea.destroyedControls.add(sh);
+        _forgetShellState(sh);
       }
     }
     for (final b in dpPushBindings(call)) {
@@ -763,6 +948,10 @@ extension SapSessionLayout on SapSession {
         url = null;
       }
     }
+    return {
+      for (final e in reads.entries)
+        e.key: Uint8List.fromList(e.value.codeUnits),
+    };
   }
 }
 
@@ -799,6 +988,15 @@ class _LayoutState {
 
   /// tree push url -> the imode it arrived in
   final Map<String, String> treeUrlIMode = {};
+
+  /// (splitter, rows?) -> the values the user's sash drag left there, held
+  /// until the server sets that axis again ([SapSessionLayout
+  /// .noteSplitterSash])
+  final Map<(String, bool), Map<int, double>> sashHeld = {};
+
+  /// the splitters dragged since the last client round (its CONTROLS owe
+  /// their resized shells' sizes — [SapSessionLayout._pendingSashControls])
+  final Set<String> sashDragged = {};
   int? actionStartStep;
   int? progSinceStep;
   (int, int)? window;
@@ -861,7 +1059,11 @@ final Expando<int> _frameClock = Expando('frameClock');
 /// the real GUI's own metrics give 141 / 327 for the 12 x 40 area). Null
 /// for any other prop.
 String? areaContainerPx(ScreenContainer g, String prop) => switch (prop) {
-  '300' => '${g.width * 8}',
-  '120' => '${(g.height * 13.64 + 0.5).floor()}',
+  propControlWidth => '${g.width * 8}',
+  propControlHeight => '${(g.height * 13.64 + 0.5).floor()}',
   _ => null,
 };
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _digitsOnlyRx = RegExp(r'^\d+$');

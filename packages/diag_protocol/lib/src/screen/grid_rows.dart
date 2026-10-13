@@ -73,7 +73,7 @@ List<GridProviderObject> gridProviderObjects(
     if (verb == 'CreateObject') {
       final cls = verbArgs(call, i)
           .map((a) => a.$2)
-          .firstWhere((v) => v.contains(RegExp('[A-Za-z]')), orElse: () => '');
+          .firstWhere((v) => v.contains(_letterRx), orElse: () => '');
       final row = num(m.result);
       if (cls.toLowerCase().contains('ondemand') && row != null) {
         final p = GridProviderObject(row);
@@ -201,3 +201,7 @@ Set<String> foldGridPacketCall(
   }
   return touched;
 }
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _letterRx = RegExp('[A-Za-z]');

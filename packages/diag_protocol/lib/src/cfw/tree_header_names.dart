@@ -36,7 +36,7 @@ import 'dart:typed_data';
 import '../lzh/lzh.dart';
 import 'dp_cache.dart' show dpColumnCells;
 import 'flush_call.dart';
-import 'reply_container.dart' show buildDpAnswer, tableInlineMax;
+import 'reply_container.dart' show buildDpAnswer, rfcToken, tableInlineMax;
 import 'rfc_cells.dart' show wrap0305Cell;
 
 /// The properties that hold a tree's header-name table.
@@ -392,12 +392,4 @@ Uint8List _dims(int w, int n) {
   return d.buffer.asUint8List();
 }
 
-Uint8List _tok(int a, int c, Uint8List data) => Uint8List.fromList([
-  a,
-  c,
-  (data.length >> 8) & 0xff,
-  data.length & 0xff,
-  ...data,
-  a,
-  c,
-]);
+Uint8List _tok(int a, int c, Uint8List data) => rfcToken(a, c, data);

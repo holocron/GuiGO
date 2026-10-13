@@ -46,7 +46,7 @@ int resolveServicePort(String service) {
   }
   final low = s.toLowerCase();
   if (low == 'saprouter') return 3299;
-  final m = RegExp(r'^sap(dp|gw)(\d\d)(s?)$').firstMatch(low);
+  final m = _resolveServicePortRx.firstMatch(low);
   if (m != null) {
     final nn = int.parse(m.group(2)!);
     final secure = m.group(3)!.isNotEmpty;
@@ -131,3 +131,7 @@ void checkRouteReply(Uint8List payload) {
   }
   throw SapRouterException('unexpected reply to route request');
 }
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _resolveServicePortRx = RegExp(r'^sap(dp|gw)(\d\d)(s?)$');

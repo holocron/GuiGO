@@ -99,6 +99,22 @@ class ActionContext {
   (int, int) winDisplayPx = (0x419, 0xf01);
   (int, int) winMainAreaPx = (0x3d8, 0x780);
 
+  /// The 16/4/36 window rect (height, width px) a popup's key round and an
+  /// owed modal control event carry (frontend_profile windowsWindowRect):
+  /// the reference GUI's `0409 0781` ([recordedWindowRectPx]) unless the
+  /// app reports its display ([reportDisplay]).
+  (int, int) winWindowRectPx = recordedWindowRectPx;
+  static const (int, int) recordedWindowRectPx = (0x409, 0x781);
+
+  /// The device's display is [px] (height, width — EmulatedGuiProfile
+  /// .displayPx): the DISPLAY_SIZE, MAINAREA_SIZE and window rect every
+  /// round reports are its own instead of the reference GUI's desktop.
+  void reportDisplay((int, int) px) {
+    winDisplayPx = px;
+    winMainAreaPx = px;
+    winWindowRectPx = px;
+  }
+
   /// The negotiated character screen (the logon's screen-size patch): the
   /// Windows okcode / key rounds spell SCROLL_INFOS2 with it.
   int screenRows;
@@ -145,6 +161,41 @@ class ActionContext {
     height: winEventWindowHeight % kernelCell.height,
     width: winEventWindowWidth % kernelCell.width,
   );
+
+  /// The cells (rows, cols) the DOCKED panes take from the main window: the
+  /// last main-window paint's 16/12/7 window pair less its area pair, while
+  /// a docking container is shown (the session sets it,
+  /// sap_session_layout.dart); (0, 0) without docks. The Windows GUI
+  /// reports its realized dynpro AREA in the second 16/12/8 pair of every
+  /// main-window round — the window less the docked panes, whose pixel
+  /// extents stay put when the window changes (a recorded session
+  /// history: 597 x 1161 / 498 x 839 on every round of the load history
+  /// screen, the resize round g[28] 762 x 1510 / 663 x 1188 — the same 99 /
+  /// 322 px for the bottom message dock and the left navigation dock — and
+  /// the server lays the dynpro out from that area, srv[48] 16/12/7 34 x
+  /// 215 / 30 x 169; the reference client's docked_layout.area_px_geometry). Without
+  /// docks the pair is the window twice (every undocked capture).
+  (int, int) dockedCells = (0, 0);
+
+  /// The 16/12/8 value for a window of [h] x [w] px: the window, then the
+  /// dynpro area — the window less [dockedCells] in [kernelCell]s (the
+  /// window twice without docks, and always in a popup's 16/12/14).
+  Uint8List windowAreaPx(int h, int w) {
+    var ah = h, aw = w;
+    if (modalNo == 0) {
+      final (dr, dc) = dockedCells;
+      final dh = dr * kernelCell.height, dw = dc * kernelCell.width;
+      if (dr > 0 && dh < h) ah = h - dh;
+      if (dc > 0 && dw < w) aw = w - dw;
+    }
+    final out = Uint8List(16);
+    out.buffer.asByteData()
+      ..setUint32(0, h)
+      ..setUint32(4, w)
+      ..setUint32(8, ah)
+      ..setUint32(12, aw);
+    return out;
+  }
 
   /// The top window's last paint lays out a STEP LOOP or table control
   /// (16/10/4 CONTAINER_LOOP / 16/10/5): its line count follows the window
@@ -271,8 +322,40 @@ class ActionContext {
   bool paintedList = false;
 
   /// The list cursor that paint declared (its 16/12/13 `01 <line u16>
-  /// <col u16>`, se51 srv[35] `01 0002 0001`); null when none.
+  /// <col u16>`, se51 srv[35] `01 0002 0001`); null when none — the server
+  /// drops it once the cursor's line left the window, and the next
+  /// main-window list round then goes out cursorless (CHL 0b, 16/9/10:
+  /// a recorded session g23). A click on a list
+  /// line moves it locally, no frame ([SapSessionListCursor.setListCursor]);
+  /// the next paint sets it again.
   Uint8List? paintedListCursor;
+
+  /// The SES imode byte (10: the internal mode the screen runs in) of the
+  /// last window-declaring paint, mirrored by [mirrorPaintGeometry].
+  int paintedImode = 0;
+
+  /// That paint is a MAIN-window list opened in a deeper internal mode
+  /// than the paint before it (its SES imode byte higher): the first list
+  /// round after it carries the client's METRICS item 17 (list_scroll.dart
+  /// [windowsListKeyItems]) — a recorded session gui[12]
+  /// (F3) / gui[15] (`/nex`) after the SE38 F8 lists srv[15] / srv[19]
+  /// (imode 1 -> 2), a recorded session gui[8] (1 -> 2),
+  /// a recorded session gui[10] (1 -> 3),
+  /// a recorded session / a recorded session
+  /// gui[8] / gui[4] (0 -> 1) — whatever the round before carried and the
+  /// step gap; none when the list stays in its mode (every STMS list:
+  /// a recorded session g9, a recorded session
+  /// gui[38], a recorded session gui[8] / gui[10],
+  /// a recorded session gui[10]; the list -> list repaints) or goes
+  /// back to a shallower one (gral_graphics srv[35], 2 -> 1), nor on a
+  /// popup list (40+ modal SAPMSSY0/0120 paints). Cleared by the round
+  /// that sends it and by the next window paint.
+  bool listMetricsOwed = false;
+
+  /// A list round carrying the owed METRICS was BUILT: [listMetricsOwed]
+  /// clears once that round is on the wire (SapSession._sendWire), not at
+  /// build time — a round built and never sent leaves it owed.
+  bool listMetricsSending = false;
 
   /// The ACKNOWLEDGED paint's own OK-event mode: byte 1 of the last server
   /// 16/5/1 this window received (`01` plain, `09` with CFW controls — the
@@ -386,16 +469,10 @@ Uint8List _scrollInfos2(ActionContext ctx) {
   return out;
 }
 
-/// 16/12/8 (main window) / 16/12/14 (while modal) pixel geometry.
-Uint8List _winPx(ActionContext ctx) {
-  final out = Uint8List(16);
-  final bd = out.buffer.asByteData();
-  bd.setUint32(0, ctx.winPxHeight);
-  bd.setUint32(4, ctx.winPxWidth);
-  bd.setUint32(8, ctx.winPxHeight);
-  bd.setUint32(12, ctx.winPxWidth);
-  return out;
-}
+/// 16/12/8 (main window: the window, then the dynpro area —
+/// [ActionContext.windowAreaPx]) / 16/12/14 (while modal) pixel geometry.
+Uint8List _winPx(ActionContext ctx) =>
+    ctx.windowAreaPx(ctx.winPxHeight, ctx.winPxWidth);
 
 List<Uint8List> _commonTail(ActionContext ctx) {
   return [
@@ -452,6 +529,19 @@ Uint8List xmlBlobItem(Uint8List value) {
 /// folder open the Easy Access menu registers, and the node activation.
 const int treeEventExpandNoChildren = 18;
 const int treeEventNodeDoubleClick = 25;
+
+/// The other SapTree node events a tree may register instead: 19 EXPAND
+/// (a folder open when 18 is not registered), 21 SELCHANGE (a click on a
+/// node), 22 ITEMDBLCLICK (a column tree's item double-click — PARAM1 the
+/// item name).
+const int treeEventExpand = 19;
+const int treeEventSelectionChange = 21;
+const int treeEventItemDoubleClick = 22;
+
+/// A column tree's item events (SapTreeEncEventAdaptor; PARAM0 the node
+/// key, PARAM1 the item name): a link item's click, a button item's.
+const int treeEventLinkClick = 35;
+const int treeEventButtonClick = 29;
 
 /// The Java GUI's EXPAND-only 16/4/36 + 16/4/40 + 16/4/42 client-window
 /// rects (the engine's capture-frozen gui[11] triple: outer frame 985x1376,
@@ -900,14 +990,18 @@ List<Uint8List> radioSelectItems(
 /// the code (a menu / toolbar function: a typed okcode). The first painted
 /// button wins when several carry the code (table-control row buttons).
 (int, int, List<int>)? paintedPushbutton(ScreenModel? screen, String cmd) {
-  final want = cmd.trim().replaceFirst(RegExp('^='), '').toUpperCase();
+  final want = cmd.trim().replaceFirst(_leadingEqualsRx, '').toUpperCase();
   if (want.isEmpty) return null;
   for (final f in screen?.fields ?? const <ScreenField>[]) {
     if (f.kind != FieldKind.pushbutton) continue;
-    final fc = (f.fcode ?? '').trim().replaceFirst(RegExp('^='), '');
+    final fc = (f.fcode ?? '').trim().replaceFirst(_leadingEqualsRx, '');
     if (fc.toUpperCase() == want) {
       return (f.wireRow, f.wireCol, f.routing?.path ?? [f.area & 0xff]);
     }
   }
   return null;
 }
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _leadingEqualsRx = RegExp('^=');

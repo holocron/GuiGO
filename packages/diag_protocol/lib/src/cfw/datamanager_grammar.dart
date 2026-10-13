@@ -17,8 +17,8 @@
 /// EVENTS > exactly one EVENT(SHELLID, EVENTID[, SHELLEVENT])
 /// > PARAM(PID, VALUE …), PIDs distinct
 /// CONTROLS > CONTROL(SHELLID), one per shell
-/// > PROPERTY(VALUE, NAME), names distinct and
-/// non-empty; GENERIC
+/// > PROPERTY(VALUE, NAME), names distinct,
+/// non-blank and unpadded; GENERIC
 /// (FVCID, FVRID, FVRIDS) at most once
 /// BLOBS > REQUEST
 /// COPY > GUI > METRICS | DIMENSIONS
@@ -184,6 +184,48 @@ bool debugCheckDatamanager(Uint8List value, {String what = 'item 17'}) {
   );
 }
 
+/// Every DATAMANAGER document [text] holds (an outgoing frame's
+/// decompressed body: the round's item 17, a flush answer's XML stream),
+/// in order — each from its declaration (or `<DATAMANAGER` tag) through
+/// `</DATAMANAGER>`.
+List<String> datamanagerDocuments(String text) {
+  final out = <String>[];
+  var at = 0;
+  while (true) {
+    var q = text.indexOf(_decl, at);
+    final t = text.indexOf('<DATAMANAGER', at);
+    if (q < 0 || (t >= 0 && t < q)) q = t;
+    if (q < 0) break;
+    final e = text.indexOf('</DATAMANAGER>', q);
+    if (e < 0) break;
+    out.add(text.substring(q, e + '</DATAMANAGER>'.length));
+    at = e + '</DATAMANAGER>'.length;
+  }
+  return out;
+}
+
+/// [xml] for a trace line: what the user typed masked — the non-numeric
+/// cells of DATACHANGES rows (`IT … C<n> ="…"`: grid cell edits; the row /
+/// column numbers stay) and the grid's CurrentCellText — each value
+/// replaced by `*` x its length, the structure (tags, attribute names,
+/// shells, property names, event ids) kept as sent; line breaks shown as
+/// `\n`.
+String datamanagerTraceText(String xml) => xml
+    .replaceAllMapped(_itRx, (m) => m[0]!.replaceAllMapped(_cellRx, (c) {
+          final v = c[3]!;
+          return _numericRx.hasMatch(v) ? c[0]! : '${c[1]}${c[2]}"${'*' * v.length}"';
+        }))
+    .replaceAllMapped(_cellTextRx, (m) => '${m[1]}"${'*' * m[2]!.length}"${m[3]}')
+    .replaceAll('\n', r'\n')
+    .replaceAll('\u0000', '');
+
+final RegExp _itRx = RegExp(r'<IT\b[^>]*>');
+final RegExp _cellRx = RegExp(r'(\bC\d+)(\s*=\s*)"([^"]*)"');
+final RegExp _numericRx = RegExp(r'^\s*-?\d*\s*$');
+final RegExp _cellTextRx = RegExp(
+  r'(<PROPERTY\s+VALUE\s*=\s*)"([^"]*)"(\s+NAME\s*=\s*"CurrentCellText")',
+);
+
 void _check(_Node n, List<String> p, bool ocx) {
   for (final a in _required[n.name] ?? const <String>[]) {
     if (n.attr(a) == null) p.add('<${n.name}> without $a');
@@ -222,7 +264,7 @@ void _check(_Node n, List<String> p, bool ocx) {
       final pids = [for (final k in n.kids) k.attr('PID')];
       if (pids.toSet().length != pids.length) p.add('<EVENT> repeats a PID');
     case 'CONTROLS':
-      final ids = [for (final k in n.kids) k.attr('SHELLID')];
+      final ids = [for (final k in n.kids) k.attr('SHELLID')?.trim()];
       for (final id in ids.toSet()) {
         if (ids.where((x) => x == id).length > 1) {
           p.add('CONTROL $id twice in one <CONTROLS>');
@@ -230,7 +272,7 @@ void _check(_Node n, List<String> p, bool ocx) {
       }
     case 'CONTROL':
       final sh = n.attr('SHELLID') ?? '';
-      if (!RegExp(r'^\d+$').hasMatch(sh)) p.add('CONTROL SHELLID "$sh"');
+      if (!_digitsOnlyRx.hasMatch(sh)) p.add('CONTROL SHELLID "$sh"');
       final names = [
         for (final k in n.kids)
           if (k.name == 'PROPERTY') k.attr('NAME'),
@@ -239,8 +281,22 @@ void _check(_Node n, List<String> p, bool ocx) {
       // `<CONTROL SHELLID="300"><PROPERTY VALUE="" NAME=""/>` a numeric
       // GetProperty once echoed — flush_call.dart)
       if (names.contains('')) p.add('CONTROL $sh holds a nameless PROPERTY');
-      for (final nm in names.toSet()) {
-        if (names.where((x) => x == nm).length > 1) {
+      // a blank or padded name names no cached prop either: the real GUI's
+      // are propIds (`120`) or identifiers (`ABAPSelItemKey`), never
+      // spaced (the corpus' 5107 documents)
+      for (final nm in names) {
+        if (nm == null || nm.isEmpty) continue;
+        if (nm.trim().isEmpty) {
+          p.add('CONTROL $sh holds a blank-named PROPERTY');
+        } else if (nm.trim() != nm || nm.contains(' ')) {
+          p.add('CONTROL $sh names PROPERTY "$nm" with blanks');
+        }
+      }
+      // one PROPERTY per name, whatever its padding
+      final trimmed = [for (final nm in names) nm?.trim()];
+      for (final nm in trimmed.toSet()) {
+        if (nm == null || nm.isEmpty) continue;
+        if (trimmed.where((x) => x == nm).length > 1) {
           p.add('CONTROL $sh names PROPERTY $nm twice');
         }
       }
@@ -266,3 +322,7 @@ String _clip(String s, [int n = 60]) {
   final t = s.replaceAll('\n', r'\n').replaceAll('\u0000', r'\0');
   return t.length <= n ? t : '${t.substring(0, n)}…';
 }
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _digitsOnlyRx = RegExp(r'^\d+$');

@@ -6,15 +6,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:local_auth/local_auth.dart';
 
+import '../../core/action_errors.dart';
 import '../../core/connections.dart';
 import '../../core/error_text.dart';
 import '../../core/open_lock_icon.dart';
 import '../../core/password_dialog.dart';
 import '../../core/password_gate.dart';
 import '../../core/sap_icons.dart';
+import 'browser_platform.dart';
 import 'dynpro_view.dart';
 import 'frame_coalescer.dart';
 import 'sap_calendar_view.dart';
+import 'sap_date_navigator_view.dart';
 import 'sap_canvas_layout.dart';
 import 'sap_chart_view.dart';
 import 'sap_combo_box_view.dart';
@@ -22,6 +25,7 @@ import 'sap_control_toolbar.dart';
 import 'sap_graph_view.dart';
 import 'sap_grid_view.dart';
 import 'sap_html_view.dart';
+import 'sap_office_view.dart';
 import 'sap_picture_view.dart';
 import 'sap_value_help_view.dart';
 import 'sap_window_size.dart';
@@ -29,7 +33,9 @@ import 'sap_source_view.dart';
 import 'sap_menu_bar.dart';
 import 'sap_toolbar.dart';
 import 'screen_composer.dart';
+import 'session_busy.dart';
 import 'sap_tree_view.dart';
+import 'splitter_sash_grip.dart';
 import 'modal_window.dart';
 import 'type_ahead.dart';
 
@@ -78,6 +84,9 @@ class SessionScreen extends StatefulWidget {
   /// the region whose size is the SAP window GuiGo reports.
   static const Key bodyKey = ValueKey('session-body');
 
+  /// The status bar's message line (always laid out, one line high).
+  static const Key messageLineKey = ValueKey('session-message-line');
+
   @override
   State<SessionScreen> createState() => _SessionScreenState();
 }
@@ -89,17 +98,29 @@ class _SessionScreenState extends State<SessionScreen>
   String? _error;
 
   /// An action (or the logon) is running. A notifier, not screen state: it
-  /// rebuilds the regions that draw it (the keys, the spinner, the body's
-  /// inputs), not the whole Scaffold.
+  /// rebuilds the leaves that draw it (the keys, the spinner, the body's
+  /// inputs — [SessionBusy], [_busyLeaf]), not the body or the Scaffold.
+  /// Busy changes nothing the session holds: no new generation ([_gen]);
+  /// an action's END is drawn with the turn it usually ends on (the
+  /// coalesced tick: one body build per action) — and alone after an
+  /// action that changed the session without a turn.
   final ValueNotifier<bool> _busyN = ValueNotifier(false);
   bool get _busy => _busyN.value;
   set _busy(bool v) {
     if (_busyN.value == v) return;
     _busyN.value = v;
-    _gen++;
-    _ui.ping(); // the modal dialog draws it too
+    if (!v) _turnTick.mark();
     _scheduleModalSync();
   }
+
+  /// The modal dialog's busy ([SessionBusy] over the dialog route): the
+  /// session's, except on the multi-logon wall — the logon runs (busy),
+  /// yet the wall's choices are the user's to make.
+  _DerivedFlag? _modalBusyN;
+  _DerivedFlag get _modalBusy => _modalBusyN ??= _DerivedFlag(
+    () => _busy && _wallCompleter == null,
+    [_busyN, _ui],
+  );
 
   /// A server turn (or a window switch) to draw: fired at most once per
   /// frame, so a burst of turns between two frames rebuilds once.
@@ -108,7 +129,8 @@ class _SessionScreenState extends State<SessionScreen>
 
   /// The regions of the screen (title, command row, body, status / keys)
   /// rebuild on a turn or a busy change; the Scaffold around them only on
-  /// a change of the logon itself (connected, failed, the wall).
+  /// a change of the logon itself (connected, failed, the wall). The body
+  /// and the title rebuild on a turn alone ([_turnRegion]).
   late final Listenable _regionTick = Listenable.merge([_turnTick, _busyN]);
 
   /// Bumped on every change the screen draws: the per-build snapshot of
@@ -270,7 +292,22 @@ class _SessionScreenState extends State<SessionScreen>
         s.state == SessionState.closed ||
         s.state == SessionState.failed;
     final idle = DateTime.now().difference(_lastActivity);
-    if (!closed && idle < widget.idleLimit) return;
+    if (!closed && idle < widget.idleLimit) {
+      // within the idle limit: still probed — a socket that died silently
+      // while suspended (NAT expiry, a network change) would only fail the
+      // next key after its full timeout (the probe sends nothing)
+      s.probeLiveness().then((alive) {
+        if (alive || !mounted || !identical(_session, s)) return;
+        _closeQuietly(s);
+        setState(() {
+          _lost = true;
+          // the session's own close may have said why already
+          _error ??= 'Session lost — reconnect. The connection did not '
+              'survive the time GuiGo was in the background.';
+        });
+      });
+      return;
+    }
     // a silent logon the server may still hold is closed, so a reconnect
     // does not leave it behind
     _closeQuietly(s);
@@ -285,7 +322,22 @@ class _SessionScreenState extends State<SessionScreen>
     });
   }
 
+  /// One logon at a time: a double-tapped Retry / Reconnect must not start
+  /// a second logon beside the first (stacked password dialogs, two logons
+  /// on the server).
+  bool _connecting = false;
+
   Future<void> _connect() async {
+    if (_connecting) return;
+    _connecting = true;
+    try {
+      await _connectOnce();
+    } finally {
+      _connecting = false;
+    }
+  }
+
+  Future<void> _connectOnce() async {
     // a retry / reconnect: the previous logon (a failed attempt, a lost or
     // closed session) is closed first — never left live on the server
     final previous = {?_attempt, ?_session};
@@ -417,6 +469,9 @@ class _SessionScreenState extends State<SessionScreen>
           screenRows: rows,
           screenCols: cols,
           sizedWindow: true,
+          // the recorded identity until a live A/B: the device profile's
+          // logon drew 'invalid gui data' from the test system (2026-10-13)
+          guiProfile: EmulatedGuiProfile.recordedWindowsGui,
         );
     // (a session from the factory learns it here: before the logon this
     // only sets the size the logon reports — no round)
@@ -436,6 +491,18 @@ class _SessionScreenState extends State<SessionScreen>
     });
     session.windowsChanged.listen((_) {
       if (mounted && _current(session)) _markTurn(session);
+    });
+    // the server opens a url in the web browser (a Web Dynpro / Fiori
+    // start, a detached help page, an archived document): handed to the
+    // platform as it arrives, signed on when the server armed SSO — the
+    // session already answered the call and never waits on it
+    session.browserLaunches.listen((launch) async {
+      if (!mounted || !_current(session)) return;
+      final why = await BrowserPlatform.openOrExplain(launch);
+      if (why == null || !mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(why)),
+      );
     });
     // the server's own close (idle auto-logout): surface it at once,
     // not on the next action
@@ -500,12 +567,19 @@ class _SessionScreenState extends State<SessionScreen>
   }
 
   /// Activate [key] of the screen's tree (the full-screen Easy Access
-  /// tree, a tree beside a canvas): its node double-click event.
+  /// tree, a tree beside a canvas): its node double-click event (a folder
+  /// whose children are on the server: 18, then 25 —
+  /// SapSessionTree.doubleClickTreeNode).
   Future<void> _activateScreenTreeNode(String key) => _run(() async {
     final sh = _session!.treeShell;
     if (sh == null) throw StateError('no tree control on this screen');
-    await _session!.activateTreeNode(sh, key);
+    await _session!.doubleClickTreeNode(sh, key);
   });
+
+  /// The first row the view of tree [shell] shows: its TopNodeKey.
+  void _treeTopNode(String? shell, String key) {
+    if (shell != null) _session?.noteTreeTopNode(shell, key);
+  }
 
   /// Whether tree [shell] handles a double-click (registered 25 / 22):
   /// the tree view then sends it for a folder too instead of toggling.
@@ -524,6 +598,12 @@ class _SessionScreenState extends State<SessionScreen>
     }
   }
 
+  /// The folders tree [shell] holds open: the server's expansion and the
+  /// user's toggles (SapSessionTree.treeExpandedKeys) — nothing else
+  /// opens by default.
+  Set<String>? _treeExpandedKeys(String? shell) =>
+      shell == null ? null : _session?.treeExpandedKeys(shell);
+
   /// Folder [key] of tree [shell] was opened / closed on the client.
   void _toggledTreeNode(String? shell, String key, bool open) {
     if (shell != null) _session?.noteTreeExpansion(shell, key, open: open);
@@ -535,7 +615,7 @@ class _SessionScreenState extends State<SessionScreen>
     try {
       await fn();
     } catch (e) {
-      if (mounted) setState(() => _fail(e));
+      if (mounted) _actionFailed(e);
     } finally {
       _lastActivity = DateTime.now();
       if (mounted) _busy = false;
@@ -546,6 +626,37 @@ class _SessionScreenState extends State<SessionScreen>
   /// turn or a busy change, alone.
   Widget _region(WidgetBuilder builder) =>
       ListenableBuilder(listenable: _regionTick, builder: (c, _) => builder(c));
+
+  /// A region that draws no busy state of its own (the body: its leaves
+  /// read it through [SessionBusy]): rebuilt on a turn alone.
+  Widget _turnRegion(WidgetBuilder builder) =>
+      ListenableBuilder(listenable: _turnTick, builder: (c, _) => builder(c));
+
+  /// A leaf of a [_turnRegion] that draws the busy state (a button's
+  /// enablement): it alone rebuilds when busy flips.
+  Widget _busyLeaf(Widget Function(bool busy) builder) =>
+      ValueListenableBuilder<bool>(
+        valueListenable: _busyN,
+        builder: (_, busy, _) => builder(busy),
+      );
+
+  /// The on-screen keyboard's height over the screen (the Scaffold strips
+  /// it from its body's MediaQuery), read without depending on it: the
+  /// keyboard's slide re-lays the body out (its constraints shrink), and
+  /// only that layout reads it — not a rebuild of the whole screen per
+  /// animation frame.
+  double _keyboardInset() =>
+      context
+          .getInheritedWidgetOfExactType<MediaQuery>()
+          ?.data
+          .viewInsets
+          .bottom ??
+      0;
+
+  /// The body region of the current build: the body's LayoutBuilder hands
+  /// the same widget to every layout of one build (the keyboard's slide
+  /// lays it out per frame), so a layout alone rebuilds nothing below.
+  Widget? _bodyRegion;
 
   /// The body was laid out at [size]: a new size reaches the server
   /// [_resizeDebounce] after it settles ([_applyWindowSize]).
@@ -571,7 +682,10 @@ class _SessionScreenState extends State<SessionScreen>
   /// first): the screen less the app bar with its command row, the status /
   /// key bar and the system insets.
   Size _estimatedBodySize() {
-    final mq = MediaQuery.maybeOf(context);
+    // read, not depended on: a dependency taken here (outside build)
+    // rebuilt the whole screen on every MediaQuery change — each frame of
+    // the keyboard's slide
+    final mq = context.getInheritedWidgetOfExactType<MediaQuery>()?.data;
     if (mq == null) return Size.zero;
     const statusAndKeys = 56.0;
     return Size(
@@ -617,10 +731,13 @@ class _SessionScreenState extends State<SessionScreen>
   @override
   Widget build(BuildContext context) {
     SessionScreen.debugScaffoldBuilds++;
+    _bodyRegion = null;
     _refreshTypeAhead();
     final body = DynproZoomScope(
       widest: _widestCols,
-      child: PopScope(
+      child: SessionBusy(
+        busy: _busyN,
+        child: PopScope(
         // the edge-swipe back is SAP's Back (F3) too while a session is live
         canPop: !_live,
         onPopInvokedWithResult: (didPop, _) {
@@ -667,7 +784,7 @@ class _SessionScreenState extends State<SessionScreen>
                     icon: const Icon(Icons.arrow_back),
                     onPressed: () => Navigator.of(context).maybePop(),
                   ),
-            title: _region((_) {
+            title: _turnRegion((_) {
               final m = _screen;
               final title = m?.title.isEmpty ?? true
                   ? '${_args.entry.name} — ${m?.tcode ?? _args.entry.client}'
@@ -691,7 +808,7 @@ class _SessionScreenState extends State<SessionScreen>
               ),
               // the system and its application server (SAP GUI's status
               // field, its dropdown choice kept), beside the lock
-              _region(
+              _turnRegion(
                 (_) => Row(
                   mainAxisSize: MainAxisSize.min,
                   children: _systemInfo(_session?.baseScreen ?? _screen),
@@ -719,7 +836,7 @@ class _SessionScreenState extends State<SessionScreen>
                 cons.biggest,
                 // the screen's own context: the Scaffold strips the
                 // keyboard inset from its body's MediaQuery
-                keyboard: MediaQuery.viewInsetsOf(this.context).bottom,
+                keyboard: _keyboardInset(),
               );
               // the keyboard does not squeeze the screen: it keeps the
               // height it had without it (so the composer's scale, and
@@ -727,8 +844,7 @@ class _SessionScreenState extends State<SessionScreen>
               // keyboard instead — a focused field scrolls itself into
               // view. One widget shape with or without the keyboard, so
               // the focused field is not remounted when it comes up.
-              final keyboardUp =
-                  MediaQuery.viewInsetsOf(this.context).bottom > 0;
+              final keyboardUp = _keyboardInset() > 0;
               final full = _bodySize?.height ?? cons.maxHeight;
               final height = keyboardUp && full > cons.maxHeight
                   ? full
@@ -737,7 +853,7 @@ class _SessionScreenState extends State<SessionScreen>
                 child: SizedBox(
                   width: cons.maxWidth,
                   height: height,
-                  child: _region((_) {
+                  child: _bodyRegion ??= _turnRegion((_) {
                     SessionScreen.debugBodyBuilds++;
                     final m = _screen;
                     return _error != null
@@ -753,6 +869,7 @@ class _SessionScreenState extends State<SessionScreen>
             },
           ),
           bottomNavigationBar: _region((_) => _statusAndKeys(_screen)),
+        ),
         ),
       ),
     );
@@ -897,6 +1014,16 @@ class _SessionScreenState extends State<SessionScreen>
             : (sel) => _run(() async {
                 await s.selectWindow(sel.single);
                 if (mounted) setState(() => _screen = s.screen);
+                if (mounted && s.activeWindow.suspect) {
+                  ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                        'This window missed server updates while in the '
+                        'background; if it does not respond, close it.',
+                      ),
+                    ),
+                  );
+                }
               }),
       ),
     );
@@ -1002,7 +1129,7 @@ class _SessionScreenState extends State<SessionScreen>
                   width: 280,
                   child: SapTreeView(
                     tree: tree,
-                    busy: _busy || modalActive,
+                    busy: modalActive,
                     dragShell: _session?.treeShell,
                     onRunTcode: (tcode) =>
                         _run(() async => _session!.okcode('/n$tcode')),
@@ -1016,6 +1143,8 @@ class _SessionScreenState extends State<SessionScreen>
                         _selectTreeNode(_session?.treeShell, key),
                     onToggle: (key, open) =>
                         _toggledTreeNode(_session?.treeShell, key, open),
+                    onTopNode: (key) => _treeTopNode(_session?.treeShell, key),
+                    expandedKeys: _treeExpandedKeys(_session?.treeShell),
                     onContextMenu: (key, at) {
                       final sh = _session?.treeShell;
                       if (sh != null) _treeMenu(sh, key, at);
@@ -1050,7 +1179,7 @@ class _SessionScreenState extends State<SessionScreen>
           opacity: modalActive ? 0.6 : 1.0,
           child: SapTreeView(
             tree: tree,
-            busy: _busy || modalActive,
+            busy: modalActive,
             onRunTcode: (tcode) =>
                 _run(() async => _session!.okcode('/n$tcode')),
             onExpand: (key) => _run(() async => _session!.expandTreeNode(key)),
@@ -1061,6 +1190,8 @@ class _SessionScreenState extends State<SessionScreen>
             onSelect: (key) => _selectTreeNode(_session?.treeShell, key),
             onToggle: (key, open) =>
                 _toggledTreeNode(_session?.treeShell, key, open),
+            onTopNode: (key) => _treeTopNode(_session?.treeShell, key),
+            expandedKeys: _treeExpandedKeys(_session?.treeShell),
             onContextMenu: (key, at) {
               final sh = _session?.treeShell;
               if (sh != null) _treeMenu(sh, key, at);
@@ -1081,11 +1212,12 @@ class _SessionScreenState extends State<SessionScreen>
             onFocusField: _focusField,
             onContextMenu: _screenMenu,
             onListPick: _listPick,
+            onListCursor: _placeListCursor,
             onListCell: _stageListCell,
             onListScroll: _listScroll,
             onDoubleClick: _doubleClick,
             model: base,
-            busy: _busy || modalActive,
+            busy: modalActive,
             controls: _hostedControls(),
             onFill: _fillField,
             onPress: (vkey) => _run(() async => _session!.press(vkey)),
@@ -1180,8 +1312,9 @@ class _SessionScreenState extends State<SessionScreen>
           : null,
       // a hotspot cell's single tap: `%_GC <grid> 2`
       hotspotColumns: grid.hotspotColumns,
+      hotspotCells: grid.hotspotCells,
       onHotspotTap:
-          grid.hotspotColumns.isNotEmpty &&
+          grid.hasHotspots &&
               (_session?.gridHandlesEvent(grid.shell, gridEventHotspotClick) ??
                   false)
           ? (line, col) =>
@@ -1249,7 +1382,6 @@ class _SessionScreenState extends State<SessionScreen>
       key: ValueKey('ctb-$shell'),
       buttons: tb.buttons,
       icons: _icons,
-      busy: _busy,
       onPressed: (fcode) =>
           _run(() async => _session!.toolbarButton(shell, fcode)),
       onDropdown: (fcode, at) => _controlMenu(
@@ -1330,6 +1462,13 @@ class _SessionScreenState extends State<SessionScreen>
   /// empty boxes and a bare blue bar — each button stretched to the 72 px,
   /// its icon and text centered below the cut — and its combo box / input
   /// field row as nothing.
+  ///
+  /// A toolbar row at least [_compactRowHeight] tall lays its buttons out
+  /// AT its height ([ControlRowExtent]: icon and label sized to it) — the
+  /// natural 36-px row scaled into a one-cell row drew /AIF/IFMON's ALV
+  /// tree toolbar ("Synthèse des messages", "Dernier transfert", …) at
+  /// under half size across a pane with room to spare; only a row shorter
+  /// than that is the compact row scaled down.
   static Widget _controlRow(
     Widget c,
     BoxConstraints cons, {
@@ -1343,13 +1482,22 @@ class _SessionScreenState extends State<SessionScreen>
         h >= _controlRowHeight) {
       return c;
     }
-    final k = h / _controlRowHeight;
+    if (h >= _compactRowHeight) return ControlRowExtent(height: h, child: c);
+    final k = h / _compactRowHeight;
     return FittedBox(
       fit: BoxFit.contain,
       alignment: Alignment.topLeft,
-      child: SizedBox(width: w / k, height: _controlRowHeight, child: c),
+      child: SizedBox(
+        width: w / k,
+        height: _compactRowHeight,
+        child: ControlRowExtent(height: _compactRowHeight, child: c),
+      ),
     );
   }
+
+  /// The least height a toolbar row lays its buttons out at (a shorter
+  /// one is scaled down from it).
+  static const double _compactRowHeight = 14;
 
   /// One region per control shell: the layout can name a hosted control
   /// both at its container and at its own box (ST04's INI-file tree drew
@@ -1400,7 +1548,8 @@ class _SessionScreenState extends State<SessionScreen>
         v.canvases.any((c) => c.shell == shell) ||
         s.calendarFor(shell) != null ||
         v.drawnPictures.contains(shell) ||
-        v.controlToolbars.containsKey(shell);
+        v.controlToolbars.containsKey(shell) ||
+        s.officeDocuments.containsKey(shell);
   }
 
   /// The panes of a composed window: every region at its window cells —
@@ -1445,16 +1594,50 @@ class _SessionScreenState extends State<SessionScreen>
             ),
     ];
     final s = _session;
+    // the free sashes of the splitters drawn ON the dynpro (their cells
+    // are overlays there, not composer panes): a grip each, the drag the
+    // client's own (SplitterSashGrip, SapSession.noteSplitterSash)
+    final sashes = dyn == null || s == null || modal
+        ? const <SplitterSash>[]
+        : [
+            for (final sh in _viewOf(s).sashes)
+              if (!sh.fixed &&
+                  sh.line.row >= dyn.row - 0.01 &&
+                  sh.line.col >= dyn.col - 0.01 &&
+                  sh.line.row + sh.line.rows <= dyn.row + dyn.rows + 0.01 &&
+                  sh.line.col + sh.line.cols <= dyn.col + dyn.cols + 0.01 &&
+                  (sh.rows ? sh.line.cols : sh.line.rows) > 0)
+                sh,
+          ];
     return [
       for (final r in all)
         if (!onDynpro(r))
-          if (_regionPane(base, r, modal, nested: nested) case final p?)
+          if (_regionPane(
+                base,
+                r,
+                modal,
+                nested: nested,
+                sashes: sashes,
+                origin: dyn == null ? Offset.zero : Offset(dyn.col, dyn.row),
+              )
+              case final p?)
             r.kind == 'dynpro' || s == null
                 ? p
                 : p.withDock(
                     s.dockOf(r.shell ?? '') ?? s.dockOf(r.container ?? ''),
                   ),
     ];
+  }
+
+  /// The user dragged sash [sh] of a splitter drawn on the dynpro: its
+  /// cells now span [extents]. The session holds the layout (its regions
+  /// re-lay out at once) and reports the resized cells with the next round
+  /// ([SapSession.noteSplitterSash]); nothing is sent now.
+  void _sashMoved(SplitterSash sh, List<int> extents) {
+    final s = _session;
+    if (!mounted || s == null) return;
+    s.noteSplitterSash(sh.splitter, rows: sh.rows, extents: extents);
+    setState(() {});
   }
 
   /// The user dragged the edge of docking container [dock] to [cols]
@@ -1492,6 +1675,8 @@ class _SessionScreenState extends State<SessionScreen>
     ScreenRegion r,
     bool modal, {
     List<(Rect, String?, ComposedPane)> nested = const [],
+    List<SplitterSash> sashes = const [],
+    Offset origin = Offset.zero,
   }) {
     if (r.kind == 'sash') return null; // a fixed divider: nothing to draw
     final cells = Rect.fromLTWH(
@@ -1510,11 +1695,12 @@ class _SessionScreenState extends State<SessionScreen>
           onFocusField: _focusField,
           onContextMenu: _screenMenu,
           onListPick: _listPick,
+          onListCursor: _placeListCursor,
           onListCell: _stageListCell,
           onListScroll: _listScroll,
           onDoubleClick: _doubleClick,
           model: base,
-          busy: _busy || modal,
+          busy: modal,
           cell: cell,
           overlays: [
             for (final (cells, id, p) in nested)
@@ -1529,6 +1715,21 @@ class _SessionScreenState extends State<SessionScreen>
                     ),
                   ),
                   child: p.builder(context, cell),
+                ),
+              ),
+            for (final sh in sashes)
+              DynproOverlay(
+                SplitterSashGrip.cellsOf(sh, origin),
+                id: 'sash-${sh.splitter}-${sh.rows ? 'r' : 'c'}${sh.index}',
+                minPoints: const Size.square(SplitterSashGrip.hitPoints),
+                const SizedBox.shrink(),
+                builder: (canvasCell) => SplitterSashGrip(
+                  key: ValueKey(
+                    'sash-${sh.splitter}-${sh.rows ? 'r' : 'c'}${sh.index}',
+                  ),
+                  sash: sh,
+                  cell: canvasCell,
+                  onMoved: (extents) => _sashMoved(sh, extents),
                 ),
               ),
           ],
@@ -1576,7 +1777,20 @@ class _SessionScreenState extends State<SessionScreen>
         (e) => e.shell == shell,
       );
       final calendar = _session?.calendarFor(shell);
-      if (calendar != null) {
+      // a DOI container's document (SO10's Word editor, a SAPRDEMO sheet)
+      final office = _session?.officeDocuments[shell];
+      if (calendar != null && calendar.horizontal) {
+        // a date navigator (/AIF/IFMON's lower-left pane): the months side
+        // by side in week columns; a tapped day / week / month is the
+        // control's date-selected event with its interval
+        content = SapDateNavigatorView(
+          key: ValueKey('navigator-${calendar.shell}'),
+          calendar: calendar,
+          onPick: (from, to) => _run(
+            () async => _session!.pickCalendarDate(calendar, from, to),
+          ),
+        );
+      } else if (calendar != null) {
         // the date picker the server hosts for F4 on a date field (the
         // "Calendrier" popup's CONTAINER): a native month grid; a tapped
         // day is the control's date-selected event, the server then
@@ -1584,7 +1798,6 @@ class _SessionScreenState extends State<SessionScreen>
         content = SapCalendarView(
           key: ValueKey('calendar-${calendar.shell}'),
           calendar: calendar,
-          busy: _busy,
           onPick: (day) =>
               _run(() async => _session!.pickCalendarDate(calendar, day)),
         );
@@ -1645,6 +1858,15 @@ class _SessionScreenState extends State<SessionScreen>
             selEndCol: ec,
           ),
         );
+      } else if (office != null) {
+        // read-only (sap_office_view.dart); the first touch is the
+        // container's activation event, as in SAP GUI's in-place Word
+        content = SapOfficeView(
+          key: ValueKey('office-$shell'),
+          document: office,
+          onActivate: () =>
+              _run(() async => _session!.officeDocumentActivated(shell)),
+        );
       } else if (html.isNotEmpty) {
         // an HTML viewer (the F1 Performance Assistant, a help page): its
         // document as text, under its CFW dialog's title when it has one
@@ -1656,7 +1878,7 @@ class _SessionScreenState extends State<SessionScreen>
         // live Easy Access tree)
         content = SapTreeView(
           tree: tree,
-          busy: _busy || modal,
+          busy: modal,
           // a canvas beside the tree (the BW network graphic, RSNPG_TEST_
           // NETPLAN1) takes its rows as drops
           dragShell: (view?.canvases ?? const <SapCanvasModel>[]).isEmpty
@@ -1666,11 +1888,25 @@ class _SessionScreenState extends State<SessionScreen>
           onExpand: (key) =>
               _run(() async => _session!.expandTreeNodeOf(shell, key)),
           onActivate: (key) =>
-              _run(() async => _session!.activateTreeNode(shell, key)),
+              _run(() async => _session!.doubleClickTreeNode(shell, key)),
           handlesDoubleClick: _treeHandlesDoubleClick(shell),
           onSelect: (key) => _selectTreeNode(shell, key),
           onToggle: (key, open) => _toggledTreeNode(shell, key, open),
+          onTopNode: (key) => _treeTopNode(shell, key),
+          expandedKeys: _treeExpandedKeys(shell),
           onContextMenu: (key, at) => _treeMenu(shell, key, at),
+          // a column tree (the ALV tree of /AIF/IFMON): its header row and
+          // item columns, their widths in the pane's cells; a link /
+          // button cell's click, a cell's double-click with its column
+          columns: _session?.treeColumns(shell),
+          paneCols: cells.width.round(),
+          icons: _icons,
+          onItemClick: (key, item) =>
+              _run(() async => _session!.clickTreeItem(shell, key, item)),
+          onItemActivate: (key, item) => _run(
+            () async =>
+                _session!.doubleClickTreeNode(shell, key, itemName: item),
+          ),
         );
       } else if (grid != null) {
         content = _gridView(grid, menu: base.modalLevel == 0);
@@ -1697,7 +1933,7 @@ class _SessionScreenState extends State<SessionScreen>
       } else if (cfwFieldControlView(
             _session,
             shell,
-            busy: _busy || modal,
+            busy: modal,
             run: _run,
             icons: _icons,
           )
@@ -1764,6 +2000,28 @@ class _SessionScreenState extends State<SessionScreen>
     );
   }
 
+  /// Each viewer's shown page ([SapHtmlDocument.content]) by shell, with
+  /// the page, parts and url it was spliced from: the session mints a new
+  /// document every generation around the same pushed page, and its
+  /// frame splicing (regexes over the page) ran anew each time — the view
+  /// then compared the whole new string with the last.
+  final Map<String, (String, Map<String, Uint8List>, String, String)>
+  _htmlContent = {};
+
+  String _htmlContentOf(SapHtmlDocument d) {
+    final m = _htmlContent[d.shell];
+    if (m != null &&
+        identical(m.$1, d.html) &&
+        identical(m.$2, d.parts) &&
+        m.$3 == d.url) {
+      return m.$4;
+    }
+    if (_htmlContent.length >= 32) _htmlContent.clear(); // a bound
+    final c = d.content;
+    _htmlContent[d.shell] = (d.html, d.parts, d.url, c);
+    return c;
+  }
+
   /// An HTML viewer's document under its CFW dialog's caption, toolbar
   /// (the Performance Assistant's BACK / FORW / TECH / PRINT …) and close
   /// button; a link tap is the viewer's SAPEVENT.
@@ -1784,7 +2042,7 @@ class _SessionScreenState extends State<SessionScreen>
       final cp = token != null ? _icons?.codepoint(token.group(1)!) : null;
       final text = b.text.trim();
       final tip = b.tooltip.trim().isNotEmpty ? b.tooltip.trim() : b.code;
-      final onPressed = _busy || !b.enabled || tb == null
+      VoidCallback? onPressed(bool busy) => busy || !b.enabled || tb == null
           ? null
           : () => _run(() async => _session!.cfwToolbarButton(tb, b.code));
       final glyph = cp != null
@@ -1795,17 +2053,19 @@ class _SessionScreenState extends State<SessionScreen>
           : null;
       return Tooltip(
         message: tip,
-        child: text.isEmpty && glyph != null
-            ? IconButton(
-                onPressed: onPressed,
-                icon: glyph,
-                isSelected: b.checked,
-              )
-            : TextButton.icon(
-                onPressed: onPressed,
-                icon: glyph,
-                label: Text(text.isNotEmpty ? text : b.code),
-              ),
+        child: _busyLeaf(
+          (busy) => text.isEmpty && glyph != null
+              ? IconButton(
+                  onPressed: onPressed(busy),
+                  icon: glyph,
+                  isSelected: b.checked,
+                )
+              : TextButton.icon(
+                  onPressed: onPressed(busy),
+                  icon: glyph,
+                  label: Text(text.isNotEmpty ? text : b.code),
+                ),
+        ),
       );
     }
 
@@ -1830,14 +2090,16 @@ class _SessionScreenState extends State<SessionScreen>
                     ),
                   ),
                   if (dialog != null)
-                    IconButton(
-                      tooltip: 'Close',
-                      icon: const Icon(Icons.close),
-                      onPressed: _busy
-                          ? null
-                          : () => _run(
-                              () async => _session!.closeCfwDialog(dialog),
-                            ),
+                    _busyLeaf(
+                      (busy) => IconButton(
+                        tooltip: 'Close',
+                        icon: const Icon(Icons.close),
+                        onPressed: busy
+                            ? null
+                            : () => _run(
+                                () async => _session!.closeCfwDialog(dialog),
+                              ),
+                      ),
                     ),
                 ],
               ),
@@ -1851,9 +2113,10 @@ class _SessionScreenState extends State<SessionScreen>
           Expanded(
             // the page as its frames show it (a dynamic document's
             // HTML000002 frameset over its content page, SBWP's template)
-            child: SapHtmlView(
-              html: d.content,
-              onLink: _busy
+            child: _busyLeaf(
+              (busy) => SapHtmlView(
+              html: _htmlContentOf(d),
+              onLink: busy
                   ? null
                   : (href) {
                       // only a SAPEVENT goes to the server; a local link
@@ -1866,9 +2129,24 @@ class _SessionScreenState extends State<SessionScreen>
                       }
                       _run(() async => _session!.htmlLink(d, href));
                     },
-              onFormButton: _busy
+              // a form button posts what was typed into the page's inputs;
+              // Enter in an input is the page's own submit
+              onFormSubmit: busy
                   ? null
-                  : (id) => _run(() async => _session!.htmlFormButton(d, id)),
+                  : (id, values) => _run(
+                      () async =>
+                          _session!.htmlFormButton(d, id, values: values),
+                    ),
+              onFormEnter: busy
+                  ? null
+                  : (input, values) => _run(
+                      () async =>
+                          _session!.htmlFormEnter(d, input, values: values),
+                    ),
+              // the buttons' images: the files pushed beside the page
+              parts: d.parts,
+              baseUrl: d.url,
+              ),
             ),
           ),
         ],
@@ -1909,7 +2187,6 @@ class _SessionScreenState extends State<SessionScreen>
     );
     return SapGraphView(
       key: ValueKey('canvas-${c.shell}'),
-      busy: _busy,
       nodes: nodes,
       edges: edges,
       // links join rows (a recorded session: 3 -> 15, 46 -> 15);
@@ -1972,7 +2249,6 @@ class _SessionScreenState extends State<SessionScreen>
     return SapGraphView(
       key: ValueKey('netplan-${g.shell ?? g.title}'),
       title: g.title,
-      busy: _busy,
       nodes: [
         for (final n in g.nodes)
           GraphNode(
@@ -2028,11 +2304,21 @@ class _SessionScreenState extends State<SessionScreen>
   void _stageEdit(ScreenField f, String text) {
     try {
       _session?.stageField(f, text);
-    } on Object catch (_) {
-      // a field the session cannot stage (protected, Java dialect): it
-      // still goes out on Enter
+      if (_stageRefused == f.name) _stageRefused = null;
+    } on ArgumentError catch (e) {
+      // the session refused the value (the field is protected now, or the
+      // screen it was typed on is gone): it would be lost silently — said
+      // once per field, never with the typed text
+      if (_stageRefused == f.name || !mounted) return;
+      _stageRefused = f.name;
+      ScaffoldMessenger.maybeOf(context)
+        ?..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text('Not kept: ${e.message}')));
     }
   }
+
+  /// The field whose last typed value the session refused ([_stageEdit]).
+  String? _stageRefused;
 
   /// F4 on a field with value help: the hit list / restriction dialog
   /// comes back as a popup. F4 on a field showing a date that brings no
@@ -2248,9 +2534,20 @@ class _SessionScreenState extends State<SessionScreen>
     }
   }
 
-  /// A classic list line tapped: the list's pick (F2 on its hotspot).
-  Future<void> _listPick(ListLine line) =>
-      _run(() async => _session!.pickValue(line));
+  /// A classic list line double-tapped: the list's pick (F2) at the tapped
+  /// column — the cursor [_placeListCursor] put there (a main-window list:
+  /// the list key round; a popup hit list: [SapSession.pickValue]).
+  Future<void> _listPick(ListLine line) => _run(() async {
+    final s = _session!;
+    final at = s.listCursor;
+    await s.pickListAt(
+        line, at != null && at.$1 == line.line ? at.$2 : line.hotspotCol);
+  });
+
+  /// A tap on a classic list line: the list cursor moves there, no round
+  /// (the next list round carries it).
+  void _placeListCursor(int row, int col) =>
+      _session?.setListCursor(row, col);
 
   /// A paged classic list scrolled past its page: the server's page at
   /// [firstLine] (the real GUI's VSCROLL round; never while busy — [_run]).
@@ -2263,7 +2560,12 @@ class _SessionScreenState extends State<SessionScreen>
     try {
       _session?.stageListCell(line, cell, text);
     } on ArgumentError catch (e) {
-      debugPrint('list cell not staged: $e'); // the list was repainted
+      // the list was repainted. Debug builds only, and the reason only —
+      // never the typed value
+      assert(() {
+        debugPrint('list cell not staged: ${e.message}');
+        return true;
+      }());
     }
   }
 
@@ -2441,6 +2743,8 @@ class _SessionScreenState extends State<SessionScreen>
   /// SAP GUI's green check beside the command field: the command typed,
   /// else plain Enter.
   void _submitOkcode() {
+    // declined while an action runs: the typed command stays in the field
+    if (_busy || _session == null) return;
     final v = _okcodeCtrl.text;
     _okcodeCtrl.clear();
     if (v.trim().isEmpty) {
@@ -2483,7 +2787,7 @@ class _SessionScreenState extends State<SessionScreen>
               textCapitalization: TextCapitalization.characters,
               style: const TextStyle(fontFamily: 'Menlo', fontSize: 15),
               decoration: const InputDecoration(
-                hintText: '/nSE16',
+                hintText: '/n<tcode>',
                 prefixIcon: Icon(Icons.terminal),
                 isDense: true,
                 counterText: '',
@@ -2560,13 +2864,30 @@ class _SessionScreenState extends State<SessionScreen>
                 ),
               ),
             ),
-          if (msg.isNotEmpty)
-            Container(
-              width: double.infinity,
-              color: Colors.blueGrey.shade900,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              child: Text(msg, maxLines: 2, overflow: TextOverflow.ellipsis),
+          // the message line is always there, one line high, as SAP GUI's
+          // status bar is: a message that came and went (or wrapped to a
+          // second line) changed the body's height, and every change was
+          // a new SAP window size — a resize round per message (live the test system
+          // /AIF/IFMON 2026-10-13: 66 <-> 68 rows as "Basculer sélection
+          // de dates …" appeared and cleared)
+          Container(
+            key: SessionScreen.messageLineKey,
+            width: double.infinity,
+            color: msg.isEmpty ? null : Colors.blueGrey.shade900,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            child: Text(
+              msg,
+              maxLines: 1,
+              softWrap: false,
+              overflow: TextOverflow.ellipsis,
+              // one strut line whatever the text: an empty line, or a
+              // fallback font's taller glyphs, keep the bar's height
+              strutStyle: StrutStyle.fromTextStyle(
+                DefaultTextStyle.of(context).style,
+                forceStrutHeight: true,
+              ),
             ),
+          ),
         ],
       ),
     );
@@ -2706,6 +3027,25 @@ class _SessionScreenState extends State<SessionScreen>
   /// exception's own text), shown in the trace area under it.
   ({String message, String detail})? _errorText;
 
+  /// An action failed with [e]. A client-side refusal on a healthy logon
+  /// (nothing sent: a stale node / chip, a control of another imode) is a
+  /// snack bar and a redraw from the session's current screen
+  /// ([isClientRefusal]); the in-flight action of a session this screen
+  /// already declared lost does not replace that message with "closed";
+  /// anything else fails the session view.
+  void _actionFailed(Object e) {
+    final s = _session;
+    if (e is SessionClosedError && _error != null) return;
+    if (isClientRefusal(e, s)) {
+      setState(() => _screen = s!.screen);
+      ScaffoldMessenger.maybeOf(context)
+        ?..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text(refusalText(e))));
+      return;
+    }
+    setState(() => _fail(e));
+  }
+
   /// Show [e] as the error: a readable sentence, its technical text kept
   /// for the trace area.
   void _fail(Object e) {
@@ -2799,6 +3139,7 @@ class _SessionScreenState extends State<SessionScreen>
     }
     _turnTick.removeListener(_onTurnFrame);
     _turnTick.dispose();
+    _modalBusyN?.dispose();
     _ui.dispose();
     _busyN.dispose();
     _connectLog.dispose();
@@ -2836,6 +3177,8 @@ class _SessionScreenState extends State<SessionScreen>
         barrierLabel: 'Modal window',
         builder: (dialogContext) => DynproZoomScope(
           widest: _widestCols,
+          child: SessionBusy(
+          busy: _modalBusy,
           child: PopScope(
             canPop: false,
             child: AnimatedBuilder(
@@ -2858,7 +3201,6 @@ class _SessionScreenState extends State<SessionScreen>
                       child: SapValueHelpView(
                         key: ValueKey('f4-${help.shell}'),
                         dialog: help,
-                        busy: _busy,
                         onSearch: (page, restrictions) => _run(
                           () async => _session!.searchValueHelp(
                             help,
@@ -2902,13 +3244,14 @@ class _SessionScreenState extends State<SessionScreen>
                   onFocusField: _focusField,
                   onContextMenu: _screenMenu,
                   onListPick: !wallPrompt ? _listPick : null,
+                  onListCursor: !wallPrompt ? _placeListCursor : null,
                   onListCell: !wallPrompt ? _stageListCell : null,
                   onListScroll: !wallPrompt ? _listScroll : null,
                   onDoubleClick: !wallPrompt ? _doubleClick : null,
                   model: m,
                   content: composedModal?.$1,
                   contentWidth: composedModal?.$2,
-                  busy: wallWait != null ? false : _busy,
+                  busy: false, // the dialog's SessionBusy scope
                   onFill: _fillField,
                   onPress: (vkey) => _run(() async => _session!.press(vkey)),
                   onOkcode: (cmd) => _run(() async => _session!.okcode(cmd)),
@@ -2969,6 +3312,7 @@ class _SessionScreenState extends State<SessionScreen>
               },
             ),
           ),
+          ),
         ),
       );
       Navigator.of(context).push(_modalRoute!);
@@ -3001,6 +3345,29 @@ class _SessionScreenState extends State<SessionScreen>
 /// A ChangeNotifier whose tick is public (notifyListeners is protected).
 class _UiPulse extends ChangeNotifier {
   void ping() => notifyListeners();
+}
+
+/// A flag [read] from other state, re-read when one of [sources] fires and
+/// notifying only when it flips (a pulse that changes nothing it reads
+/// rebuilds none of its dependents).
+class _DerivedFlag extends ValueNotifier<bool> {
+  _DerivedFlag(this._read, List<Listenable> sources)
+    : _sources = Listenable.merge(sources),
+      super(false) {
+    value = _read();
+    _sources.addListener(_check);
+  }
+
+  final bool Function() _read;
+  final Listenable _sources;
+
+  void _check() => value = _read();
+
+  @override
+  void dispose() {
+    _sources.removeListener(_check);
+    super.dispose();
+  }
 }
 
 /// An empty grid control: its frame on the grid background, no rows, no
@@ -3076,6 +3443,9 @@ class _SessionView {
   /// control registry (audit #15), so once per generation, not per build.
   late final List<ScreenRegion> regions = session.regions;
   late final List<ScreenRegion> modalRegions = session.modalRegions;
+
+  /// The base window's splitter sashes ([SapSession.splitterSashes]).
+  late final List<SplitterSash> sashes = session.splitterSashes;
 }
 
 final _gridRowAts = Expando<List<String>? Function(int)>('gridRowAt');

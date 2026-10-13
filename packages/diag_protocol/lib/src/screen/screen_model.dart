@@ -160,6 +160,25 @@ class ListLine {
   /// The input cells of the line (`WRITE … INPUT`, `AS CHECKBOX`).
   Iterable<ListSegment> get inputs => segments.where((s) => s.input);
 
+  /// The line is painted in COL_TOTAL (SFE colour 3) throughout: every
+  /// coloured run that is no box line is colour 3 — how the list processor
+  /// paints a SELECTED line (F9 / block select F6 on SAPMSSY0/0120: the
+  /// line's data runs `0a 02 00` / `08 02 00` repainted `0a 03 00` /
+  /// `08 03 00`, attribute and extension kept, the `08 00 08` box runs
+  /// untouched — a recorded session s22..24).
+  /// The mark is the server's: no round carries it, every repaint of the
+  /// window recolours the selected lines inside it, so it is read from
+  /// each paint afresh, never kept.
+  bool get highlighted {
+    var any = false;
+    for (final s in segments) {
+      if (s.frame || s.color == 0) continue;
+      if (s.color != 3) return false;
+      any = true;
+    }
+    return any;
+  }
+
   int get hotspotCol {
     for (var i = 0; i < text.length; i++) {
       final ch = text[i];
@@ -330,6 +349,15 @@ const String kKernelLogonProgram = 'SAPMSYST';
 /// any transaction runs).
 const String kKernelLogonTcode = 'S000';
 
+final RegExp _secretFieldName = RegExp(r'BCODE|PASSW|PWD', caseSensitive: false);
+
+/// Whether [f] holds a secret: an invisible (password) input, or a field
+/// named like one (a logon screen's BCODE, a PASSW* / PWD field) — its
+/// value never reaches a trace (SapSession's staged fields) nor a stored
+/// input history (the app's).
+bool isSecretField(ScreenField f) =>
+    f.invisible || _secretFieldName.hasMatch(f.name ?? '');
+
 class ScreenModel {
   String? program;
   String? dynpro;
@@ -426,12 +454,19 @@ class ScreenModel {
   /// visible cols, first line (u32 each) — null without a list.
   List<int>? listWindow;
 
+  /// The list cursor the paint set — its 16/12/13 `01 <row u16> <col u16>`
+  /// as (buffer row, column), the row a [ListLine.line]: null when the
+  /// paint carries none (the server drops it once the cursor's line is
+  /// scrolled out of the window — a recorded session
+  /// _scroll s37..39 after Page Down) or paints no list.
+  (int, int)? listCursor;
+
   /// The system that painted this window — ST_R3INFO 16/6/2 DBNAME (the
   /// system id), 16/6/3 CPUNAME (its application server) and 16/6/12
   /// CLIENT of the turn's frames (reference client diag_controlstate _R3INFO 2 / 3 /
   /// 12). A remote logon relayed from an RFC target names the TARGET here
-  /// (a recorded session SAPMSYST_1 frame 2: `the test system`, `the application server`,
-  /// client `000` under the test system's 200). Null when the turn named none (and no
+  /// (a recorded session SAPMSYST_1 frame 2: `<SID2>`, `<host2>`,
+  /// client `000` under the logon system's 200). Null when the turn named none (and no
   /// earlier paint of the window did).
   String? systemId;
   String? appServer;
@@ -445,8 +480,8 @@ class ScreenModel {
   /// and editable, and a painted SYST-SYSID naming the target — the real
   /// 0020 logon paints none (a recorded session frame 1), the real
   /// 0029 does, read-only (a recorded session SAPMSYST_1: SYST-SYSID
-  /// `the test system` r2 c58, SYST-HOST `the application server` r3 c58, RSYST-MANDT `000`;
-  /// a recorded session SAPMSYST_1: `the test system`, `the application server`).
+  /// `<SID2>` r2 c58, SYST-HOST `<host2>` r3 c58, RSYST-MANDT `000`;
+  /// a recorded session SAPMSYST_1: `<SID3>`, `<host3>`).
   /// Whether it names ANOTHER system than the logon's own is the session's
   /// call ([SapSession.remoteLogon]); null otherwise. The credentials are
   /// the user's to type: nothing here fills them.
@@ -740,6 +775,7 @@ ScreenModel _foldSegment(
     m.listLines.addAll(previous.listLines);
     m.listPaint.addAll(previous.listPaint);
     m.listWindow = previous.listWindow;
+    m.listCursor = previous.listCursor;
     return m;
   }
   _buildFields(m, st.atoms);
@@ -819,6 +855,7 @@ void _mergeDelta(ScreenModel m, ScreenModel previous) {
     m.listLines.addAll(previous.listLines);
     m.listPaint.addAll(previous.listPaint);
     m.listWindow ??= previous.listWindow;
+    m.listCursor ??= previous.listCursor;
   }
 }
 
@@ -836,6 +873,9 @@ final RegExp _listToken = RegExp(r'@([0-9A-Z]{2})?(?:\\Q([^@]*))?(?:@|$)');
 void _listRun(_FoldState st, Uint8List v) {
   final (row, col) = st.listAt!;
   st.listAt = null;
+  // SBA2 positions are two wire u16s: a hostile run at row/col 65535 would
+  // grow the row arrays a cell at a time to the column, for every row
+  if (row < 0 || row >= maxListRows || col < 0 || col >= maxListCols) return;
   final f = st.listFont;
   final sfe = f != null && f.length >= 3
       ? f[0] << 16 | f[1] << 8 | f[2]
@@ -873,6 +913,13 @@ void _listRun(_FoldState st, Uint8List v) {
   cells.putText(c, text.substring(at), sfe, run);
 }
 
+/// The classic-list paint bounds: the widest ABAP list line (LINE-SIZE
+/// max 1023) with margin, and the most lines one paint can place. A list
+/// run positioned or extending past them is dropped (cells past the
+/// column bound are clipped), never grown into.
+const int maxListCols = 1280;
+const int maxListRows = 1024;
+
 /// One classic-list line being painted: the code unit, SFE and run per
 /// column (-1 = unpainted) — audit #15: a Map entry and a one-char String
 /// per cell (12k of them for a 200 x 60 list) per repaint.
@@ -887,6 +934,7 @@ class _ListRow {
   int lo = -1, hi = -1; // the painted columns' span; -1: none yet
 
   void put(int col, int unit, int sfe, int run) {
+    if (col >= maxListCols) return; // a run past the widest list line
     while (units.length <= col) {
       units.add(-1);
       sfes.add(0);
@@ -958,19 +1006,28 @@ void _buildListLines(ScreenModel m, _FoldState st) {
 /// containers, a list, the program / dynpro name — not a flush or a receipt.
 bool framesPaintDynpro(Iterable<Uint8List> frames) {
   for (final f in frames) {
-    final dec = decompressFrame(f);
-    if (dec == null) continue;
-    final items = dec.walk.items;
-    if (items.any(_paintsBody)) return true;
-    // the program / dynpro names alone: a new screen's paint, unless the
-    // frame's SES marks it a delta of the screen shown (the type-ahead
-    // answer's body-less repaint — typed values staged meanwhile stay)
-    if (items.any(_paintsDynpro)) {
-      final ses = items
-          .where((it) => it.type == itemSes && it.value.length >= 16)
-          .lastOrNull;
-      if (!sesIsDeltaPaint(ses?.value)) return true;
-    }
+    if (_framePaintsDynpro[f] ??= _paintsDynproFrame(f)) return true;
+  }
+  return false;
+}
+
+/// [framesPaintDynpro]'s verdict per frame object, memoized like its walk
+/// (the fold asks it twice per turn; audit zcode P-05).
+final Expando<bool> _framePaintsDynpro = Expando('frame paints dynpro');
+
+bool _paintsDynproFrame(Uint8List f) {
+  final dec = decompressFrame(f);
+  if (dec == null) return false;
+  final items = dec.walk.items;
+  if (items.any(_paintsBody)) return true;
+  // the program / dynpro names alone: a new screen's paint, unless the
+  // frame's SES marks it a delta of the screen shown (the type-ahead
+  // answer's body-less repaint — typed values staged meanwhile stay)
+  if (items.any(_paintsDynpro)) {
+    final ses = items
+        .where((it) => it.type == itemSes && it.value.length >= 16)
+        .lastOrNull;
+    if (!sesIsDeltaPaint(ses?.value)) return true;
   }
   return false;
 }
@@ -1242,6 +1299,12 @@ void _foldAppl(ScreenModel m, DiagItem it, _FoldState st) {
       } else if (it.type == itemAppl && it.sid == 2 && it.value.length >= 24) {
         final bd = ByteData.sublistView(Uint8List.fromList(it.value));
         m.listWindow = [for (var k = 0; k < 5; k++) bd.getUint32(k * 4)];
+      } else if (it.type == itemAppl &&
+          it.sid == 13 &&
+          it.value.length >= 5 &&
+          it.value[0] == 1) {
+        final v = it.value;
+        m.listCursor = (v[1] << 8 | v[2], v[3] << 8 | v[4]);
       } else if (it.type == itemAppl && it.sid == 7) {
         st.plane.window(Uint8List.fromList(it.value));
       } else if (it.type == itemAppl && it.sid == 6) {

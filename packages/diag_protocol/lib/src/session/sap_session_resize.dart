@@ -34,6 +34,10 @@ extension _SapSessionResize on SapSession {
   /// control or step loop, a docking / splitter pane beside the dynpro.
   bool _layoutFollowsWindow(ScreenModel s) {
     if (ctx.paintedLoop) return true;
+    // a classic list: its page is as many lines as the window holds
+    // (a recorded session g60..g62: each resize a 0x52
+    // round, each answered by the page for the new window)
+    if (ctx.paintedList && s.listWindow != null) return true;
     if (s.controlPaths.isNotEmpty || s.tableControls.isNotEmpty) return true;
     if (s.containers.values.any(
       (c) => const {4, 5, 10, 13, 14}.contains(c.kind),
@@ -95,7 +99,8 @@ extension _SapSessionResize on SapSession {
         _trace('resize round skipped: $late');
         return false;
       }
-      var items = windowsResizeRoundItems(ctx);
+      var items = _listResizeItems() ??
+          windowsResizeRoundItems(ctx, xml: _resizeControlsXml(rows, cols));
       items = _withFirstRound(items);
       _trace('resize round sent: $rows x $cols cells, step $step');
       await _send(clientFrame(items));

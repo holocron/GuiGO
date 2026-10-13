@@ -29,8 +29,10 @@
 /// for `MonthNames` (12 rows `F 01 JAN Janvier` …); then `Today =
 /// 20260915` — the SERVER's date (the capture's own day) — and
 /// `InitViewers(1027, 1, DD.MM.YYYY, 3, 20260915, 1, 1, 0, 0, '')`:
-/// #01 a view style, #03 the user's date format, #04 the selection
-/// style, #05 the date the field holds (empty on an empty field — the
+/// #01 the display style, #02 the selection style, #03 the user's date
+/// format, #04 the months shown, #05 the date the field holds, #07 the
+/// week rule, #10 the weekend days (sapCalendarS.jar SapCalendar.
+/// initViewers; [SapCalendarModel]) — #05 empty on an empty field (the
 /// AIF navigator: `InitViewers(1028, 15, DD.MM.YYYY, 3, '', 0, 1, 0, 0,
 /// 67)`). InitViewers is a METHOD with a string `_RESULT` the front end
 /// answers with the date interval the control holds,
@@ -60,10 +62,12 @@
 /// newest calendar created without one (the verbs are the control's own).
 library;
 
+import 'dart:convert';
 import 'dart:typed_data';
 
 import '../cfw/dp_cache.dart';
 import '../cfw/flush_call.dart';
+import '../cfw/tree_header_names.dart' show expandInlineRow;
 import 'sap_tree.dart' show DpTable, decodeNamedDpTable;
 import 'screen_model.dart' show ScreenField, FieldKind;
 
@@ -92,7 +96,7 @@ String calendarWireDate(DateTime d) =>
 /// [s] (YYYYMMDD) as a date, null when it is none (an empty #05, `0000…`).
 DateTime? parseCalendarDate(String s) {
   final t = s.trim();
-  if (!RegExp(r'^\d{8}$').hasMatch(t) || t == '00000000') return null;
+  if (!_parseCalendarDateRx.hasMatch(t) || t == '00000000') return null;
   final y = int.parse(t.substring(0, 4));
   final m = int.parse(t.substring(4, 6));
   final d = int.parse(t.substring(6, 8));
@@ -190,7 +194,7 @@ String calendarIntervalAnswer((DateTime, DateTime) interval) =>
 /// (its DDIC type is not on the wire).
 bool fieldShowsDate(ScreenField f) {
   if (f.kind != FieldKind.input) return false;
-  return RegExp(r'^(?:\d{2}[./-]\d{2}[./-]\d{4}|\d{4}[./-]\d{2}[./-]\d{2})$')
+  return _fieldShowsDateRx
       .hasMatch(f.text.trim());
 }
 
@@ -207,6 +211,38 @@ class SapCalendarName {
   String toString() => 'SapCalendarName($number $short $long)';
 }
 
+/// One day the server marks — a `DayInfo` row with a date: the control's
+/// colour [color] and its text (the tooltip; /AIF/IFMON: `2 erreur (550
+/// tous)`, the day's message count). The push's table is (COLOR I4, DATE
+/// C8, TEXT C30), one row per push, the pushes accumulating day by day
+/// until `ResetDayInfo` (a recorded session raw srv[25..32] step 38:
+/// 711 pushes, the last assigned by step 40; the Java a recorded session
+/// sapevent step 45 the same; jar
+/// sapCalendarS.jar SapCalendar.setDayInfo → CalDateNavigator.setDayInfo
+/// per date). A row with NO date names a colour instead ([SapCalendarModel
+/// .colorLegend]: the jar's mColorDayInfo).
+class SapCalendarDay {
+  const SapCalendarDay(this.date, this.color, this.text);
+
+  final DateTime date;
+
+  /// The colour id: 1 … 8 the control's boxed colours (a fill and an
+  /// outline each — the jar's CalDateNavigator.setupColorMap, Belize
+  /// `calendarColorFill<n>` / `calendarColorOutline<n>`); others draw no
+  /// box.
+  final int color;
+
+  /// The day's text (trimmed), shown as its tooltip; '' for none.
+  final String text;
+
+  /// Whether the control draws the day boxed in [color].
+  bool get boxed => color >= 1 && color <= 8;
+
+  @override
+  String toString() =>
+      'SapCalendarDay(${calendarWireDate(date)} $color "$text")';
+}
+
 /// One calendar control the server hosts.
 class SapCalendarModel {
   const SapCalendarModel({
@@ -219,10 +255,17 @@ class SapCalendarModel {
     this.dateFormat = '',
     this.viewStyle,
     this.selectionStyle,
+    this.displayMonths,
+    this.firstDayOfWeek = DateTime.monday,
+    this.weekends = const {},
     this.initViewers = const [],
     this.dayNames = const [],
     this.monthNames = const [],
+    this.language = '',
     this.dayInfo = const [],
+    this.colorLegend = const {},
+    this.selectionFrom,
+    this.selectionTo,
     this.events = const {},
     this.program,
   });
@@ -246,18 +289,43 @@ class SapCalendarModel {
   /// (srv[3]; the test system 20260824 = #05), else [selected], else [today].
   final DateTime? focus;
 
-  /// Whether the control picks a RANGE (PID 0 = from, PID 1 = to differ).
-  /// Null: not known from the wire — every oracle's selection style is 3
-  /// and picks one day (PID 0 == PID 1).
+  /// Whether the control picks a RANGE (PID 0 = from, PID 1 = to differ):
+  /// the selection style's interval bit ([selectionStyle] & 8 — the jar's
+  /// CalDateNavigator.changeSelection extends the selection only then).
+  /// Null when no InitViewers came. The F4 popups (style 1) pick one day
+  /// (PID 0 == PID 1); /AIF/IFMON's navigator (15) a range.
   final bool? rangeMode;
 
   /// The user's date format (InitViewers #03: `DD.MM.YYYY`).
   final String dateFormat;
 
-  /// InitViewers #01 (1027 on an F4 popup, 1028 on the AIF navigator) and
-  /// #04 (3 everywhere) — not interpreted.
+  /// InitViewers #01, the display style (sapCalendarS.jar SapCalendar.
+  /// intInitViewers → CalDateNavigator(…, style, …)): bit 1 a date-picker
+  /// field, 2 / 4 / 8 a navigator — 4 HORIZONTAL (the weekdays as rows,
+  /// the weeks as columns, the months side by side), 512 no week numbers,
+  /// 256 / 1024 the alignment, 2048 the weekend highlight, 4096
+  /// simplified. 1027 on an F4 popup, 1028 on the /AIF/IFMON navigator.
   final int? viewStyle;
+
+  /// InitViewers #02, the selection style: 1 a day, 2 a week (its number
+  /// cell), 4 a month (its header), 8 an interval (CalDateNavigator.
+  /// isWeekSelectionEnabled / isMonthSelectionEnabled / changeSelection).
+  /// 1 on an F4 popup, 15 on the AIF navigator.
   final int? selectionStyle;
+
+  /// InitViewers #04: the months shown at once (3 everywhere).
+  final int? displayMonths;
+
+  /// InitViewers #07's week rule as the first weekday ([DateTime.monday]
+  /// … [DateTime.sunday]): 7 Sunday, 6 Saturday, else the ISO week
+  /// (Monday; SapCalendar.getWeekInfo). The week numbers are ISO's under
+  /// Monday, the Sunday / Saturday rule's (minimal days 1) otherwise.
+  final int firstDayOfWeek;
+
+  /// InitViewers #10: the weekend days ([DateTime.weekday] numbers; `67`
+  /// = Saturday + Sunday on the AIF navigator, none on an F4 popup —
+  /// CalDateNavigator.isWeekend reads the digits).
+  final Set<int> weekends;
 
   /// Every InitViewers argument as the server sent it (#01 … #10).
   final List<String> initViewers;
@@ -267,9 +335,22 @@ class SapCalendarModel {
   final List<SapCalendarName> dayNames;
   final List<SapCalendarName> monthNames;
 
-  /// The DayInfo push's rows (column -> value): the special days (holidays)
-  /// the server marks — empty in every capture, not interpreted.
-  final List<Map<String, String>> dayInfo;
+  /// The DayNames push's LANG (`F`: the logon language), '' before it.
+  final String language;
+
+  /// The days the server marks ([SapCalendarDay], the DayInfo pushes so
+  /// far, by date ascending).
+  final List<SapCalendarDay> dayInfo;
+
+  /// The DayInfo rows without a date: colour id -> its meaning.
+  final Map<int, String> colorLegend;
+
+  /// The interval the server's last `Selection` assigned: the rows of
+  /// type 1 (from) and 2 (to); a single-row Selection is that day. Null
+  /// before any (a recorded session raw srv[21]: 20260824 x 3; raw
+  /// srv[101]: 18.06.2025 .. 18.06.2026).
+  final DateTime? selectionFrom;
+  final DateTime? selectionTo;
 
   /// The OCX events the server registered (RegisterOcxEvent: 3, 7, 8, 4,
   /// 522). Empty before the event queue.
@@ -277,6 +358,50 @@ class SapCalendarModel {
 
   /// The program of the screen the calendar opened over.
   final String? program;
+
+  /// Whether it shows as a horizontal date navigator ([viewStyle] bit 4:
+  /// /AIF/IFMON's lower-left pane) rather than an F4 popup's month view.
+  bool get horizontal => ((viewStyle ?? 0) & 4) != 0;
+
+  /// Whether the week numbers are shown ([viewStyle] without bit 512).
+  bool get showWeekNumbers => ((viewStyle ?? 0) & 512) == 0;
+
+  /// Whether a week (its number cell) / a month (its header) can be picked.
+  bool get selectsWeeks => ((selectionStyle ?? 0) & 2) != 0;
+  bool get selectsMonths => ((selectionStyle ?? 0) & 4) != 0;
+
+  /// Whether [d] is a weekend day of the control ([weekends]).
+  bool isWeekend(DateTime d) => weekends.contains(d.weekday);
+
+  /// The mark of [d], null when the server set none.
+  SapCalendarDay? dayInfoOf(DateTime d) {
+    final k = calendarWireDate(d);
+    for (final x in dayInfo) {
+      if (calendarWireDate(x.date) == k) return x;
+    }
+    return null;
+  }
+
+  /// Whether [d] lies in the assigned selection ([selectionFrom] ..
+  /// [selectionTo]).
+  bool inSelection(DateTime d) {
+    final a = selectionFrom, b = selectionTo ?? selectionFrom;
+    if (a == null || b == null) return false;
+    final x = DateTime(d.year, d.month, d.day);
+    return !x.isBefore(a) && !x.isAfter(b);
+  }
+
+  /// The short name of weekday [weekday] (1 = Monday): the pushed DayNames
+  /// (`LU` … `DI`), else '' (no client-side locale is invented).
+  String weekdayShort(int weekday) {
+    for (final n in dayNames) {
+      if (n.number == weekday) return n.short;
+    }
+    return '';
+  }
+
+  /// The week number of [d] under [firstDayOfWeek] (ISO under Monday).
+  int weekNumber(DateTime d) => calendarWeekNumber(d, firstDayOfWeek);
 
   /// The day [d] as the field shows it, in [dateFormat] (DD.MM.YYYY when
   /// none was pushed).
@@ -294,16 +419,46 @@ class SapCalendarModel {
       'selected ${_d(selected)}, focus ${_d(focus)})';
 }
 
+/// The week number of [d] for weeks starting on [firstDay] (a
+/// [DateTime.weekday]): ISO 8601 under Monday (the week holding the
+/// year's first Thursday is 1 — java.time WeekFields.ISO); under Sunday /
+/// Saturday the week holding January 1 is 1 (WeekFields.SUNDAY_START /
+/// of(SATURDAY, 1), minimal days 1).
+int calendarWeekNumber(DateTime d, int firstDay) {
+  final day = DateTime.utc(d.year, d.month, d.day);
+  if (firstDay == DateTime.monday) {
+    // the Thursday of d's week decides the year
+    final thu = day.add(Duration(days: DateTime.thursday - day.weekday));
+    final jan1 = DateTime.utc(thu.year);
+    return (thu.difference(jan1).inDays ~/ 7) + 1;
+  }
+  int offset(DateTime x) => (x.weekday - firstDay + 7) % 7;
+  final jan1 = DateTime.utc(day.year);
+  final start = jan1.subtract(Duration(days: offset(jan1)));
+  return (day.difference(start).inDays ~/ 7) + 1;
+}
+
+/// The first day of the week holding [d] for weeks starting on [firstDay].
+DateTime calendarWeekStart(DateTime d, int firstDay) {
+  final x = DateTime(d.year, d.month, d.day);
+  return DateTime(x.year, x.month, x.day - (x.weekday - firstDay + 7) % 7);
+}
+
 String _d(DateTime? d) => d == null ? '-' : calendarWireDate(d);
 
 final RegExp _digits = RegExp(r'^\d+$');
 
 class _Cal {
-  _Cal(this.shell, this.container, this.seq, this.program);
+  _Cal(this.shell, this.container, this.seq, this.program, this.step);
   final String shell;
   final String? container;
   final int seq;
-  final String? program;
+
+  /// The program the calendar opened over and the step it was created at
+  /// (a screen's creation wave is folded under the program BEFORE it:
+  /// [SapCalendarTracker.retag] moves it to the screen it built).
+  String? program;
+  final int step;
 
   /// The object token later queues name the control by.
   String? token;
@@ -315,10 +470,18 @@ class _Cal {
   String dateFormat = '';
   int? viewStyle;
   int? selectionStyle;
+  int? displayMonths;
+  int firstDayOfWeek = DateTime.monday;
+  Set<int> weekends = const {};
   List<String> initViewers = const [];
   List<SapCalendarName> dayNames = const [];
   List<SapCalendarName> monthNames = const [];
-  List<Map<String, String>> dayInfo = const [];
+  String language = '';
+
+  /// The marked days by YYYYMMDD (DayInfo pushes accumulate per date until
+  /// ResetDayInfo) and the dateless rows' colour meanings.
+  final Map<String, SapCalendarDay> days = {};
+  final Map<int, String> legend = {};
   final Set<int> events = {};
 
   /// The interval last answered to InitViewers / CalcInterval.
@@ -327,22 +490,45 @@ class _Cal {
   /// The dates of the last `Selection` the server assigned.
   List<DateTime> selection = const [];
 
-  SapCalendarModel get model => SapCalendarModel(
-    shell: shell,
-    container: container,
-    today: today,
-    selected: selected,
-    focus: focus ?? selected ?? today,
-    dateFormat: dateFormat,
-    viewStyle: viewStyle,
-    selectionStyle: selectionStyle,
-    initViewers: initViewers,
-    dayNames: dayNames,
-    monthNames: monthNames,
-    dayInfo: dayInfo,
-    events: Set.unmodifiable(events),
-    program: program,
-  );
+  /// That `Selection` push's DATAASC records, each at the table's width
+  /// (the inline cells expanded).
+  List<Uint8List> selectionRecords = const [];
+
+  /// The model is rebuilt only after a fold touched the calendar (a
+  /// navigator holds hundreds of marked days: every UI rebuild read it).
+  SapCalendarModel? _model;
+  void touch() => _model = null;
+
+  SapCalendarModel get model => _model ??= _build();
+
+  SapCalendarModel _build() {
+    final (from, to) = _selectionRange(selectionRecords, selection);
+    final sorted = days.keys.toList()..sort();
+    return SapCalendarModel(
+      shell: shell,
+      container: container,
+      today: today,
+      selected: selected,
+      focus: focus ?? selected ?? today,
+      rangeMode: selectionStyle == null ? null : (selectionStyle! & 8) != 0,
+      dateFormat: dateFormat,
+      viewStyle: viewStyle,
+      selectionStyle: selectionStyle,
+      displayMonths: displayMonths,
+      firstDayOfWeek: firstDayOfWeek,
+      weekends: Set.unmodifiable(weekends),
+      initViewers: initViewers,
+      dayNames: dayNames,
+      monthNames: monthNames,
+      language: language,
+      dayInfo: List.unmodifiable([for (final k in sorted) days[k]!]),
+      colorLegend: Map.unmodifiable(legend),
+      selectionFrom: from,
+      selectionTo: to,
+      events: Set.unmodifiable(events),
+      program: program,
+    );
+  }
 }
 
 /// Every calendar control of the session, folded call by call.
@@ -352,6 +538,10 @@ class SapCalendarTracker {
 
   final Map<String, _Cal> _cals = {};
   int _seq = 0;
+
+  /// SAPR3 sink url -> the calendar shell whose `Selection` the server
+  /// reads back through it ([takeSelectionRead]).
+  final Map<String, String> _selectionSinks = {};
 
   /// The front end's day, for a calendar whose server sent no date at all.
   final DateTime Function() _clock;
@@ -377,13 +567,21 @@ class SapCalendarTracker {
     String? Function(String token)? shellOf,
     String? base,
     GuiDialect? dialect,
+    int step = 0,
   }) {
     final rule = dialect ?? call.dialect ?? GuiDialect.windows;
     final touched = <String>{};
     answers.clear();
     final meta = verbMeta(call);
     final rowShell = <String, String>{}; // CreateControl result row -> shell
-    String? lastUrl; // the push the next AssignProperty2 assigns
+    // the push the next AssignProperty2 assigns — carried over from the
+    // call before when that one ended on its SetDataFromUrl (the step-38
+    // DayInfo batch's 711th push, assigned by step 40's first verb:
+    // a recorded session raw srv[32] / srv[33])
+    String? lastUrl = _pending?.$1;
+    var unassigned = false; // the call's last push not yet assigned
+    var usedPending = false;
+    _Cal? selectionRead; // a Selection read-back awaiting its SaveDataToUrl
     DpCache? cache;
     for (var i = 1; i <= call.verbs.length; i++) {
       final verb = call.verbs[i - 1];
@@ -400,6 +598,7 @@ class SapCalendarTracker {
             _digits.hasMatch(par) ? par : null,
             _seq++,
             base,
+            step,
           );
           final res = m.result?.trim() ?? '';
           if (res.isNotEmpty) rowShell[res] = sh;
@@ -417,7 +616,22 @@ class SapCalendarTracker {
       }
       if (verb == 'SetDataFromUrl') {
         final u = (args['#3'] ?? '').trim();
-        if (u.startsWith('SAPR3://')) lastUrl = u;
+        if (u.startsWith('SAPR3://')) {
+          lastUrl = u;
+          unassigned = true;
+        }
+        continue;
+      }
+      if (verb == 'SaveDataToUrl') {
+        final u = (args['#3'] ?? '').trim();
+        final c = selectionRead;
+        if (c != null && u.startsWith('SAPR3://')) {
+          _selectionSinks[u] = c.shell;
+          if (_selectionSinks.length > 64) {
+            _selectionSinks.remove(_selectionSinks.keys.first);
+          }
+        }
+        selectionRead = null;
         continue;
       }
       if (verb == 'RegisterOcxEvent') {
@@ -427,6 +641,23 @@ class SapCalendarTracker {
           c.events.add(id);
           touched.add(c.shell);
         }
+        continue;
+      }
+      if (verb == 'AssignProperty2') unassigned = false;
+      if (verb == 'AssignProperty2' &&
+          (args['#2'] ?? '').trim() == 'Selection' &&
+          (args['#4'] ?? '').trim() == 'r3TableAutoObj') {
+        // the READ direction: the calendar's Selection copied into a data
+        // object the queue then saves to a sink the server pulls
+        // (a recorded session raw srv[23] step 34: AssignProperty2(29,
+        // 'Selection', -1, 'r3TableAutoObj') + SaveDataToUrl -> the pull
+        // at 36; raw srv[88] / srv[120] the same)
+        selectionRead = _calOf(
+          (args['#1'] ?? '').trim(),
+          m.slots['#1'],
+          rowShell,
+          shellOf,
+        );
         continue;
       }
       if (verb == 'AssignProperty2') {
@@ -450,10 +681,33 @@ class SapCalendarTracker {
         final url = lastUrl;
         if (c == null || url == null) continue;
         cache ??= DpCache()..ingestValue(rfc);
-        final seg = cache.byUrl[url];
+        var seg = cache.byUrl[url];
+        if (seg == null && _pending?.$1 == url) {
+          seg = _pending!.$2;
+          usedPending = true;
+        }
         if (prop == 'Selection') {
           if (seg == null) continue;
           c.selection = _selectionDates(seg);
+          c.selectionRecords = _records(seg);
+          touched.add(c.shell);
+          continue;
+        }
+        if (prop == 'DayInfo') {
+          // one (COLOR, DATE, TEXT) row per push, accumulated by date; a
+          // dateless row names its colour (SapCalendar.setDayInfo)
+          if (seg == null) continue;
+          for (final (color, date, text) in _dayInfoRows(seg)) {
+            if (date == null) {
+              c.legend[color] = text;
+            } else {
+              c.days[calendarWireDate(date)] = SapCalendarDay(
+                date,
+                color,
+                text,
+              );
+            }
+          }
           touched.add(c.shell);
           continue;
         }
@@ -462,11 +716,22 @@ class SapCalendarTracker {
         switch (prop) {
           case 'DayNames':
             c.dayNames = _names(t);
-          case 'MonthNames':
-            c.monthNames = _names(t);
+            // the LANG column (`F`): the logon language the names are in
+            if (t.rows.isNotEmpty && t.columns.isNotEmpty) {
+              c.language = (t.rows.first[t.columns.first] ?? '').trim();
+            }
           default:
-            c.dayInfo = [for (final r in t.rows) Map.unmodifiable(r)];
+            c.monthNames = _names(t);
         }
+        touched.add(c.shell);
+        continue;
+      }
+      if (verb == 'ResetDayInfo') {
+        // the marks dropped before the next DayInfo wave (raw srv[88]
+        // step 142, ahead of step 146's DayInfo wave)
+        final c = _calOf(m.objValue.trim(), m.obj, rowShell, shellOf);
+        if (c == null) continue;
+        c.days.clear();
         touched.add(c.shell);
         continue;
       }
@@ -516,10 +781,25 @@ class SapCalendarTracker {
       c
         ..initSeen = true
         ..initViewers = List.unmodifiable(a)
+        // (display style, selection style, date format, months shown,
+        // date, stand-alone, week rule, -, -, weekends): SapCalendar.
+        // initViewers(int, int, String, int, String, boolean, int, int,
+        // int, String)
         ..viewStyle = a.isNotEmpty ? int.tryParse(a[0].trim()) : null
+        ..selectionStyle = a.length > 1 ? int.tryParse(a[1].trim()) : null
         ..dateFormat = a.length > 2 ? a[2].trim() : ''
-        ..selectionStyle = a.length > 3 ? int.tryParse(a[3].trim()) : null
-        ..selected = a.length > 4 ? parseCalendarDate(a[4]) : null;
+        ..displayMonths = a.length > 3 ? int.tryParse(a[3].trim()) : null
+        ..selected = a.length > 4 ? parseCalendarDate(a[4]) : null
+        ..firstDayOfWeek = switch (a.length > 6 ? a[6].trim() : '') {
+          '7' => DateTime.sunday,
+          '6' => DateTime.saturday,
+          _ => DateTime.monday,
+        }
+        ..weekends = {
+          if (a.length > 9)
+            for (final ch in a[9].trim().split(''))
+              if (int.tryParse(ch) case final n? when n >= 1 && n <= 7) n,
+        };
       // the held interval around #05, else the server's Today (an empty
       // field on the AIF navigator), else the front end's own day
       c.held = calendarHeldInterval(
@@ -528,8 +808,23 @@ class SapCalendarTracker {
       );
       _answer(m, c.held!);
     }
+    // a push the call set up but did not assign: the next call may
+    final last = lastUrl;
+    if (unassigned && last != null) {
+      cache ??= DpCache()..ingestValue(rfc);
+      final seg = cache.byUrl[last];
+      _pending = seg == null ? null : (last, seg);
+    } else if (usedPending || last != _pending?.$1) {
+      _pending = null;
+    }
+    for (final sh in touched) {
+      _cals[sh]?.touch();
+    }
     return touched;
   }
+
+  /// The last push of the previous call ([foldCall]): (url, segment).
+  (String, Uint8List)? _pending;
 
   void _answer(VerbMeta m, (DateTime, DateTime) interval) {
     final row = int.tryParse(m.result?.trim() ?? '');
@@ -563,6 +858,32 @@ class SapCalendarTracker {
     return newest?..token = token;
   }
 
+  /// Relabel the calendars created over [old] at a step >= [since] as
+  /// [now]'s — the screen generation the action that created them opened
+  /// (ControlRegistry.retag, reference client ea_facts.retag_generation). A
+  /// calendar the server builds INTO a new screen is created in that
+  /// screen's PBO flush, which is answered before the paint that names the
+  /// program: /AIF/IFMON's date navigator (CreateControl 144,
+  /// SAP.CalendarControl.1, in the left pane's splitter cell 128 —
+  /// a recorded session raw srv[20..22], step 32) was stamped with the
+  /// SAP Easy Access program it was launched from, so [calendars] never
+  /// listed it under /AIF/ERR_OVERVIEW and it was never drawn — its cell
+  /// stayed blank once the server showed it (live the test system 2026-10-13). Returns
+  /// how many were relabelled.
+  int retag(String old, String now, {required int since}) {
+    if (old == now) return 0;
+    var n = 0;
+    for (final c in _cals.values) {
+      if (c.program == old && c.step >= since) {
+        c
+          ..program = now
+          ..touch();
+        n++;
+      }
+    }
+    return n;
+  }
+
   /// The open calendars, newest first: not torn down, live ([isLive]),
   /// created over [base] when given.
   List<SapCalendarModel> calendars({
@@ -581,6 +902,51 @@ class SapCalendarTracker {
 
   /// Every calendar shell the tracker knows, open or not.
   Set<String> get shells => _cals.keys.toSet();
+
+  /// The records a pull of sink [url] reads back when it is a calendar's
+  /// `Selection` read-back (null otherwise; the sink is consumed): the
+  /// rows of the Selection the server last assigned that calendar whose
+  /// type field (the I4 after the date) is set — the interval's from (1)
+  /// and to (2) — at their full width. The SAP GUI for Windows' answer in
+  /// a recorded session: the server assigns three rows (date, 0) /
+  /// (from, 1) / (to, 2) and reads back the last two — raw srv[23] ->
+  /// gui[17] (20260824 x 3 -> 20260824 / 20260824), srv[72] -> gui[76] at
+  /// step 144 (20260618 x 3), srv[103] -> gui[106] at 192 (20250618,
+  /// 20250618, 20260618 -> 20250618 / 20260618). GuiGo answered the
+  /// read-back with no rows.
+  List<Uint8List>? takeSelectionRead(String url) {
+    final sh = _selectionSinks.remove(url);
+    if (sh == null) return null;
+    final c = _cals[sh];
+    if (c == null) return const [];
+    return [
+      for (final r in c.selectionRecords)
+        if (r.length < 12 ||
+            ByteData.sublistView(r, 8, 12).getUint32(0, Endian.little) != 0)
+          r,
+    ];
+  }
+}
+
+/// The DATAASC records of a push at the table's declared width: its inline
+/// `03 04` cells carry each record with its trailing run collapsed to one
+/// byte ([expandInlineRow] undoes it); one LZH cell is the records back
+/// to back.
+List<Uint8List> _records(Uint8List seg) {
+  final (_, (w, n), cells) = dpColumnCells(seg, 'DATAASC');
+  if (w <= 0 || n <= 0 || cells.isEmpty) return const [];
+  if (cells.length == n) {
+    return [for (final c in cells) expandInlineRow(c, w)];
+  }
+  final all = BytesBuilder(copy: false);
+  for (final c in cells) {
+    all.add(c);
+  }
+  final b = all.takeBytes();
+  return [
+    for (var i = 0; (i + 1) * w <= b.length && i < n; i++)
+      Uint8List.fromList(b.sublist(i * w, (i + 1) * w)),
+  ];
 }
 
 /// The dates of a `Selection` push: every YYYYMMDD in its DATAASC cells
@@ -593,7 +959,7 @@ List<DateTime> _selectionDates(Uint8List seg) {
   var end = text.indexOf('FORMAT', at);
   if (end < 0) end = text.length;
   return [
-    for (final m in RegExp(r'(?<!\d)\d{8}(?!\d)')
+    for (final m in _selectionDatesRx
         .allMatches(text.substring(at, end)))
       ?parseCalendarDate(m.group(0)!),
   ];
@@ -614,3 +980,99 @@ List<SapCalendarName> _names(DpTable t) {
   out.sort((a, b) => a.number.compareTo(b.number));
   return List.unmodifiable(out);
 }
+
+/// The (from, to) of a `Selection` push: its rows' type field (the I4
+/// after the date: 1 = from, 2 = to — a recorded session raw srv[101]
+/// 20250618 / 20250618 (1) / 20260618 (2)); a push without typed rows
+/// spans its dates; (null, null) for none.
+(DateTime?, DateTime?) _selectionRange(
+  List<Uint8List> records,
+  List<DateTime> dates,
+) {
+  DateTime? from, to;
+  for (final r in records) {
+    if (r.length < 12) continue;
+    final d = parseCalendarDate(String.fromCharCodes(r, 0, 8));
+    if (d == null) continue;
+    switch (ByteData.sublistView(r, 8, 12).getUint32(0, Endian.little)) {
+      case 1:
+        from = d;
+      case 2:
+        to = d;
+    }
+  }
+  if (from == null && to == null) {
+    if (dates.isEmpty) return (null, null);
+    return (dates.first, dates.last);
+  }
+  from ??= to;
+  to ??= from;
+  return to!.isBefore(from!) ? (to, from) : (from, to);
+}
+
+/// The rows of a `DayInfo` push as (colour, date or null, text): the
+/// table's FORMAT columns (COLOR I4, DATE C8, TEXT C30 — the AIF pushes'
+/// [4, 8, 30] / types I C C) read at their offsets from each record (the
+/// inline cells expanded to the declared width: the generic table decoder
+/// read the 43-byte inline cell of a 44-byte record as no row).
+List<(int, DateTime?, String)> _dayInfoRows(Uint8List seg) {
+  final t = decodeNamedDpTable(seg);
+  final lengths = t?.lengths ?? const <int>[];
+  final types = t?.types ?? const <int>[];
+  // the column order: the I4 colour, the C8 date, the text (by type and
+  // length, not by name — the FORMAT names are positional)
+  var colorAt = 0, dateAt = 4, textAt = 12, textLen = 30;
+  if (lengths.length >= 3 && types.length >= 3) {
+    var off = 0;
+    for (var i = 0; i < lengths.length; i++) {
+      if (types[i] == 0x49 && lengths[i] == 4) {
+        colorAt = off;
+      } else if (lengths[i] == 8 && types[i] != 0x49) {
+        dateAt = off;
+      } else {
+        textAt = off;
+        textLen = lengths[i];
+      }
+      off += lengths[i];
+    }
+  }
+  final out = <(int, DateTime?, String)>[];
+  for (final r in _records(seg)) {
+    if (r.length < colorAt + 4 || r.length < dateAt + 8) continue;
+    final color = ByteData.sublistView(
+      r,
+      colorAt,
+      colorAt + 4,
+    ).getInt32(0, Endian.little);
+    final raw = String.fromCharCodes(r, dateAt, dateAt + 8).trim();
+    final date = raw.isEmpty ? null : parseCalendarDate(raw);
+    if (raw.isNotEmpty && date == null) continue;
+    final end = (textAt + textLen).clamp(0, r.length);
+    final text = textAt < end
+        ? _text(Uint8List.sublistView(r, textAt, end))
+        : '';
+    out.add((color, date, text));
+  }
+  return out;
+}
+
+/// A text field of a push: UTF-8 when it decodes as such, else Latin-1;
+/// trailing blanks / NULs dropped.
+String _text(Uint8List b) {
+  var n = b.length;
+  while (n > 0 && (b[n - 1] == 0 || b[n - 1] == 0x20)) {
+    n--;
+  }
+  final v = Uint8List.sublistView(b, 0, n);
+  try {
+    return utf8.decode(v).trim();
+  } on FormatException {
+    return latin1.decode(v).trim();
+  }
+}
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _parseCalendarDateRx = RegExp(r'^\d{8}$');
+final RegExp _fieldShowsDateRx = RegExp(r'^(?:\d{2}[./-]\d{2}[./-]\d{4}|\d{4}[./-]\d{2}[./-]\d{2})$');
+final RegExp _selectionDatesRx = RegExp(r'(?<!\d)\d{8}(?!\d)');

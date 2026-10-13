@@ -33,6 +33,8 @@ dependencies:
     sdk: flutter
   diag_protocol:
     path: ../../packages/diag_protocol
+  office_doc:
+    path: ../../packages/office_doc
   flutter_secure_storage: ^9.2.2
   local_auth: ^2.3.0
   shared_preferences: ^2.3.2

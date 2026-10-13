@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
+import 'session_busy.dart';
+
 /// A node of a network graph / designer canvas, in the control's own
 /// coordinates ([x], [y], [w], [h]) when the server placed it, else on a
 /// layout grid ([col], [row]); with neither, the view lays it out by level.
@@ -49,8 +51,20 @@ class GraphEdge {
 /// name is unknown.
 Color? jnetColor(String? name) {
   if (name == null) return null;
-  final m = RegExp(r'^(DARK|LIGHT)?([A-Z]+?)(?:_(\d+))?$')
-      .firstMatch(name.trim().toUpperCase());
+  // once per name: a graph's nodes repeat a handful of colours, and every
+  // build asked again per node
+  final known = _jnetColors[name];
+  if (known != null || _jnetColors.containsKey(name)) return known;
+  if (_jnetColors.length >= 256) _jnetColors.clear(); // a bound
+  return _jnetColors[name] = _jnetColorOf(name);
+}
+
+final Map<String, Color?> _jnetColors = {};
+
+final RegExp _jnetColorRx = RegExp(r'^(DARK|LIGHT)?([A-Z]+?)(?:_(\d+))?$');
+
+Color? _jnetColorOf(String name) {
+  final m = _jnetColorRx.firstMatch(name.trim().toUpperCase());
   if (m == null) return null;
   const base = {
     'BLUE': 0xFF2F6DB5,
@@ -363,8 +377,13 @@ class _SapGraphViewState extends State<SapGraphView> {
     _movedVersion++;
   }
 
+  /// Busy as the last build drew it: the view's flag or the session's
+  /// ([SessionBusy], depended on in [build]).
+  bool _busy = false;
+
   @override
   Widget build(BuildContext context) {
+    _busy = widget.busy || SessionBusy.of(context);
     final scheme = Theme.of(context).colorScheme;
     final laid = _layout();
     _keepMoves(_boxes, laid);
@@ -429,7 +448,7 @@ class _SapGraphViewState extends State<SapGraphView> {
       _dragRaw = at;
       _dragShift.value = at;
       setState(() => _dragging = _selected = n.id);
-      if (!widget.busy) widget.onMoveStart?.call(n);
+      if (!_busy) widget.onMoveStart?.call(n);
     }
 
     void updateMove(Offset delta) {
@@ -513,13 +532,13 @@ class _SapGraphViewState extends State<SapGraphView> {
                 onTap:
                     (widget.onTapNode == null &&
                             widget.onDoubleTapNode == null) ||
-                        widget.busy
+                        _busy
                     ? null
                     : () {
                         setState(() => _selected = n.id);
                         widget.onTapNode?.call(n);
                       },
-                onDoubleTap: widget.onDoubleTapNode == null || widget.busy
+                onDoubleTap: widget.onDoubleTapNode == null || _busy
                     ? null
                     : (global) {
                         setState(() => _selected = n.id);
@@ -529,21 +548,21 @@ class _SapGraphViewState extends State<SapGraphView> {
                 // turn (the one its own start may have begun)
                 onPanStart: movable(n)
                     ? (_) => startMove(n)
-                    : linkDrag(n) && !widget.busy
+                    : linkDrag(n) && !_busy
                     ? (d) => startLink(n, d.globalPosition)
                     : null,
                 onPanUpdate: movable(n)
                     ? (d) {
                         if (_dragging == n.id) updateMove(d.delta);
                       }
-                    : linkDrag(n) && !widget.busy
+                    : linkDrag(n) && !_busy
                     ? (d) => _linkEnd.value = _toSurface(d.globalPosition)
                     : null,
                 onPanEnd: movable(n)
                     ? (_) {
                         if (_dragging == n.id) endMove(n);
                       }
-                    : linkDrag(n) && !widget.busy
+                    : linkDrag(n) && !_busy
                     ? (_) => endLink(n, _linkEnd.value, contextMenu: false)
                     : null,
                 onPanCancel: movable(n)
@@ -553,16 +572,16 @@ class _SapGraphViewState extends State<SapGraphView> {
                     : linkDrag(n)
                     ? cancelLink
                     : null,
-                onSecondaryTapUp: widget.onContextMenu == null || widget.busy
+                onSecondaryTapUp: widget.onContextMenu == null || _busy
                     ? null
                     : (d) => widget.onContextMenu!(n, d.globalPosition),
-                onLongPressStart: widget.onConnect == null || widget.busy
+                onLongPressStart: widget.onConnect == null || _busy
                     ? null
                     : (d) => startLink(n, d.globalPosition),
-                onLongPressMove: widget.onConnect == null || widget.busy
+                onLongPressMove: widget.onConnect == null || _busy
                     ? null
                     : (d) => _linkEnd.value = _toSurface(d.globalPosition),
-                onLongPressEnd: widget.onConnect == null || widget.busy
+                onLongPressEnd: widget.onConnect == null || _busy
                     ? null
                     : (d) => endLink(
                         n,
@@ -607,7 +626,7 @@ class _SapGraphViewState extends State<SapGraphView> {
               child: GestureDetector(
                 key: const ValueKey('graph-surface'),
                 behavior: HitTestBehavior.opaque,
-                onTap: widget.busy
+                onTap: _busy
                     ? null
                     : () {
                         setState(() => _selected = null);
@@ -625,7 +644,7 @@ class _SapGraphViewState extends State<SapGraphView> {
       // is about to be reassigned through (that builds itself forever)
       final plain = surface;
       surface = DragTarget<TreeRowDrag>(
-        onWillAcceptWithDetails: (_) => !widget.busy,
+        onWillAcceptWithDetails: (_) => !_busy,
         onMove: (d) {
           final n = _nodeAt(_toSurface(d.offset));
           if (n?.id != _hoverDrop) setState(() => _hoverDrop = n?.id);

@@ -1,6 +1,8 @@
 import 'package:diag_protocol/diag_protocol.dart';
 import 'package:flutter/material.dart';
 
+import 'session_busy.dart';
+
 /// The SAP GUI for Windows F4 value-help dialog (SAP.TABControl.1): the
 /// restriction pages as tabs, each page's inputs, the search / close
 /// buttons, the server's status line and the hit list; a tapped row is the
@@ -92,8 +94,13 @@ class _SapValueHelpViewState extends State<SapValueHelpView> {
     widget.onSearch(page.id, out);
   }
 
+  /// Busy as the last build drew it: the view's flag or the session's
+  /// ([SessionBusy], depended on in [build]).
+  bool _busy = false;
+
   @override
   Widget build(BuildContext context) {
+    _busy = widget.busy || SessionBusy.of(context);
     final d = widget.dialog;
     final theme = Theme.of(context);
     final page = d.activePage;
@@ -121,7 +128,7 @@ class _SapValueHelpViewState extends State<SapValueHelpView> {
                 IconButton(
                   tooltip: 'Close',
                   icon: const Icon(Icons.close),
-                  onPressed: widget.busy ? null : widget.onClose,
+                  onPressed: _busy ? null : widget.onClose,
                 ),
               ],
             ),
@@ -141,7 +148,7 @@ class _SapValueHelpViewState extends State<SapValueHelpView> {
                           p.title.trim().isNotEmpty ? p.title.trim() : p.id,
                         ),
                         selected: p.id == page?.id,
-                        onSelected: widget.busy || p.id == page?.id
+                        onSelected: _busy || p.id == page?.id
                             ? null
                             : (_) => widget.onPage(p.id),
                       ),
@@ -180,7 +187,7 @@ class _SapValueHelpViewState extends State<SapValueHelpView> {
                 padding: const EdgeInsets.only(bottom: 6),
                 child: TextField(
                   controller: _ctrl(page, item),
-                  enabled: !widget.busy,
+                  enabled: !_busy,
                   decoration: InputDecoration(
                     isDense: true,
                     border: const OutlineInputBorder(),
@@ -203,7 +210,7 @@ class _SapValueHelpViewState extends State<SapValueHelpView> {
                 else
                   const Spacer(),
                 FilledButton.icon(
-                  onPressed: widget.busy ? null : () => _search(page),
+                  onPressed: _busy ? null : () => _search(page),
                   icon: const Icon(Icons.search),
                   label: const Text('Search'),
                 ),
@@ -313,7 +320,7 @@ class _SapValueHelpViewState extends State<SapValueHelpView> {
                               ? theme.colorScheme.surfaceContainerLow
                               : theme.colorScheme.surface,
                           child: InkWell(
-                            onTap: widget.busy
+                            onTap: _busy
                                 ? null
                                 : () => widget.onPick(r + 1),
                             child: Row(

@@ -106,9 +106,9 @@ class CanvasNode {
 int canvasTextColumn(CanvasNode n) {
   final cols = <int>[];
   for (final e in n.extra.entries) {
-    final m = RegExp(r'^col_(\d+)$').firstMatch(e.key);
+    final m = _canvasTextColumnRx.firstMatch(e.key);
     final v = e.value.trim();
-    if (m == null || v.isEmpty || RegExp(r'^@\w{2,4}@$').hasMatch(v)) {
+    if (m == null || v.isEmpty || _canvasTextColumnRx2.hasMatch(v)) {
       continue;
     }
     cols.add(int.parse(m.group(1)!));
@@ -818,4 +818,10 @@ String? _metaTableId(CanvasPushTable? t) {
   return (table, rows);
 }
 
-bool _digits(String? s) => s != null && RegExp(r'^\d+$').hasMatch(s.trim());
+bool _digits(String? s) => s != null && _digitsOnlyRx.hasMatch(s.trim());
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _canvasTextColumnRx = RegExp(r'^col_(\d+)$');
+final RegExp _canvasTextColumnRx2 = RegExp(r'^@\w{2,4}@$');
+final RegExp _digitsOnlyRx = RegExp(r'^\d+$');

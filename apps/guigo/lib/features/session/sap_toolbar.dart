@@ -2,6 +2,7 @@ import 'package:diag_protocol/diag_protocol.dart';
 import 'package:flutter/material.dart';
 
 import '../../core/sap_icons.dart';
+import 'session_busy.dart';
 
 /// The key name of a SAP virtual key (`8` → "F8", `13` → "Shift+F1"), or
 /// null for keys without a function-key spelling.
@@ -40,9 +41,11 @@ class SapToolbar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // the session's busy too ([SessionBusy]: a modal's button area)
+    final busy = this.busy || SessionBusy.of(context);
     final buttons = [
       for (final e in entries)
-        if (!e.separator) _button(context, e),
+        if (!e.separator) _button(context, e, busy),
     ];
     if (wrap) {
       return Wrap(
@@ -55,7 +58,7 @@ class SapToolbar extends StatelessWidget {
     return ScrollingButtonRow(children: buttons);
   }
 
-  Widget _button(BuildContext context, MenuEntry e) {
+  Widget _button(BuildContext context, MenuEntry e, bool busy) {
     final token = SapIconAtlas.tokenRx.firstMatch(e.text);
     final cp = token != null ? icons?.codepoint(token.group(1)!) : null;
     final plain = (icons?.stripTokens(e.text) ?? e.text)
@@ -118,8 +121,18 @@ class SapToolbar extends StatelessWidget {
 /// while more buttons lie that way (a tap pages the row), the hidden edge
 /// faded, a thin scrollbar under it.
 class ScrollingButtonRow extends StatefulWidget {
-  const ScrollingButtonRow({super.key, required this.children});
+  const ScrollingButtonRow({
+    super.key,
+    required this.children,
+    this.bottomGap = 6,
+    this.arrowSize = 24,
+  });
   final List<Widget> children;
+
+  /// The strip under the buttons the scroll bar is drawn in, and the size
+  /// of the page arrows (a compact control row: smaller).
+  final double bottomGap;
+  final double arrowSize;
 
   @override
   State<ScrollingButtonRow> createState() => _ScrollingButtonRowState();
@@ -218,6 +231,7 @@ class _ScrollingButtonRowState extends State<ScrollingButtonRow> {
             : 'More buttons to the right',
         padding: EdgeInsets.zero,
         visualDensity: VisualDensity.compact,
+        iconSize: widget.arrowSize,
         icon: Icon(dir < 0 ? Icons.chevron_left : Icons.chevron_right),
         color: scheme.primary,
         onPressed: () => _page(dir),
@@ -228,7 +242,7 @@ class _ScrollingButtonRowState extends State<ScrollingButtonRow> {
       thumbVisibility: _left || _right,
       thickness: 3,
       child: Padding(
-        padding: const EdgeInsets.only(bottom: 6),
+        padding: EdgeInsets.only(bottom: widget.bottomGap),
         child: SingleChildScrollView(
           controller: _c,
           scrollDirection: Axis.horizontal,

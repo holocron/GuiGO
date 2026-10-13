@@ -18,9 +18,11 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import '../lzh/lzh.dart';
+import 'dp_cache.dart' show dpColumnCells;
 import 'flush_call.dart';
 import 'reply_container.dart' show buildDpAnswer;
 import 'rfc_cells.dart' show wrap0305Cell;
+import 'tree_header_names.dart' show collapseInlineRow;
 
 /// One control-property read-back sink: the data object a SaveDataToUrl
 /// wrote, filled from property [prop] of the object [source].
@@ -71,7 +73,7 @@ String? clientTablePullUrl(Uint8List v) {
   final i = _indexOf(v, 'INURL'.codeUnits);
   if (i < 0) return null;
   final end = i + _inurlWindow < v.length ? i + _inurlWindow : v.length;
-  final m = RegExp('SAPR3://[0-9A-Za-z]+')
+  final m = _clientTablePullUrlRx
       .firstMatch(latin1.decode(Uint8List.sublistView(v, i, end)));
   return m?.group(0);
 }
@@ -86,6 +88,7 @@ Uint8List clientTableAnswer({
   int rowWidth = 12,
   int totalSize = 0,
   Uint8List? formatRecord,
+  List<Uint8List>? formatRecords,
   DateTime? now,
   String? date,
   String? time,
@@ -98,7 +101,7 @@ Uint8List clientTableAnswer({
       '${two(t.hour)}:${two(t.minute)}:${two(t.second)}'.substring(0, 7);
   final table = BytesBuilder(copy: false)
     ..add(_column('DATAASC', rowWidth, rows))
-    ..add(_column('FORMAT', 80, [?formatRecord]))
+    ..add(_column('FORMAT', 80, formatRecords ?? [?formatRecord]))
     ..add(_column('PROPS', 80, const []));
   return buildDpAnswer(
     scalars: {
@@ -190,6 +193,38 @@ Uint8List loadedObjectPullAnswer(
     rows: rows,
     rowWidth: w == 0 ? 1024 : w,
     formatRecord: fmt.isEmpty ? null : fmt.first,
+    date: '00000000',
+    time: '000000',
+  );
+}
+
+/// The answer to a pull of a calendar's `Selection` read-back
+/// (SapCalendarTracker.takeSelectionRead): the loaded-object envelope (DATE
+/// `00000000`, TIME `000000`), the [records] inline at the request's record
+/// width (12: the date C8 + the type I4), each with its trailing run
+/// collapsed, and the request's own FORMAT records (its two 80-byte
+/// descriptors, LZH in the request) inline the same way — the SAP GUI for
+/// Windows' raw gui[17] / gui[76] / gui[106] of a recorded session.
+Uint8List calendarSelectionPullAnswer(
+  Uint8List request,
+  List<Uint8List> records,
+) {
+  final w = clientTablePullRowWidth(request);
+  final (_, (fw, fn), cells) = dpColumnCells(request, 'FORMAT');
+  final fmt = BytesBuilder(copy: false);
+  for (final c in cells) {
+    fmt.add(c);
+  }
+  final f = fmt.takeBytes();
+  final rw = fw > 0 ? fw : 80;
+  final formats = [
+    for (var i = 0; (i + 1) * rw <= f.length && (fn <= 0 || i < fn); i++)
+      collapseInlineRow(Uint8List.sublistView(f, i * rw, (i + 1) * rw)),
+  ];
+  return clientTableAnswer(
+    rows: [for (final r in records) collapseInlineRow(r)],
+    rowWidth: w == 0 ? 12 : w,
+    formatRecords: formats,
     date: '00000000',
     time: '000000',
   );
@@ -355,6 +390,28 @@ Uint8List nodeKeyTableAnswer(List<String> keys, {DateTime? now}) {
   );
 }
 
+/// The node keys of a node-key table the SERVER pushed (a DP push's
+/// DATAASC records, [nodeKeyTableAnswer]'s layout: the key right-justified
+/// in 11 + a blank) — `AssignProperty2(<dp>, 'data', <tree>,
+/// 'ExpandedKeys')`, a recorded session srv[26] `{1}`.
+/// Each key as 11 characters (the tree's NODE_KEY spelling); empty when
+/// [seg] holds no such records.
+List<String> nodeKeyTableKeys(Uint8List seg) {
+  final (_, (w, n), cells) = dpColumnCells(seg, 'DATAASC');
+  if (w < 1 || n < 1) return const [];
+  final b = BytesBuilder(copy: false);
+  for (final c in cells) {
+    b.add(c);
+  }
+  final data = b.takeBytes();
+  return [
+    for (var r = 0; r < n && (r + 1) * w <= data.length; r++)
+      if (latin1.decode(Uint8List.sublistView(data, r * w, (r + 1) * w))
+          case final rec when rec.trim().isNotEmpty)
+        _rjust(rec.trim(), 11),
+  ];
+}
+
 String _rjust(String s, int w) {
   if (s.length >= w) return s.substring(s.length - w);
   return s.padLeft(w);
@@ -393,3 +450,7 @@ int _indexOf(Uint8List hay, List<int> needle) {
   }
   return -1;
 }
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _clientTablePullUrlRx = RegExp('SAPR3://[0-9A-Za-z]+');

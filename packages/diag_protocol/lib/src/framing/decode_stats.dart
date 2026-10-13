@@ -18,9 +18,18 @@ abstract final class DecodeStats {
   /// `parseFlushCall` runs.
   static int flushParses = 0;
 
+  /// `03 05` cells LZH-inflated by `rfcColumns` (an RFC_TR column decode).
+  static int cellInflates = 0;
+
+  /// Native inflaters set up (a zlib context primed with the LZH zero
+  /// window) — what the pooled `LzhInflater` reuses across objects.
+  static int inflaterInits = 0;
+
   static void reset() {
     frameDecodes = 0;
     frameWalks = 0;
     flushParses = 0;
+    cellInflates = 0;
+    inflaterInits = 0;
   }
 }

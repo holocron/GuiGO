@@ -269,15 +269,6 @@ Uint8List uiEventControlAt(List<int> path) {
   return out;
 }
 
-Uint8List _u32s(List<int> v) {
-  final out = Uint8List(4 * v.length);
-  final bd = ByteData.sublistView(out);
-  for (var i = 0; i < v.length; i++) {
-    bd.setUint32(4 * i, v[i]);
-  }
-  return out;
-}
-
 /// A grid control-event round `%_GC <shell> <eventId>` carrying [xml] (a
 /// whole DATAMANAGER document) — see the library doc. [path] = the
 /// container path of the dynpro custom control hosting the grid (the
@@ -285,6 +276,14 @@ Uint8List _u32s(List<int> v) {
 /// 01`, a recorded session gui[93] `02 01`); null = a grid no painted
 /// custom control hosts (docked, dialog): no 16/15/1 (reference client 534a50c §3);
 /// [okMode] the OK event's mode byte (default [gridOkMode]).
+///
+/// The focus item is the grid's 16/9/18 — the click moved the focus into
+/// it (a recorded session gui[133], ME23N's BELNR hotspot after a
+/// paint with a dynpro cursor) — except with [keepFocus]: a click on a
+/// CHECKBOX cell leaves the focus where the paint put it and the round
+/// carries that (a recorded session g[30]: `%_GC 281 2` on
+/// a FLAG checkbox after srv[48]'s dynpro cursor sends that 16/9/11; the
+/// grid holds the focus from the next round on, g[32] 16/9/18 `281`).
 List<Uint8List> gridEventItems(
   ActionContext ctx, {
   required String shell,
@@ -292,8 +291,12 @@ List<Uint8List> gridEventItems(
   required String xml,
   List<int>? path,
   int? okMode,
+  bool keepFocus = false,
 }) {
   final geom = ctx.paintedGeometry;
+  final control = keepFocus ? ctx.paintedControlFocus : shell;
+  final painted = keepFocus && control == null ? ctx.paintedFocus : null;
+  final cursor = painted == null ? null : windowsClientCursor(painted);
   // the generic Windows envelope (the tabstrip echo after the 16/12/6;
   // no 16/12/8 in a modal, the 16/4/36 after the okcode when owed —
   // windowsModalWindowRectOwed)
@@ -307,11 +310,16 @@ List<Uint8List> gridEventItems(
     buildApplItem(
       12,
       ctx.modalNo != 0 ? 14 : 8,
-      _u32s([ctx.winPxHeight, ctx.winPxWidth, ctx.winPxHeight, ctx.winPxWidth]),
+      ctx.windowAreaPx(ctx.winPxHeight, ctx.winPxWidth),
     ),
     if (geom != null) buildApplItem(12, 6, geom),
     if (path != null) buildApplItem(15, 1, uiEventControlAt(path)),
-    buildApplItem(9, 18, wireText(shell)),
+    if (control != null)
+      buildApplItem(9, 18, wireText(control))
+    else if (cursor != null)
+      buildApplItem(9, 11, cursor)
+    else
+      buildApplItem(9, 10, Uint8List(0)),
     xmlBlobItem(wireText(xml)),
     eomBytes,
   ], ctx, okMode: okMode ?? gridOkMode(ctx));

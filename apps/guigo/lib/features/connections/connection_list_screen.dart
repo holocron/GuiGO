@@ -1,3 +1,5 @@
+import 'package:diag_protocol/diag_protocol.dart'
+    show defaultLogonLanguage, defaultSapPort;
 import 'package:flutter/material.dart';
 
 import '../../core/connections.dart';
@@ -230,10 +232,10 @@ class _ConnectionFormState extends State<_ConnectionForm> {
     final e = widget.existing;
     _name.text = widget.clone ? '${e?.name ?? ''} (copy)' : e?.name ?? '';
     _host.text = e?.host ?? '';
-    _port.text = (e?.port ?? 3200).toString();
+    _port.text = (e?.port ?? defaultSapPort).toString();
     _client.text = e?.client ?? '100';
     _user.text = widget.clone ? '' : e?.user ?? '';
-    _lang.text = e?.language ?? 'EN';
+    _lang.text = e?.language ?? defaultLogonLanguage;
     _router.text = e?.routerString ?? '';
     _storePw = e?.storePassword ?? true;
     _keepOthers = e?.keepOtherSessions ?? false;

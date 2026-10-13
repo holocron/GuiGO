@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:diag_protocol/diag_protocol.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import '../../core/sap_icons.dart';
@@ -115,7 +116,19 @@ class SapListPalette {
 class SapListMetrics {
   SapListMetrics(this.style, this.cw, this.lh);
 
+  /// The cells measured so far, by (base style, font size): a list
+  /// rebuild — a tap, a tick, a busy flip — laid a TextPainter out anew.
+  static final Map<(TextStyle, double), SapListMetrics> _measured = {};
+
   factory SapListMetrics.of(TextStyle base, double fontSize) {
+    final key = (base, fontSize);
+    final known = _measured[key];
+    if (known != null) return known;
+    if (_measured.length >= 64) _measured.clear(); // a bound, never reached
+    return _measured[key] = SapListMetrics._measure(base, fontSize);
+  }
+
+  factory SapListMetrics._measure(TextStyle base, double fontSize) {
     // every glyph on the cell's advance: no inherited letter / word
     // spacing (the theme's bodyMedium carries 0.25), no weight
     final style = base.copyWith(
@@ -156,8 +169,13 @@ int sapListColumns(Iterable<ListLine?> rows) {
 
 /// One classic list line on the SAP character grid: the colour bands, the
 /// box lines drawn as continuous strokes, the text (hotspots underlined),
-/// icons and input cells — a checkbox a real one. A tap on the line is the
-/// list's pick ([onTap]); a checkbox tap stages its value ([onCheck]).
+/// icons and input cells — a checkbox a real one. As on the real GUI a tap
+/// reports the tapped column ([onTapAt]) — the owner places the list
+/// cursor there (no round: a recorded session, a
+/// click sends no frame) — and a second tap in time the double-click
+/// ([onDoubleTapAt]: the pick, F2 with the cursor there, g9); a checkbox
+/// tap stages its value ([onCheck]) and wins over the line's. [cursorCol]
+/// draws the list cursor's cell.
 class SapListLineView extends StatelessWidget {
   const SapListLineView({
     super.key,
@@ -166,7 +184,10 @@ class SapListLineView extends StatelessWidget {
     required this.palette,
     required this.width,
     this.icons,
-    this.onTap,
+    this.onTapAt,
+    this.onDoubleTapAt,
+    this.cursorCol,
+    this.cursorColor,
     this.onCheck,
     this.checkedOf,
   });
@@ -176,7 +197,15 @@ class SapListLineView extends StatelessWidget {
   final SapListPalette palette;
   final double width;
   final SapIconAtlas? icons;
-  final VoidCallback? onTap;
+
+  /// A tap / the second tap of a double-tap at buffer column (the cell
+  /// under the finger).
+  final ValueChanged<int>? onTapAt;
+  final ValueChanged<int>? onDoubleTapAt;
+
+  /// The list cursor's column on this line, null when it is elsewhere.
+  final int? cursorCol;
+  final Color? cursorColor;
   final void Function(ListSegment cell, bool on)? onCheck;
 
   /// The checkbox's current value (a staged tick over the painted one).
@@ -187,10 +216,29 @@ class SapListLineView extends StatelessWidget {
     final l = line;
     final cw = metrics.cw, lh = metrics.lh;
     if (l == null) return SizedBox(width: width, height: lh);
+    final boxes = <Widget>[]; // the checkboxes: above the line's taps
     final children = <Widget>[
       Positioned.fill(
         child: CustomPaint(painter: _ListLinePainter(l, cw, lh, palette)),
       ),
+      if (cursorCol != null)
+        Positioned(
+          key: const ValueKey('sap-list-cursor'),
+          left: cursorCol! * cw,
+          top: 1,
+          width: cw,
+          height: lh - 2,
+          child: IgnorePointer(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                border: Border.all(
+                  color: cursorColor ?? palette.text,
+                  width: 1.5,
+                ),
+              ),
+            ),
+          ),
+        ),
       Positioned(
         left: 0,
         top: 0,
@@ -236,7 +284,7 @@ class SapListLineView extends StatelessWidget {
         final on = checkedOf?.call(s) ?? s.checked;
         final enabled = s.input && onCheck != null;
         final box = math.min(lh, cw * 2.4);
-        children.add(Positioned(
+        boxes.add(Positioned(
           left: s.col * cw + cw / 2 - box / 2,
           top: (lh - box) / 2,
           width: box,
@@ -252,12 +300,41 @@ class SapListLineView extends StatelessWidget {
         ));
       }
     }
+    if (onTapAt == null && onDoubleTapAt == null) {
+      return SizedBox(
+        width: width,
+        height: lh,
+        child: Stack(
+          clipBehavior: Clip.hardEdge,
+          children: [...children, ...boxes],
+        ),
+      );
+    }
+    // the cell under the finger; a SERIAL tap recognizer reports the tap
+    // count (a double-tap recognizer would hold every tap for the
+    // double-tap timeout). The checkboxes lie above it, outside it: a tap
+    // on one is the checkbox's alone
+    final taps = RawGestureDetector(
+      behavior: HitTestBehavior.opaque,
+      gestures: {
+        SerialTapGestureRecognizer:
+            GestureRecognizerFactoryWithHandlers<SerialTapGestureRecognizer>(
+          SerialTapGestureRecognizer.new,
+          (r) => r.onSerialTapUp = (d) {
+            final col = math.max(0, (d.localPosition.dx / cw).floor());
+            final f = d.count >= 2 ? onDoubleTapAt ?? onTapAt : onTapAt;
+            f?.call(col);
+          },
+        ),
+      },
+      child: Stack(clipBehavior: Clip.hardEdge, children: children),
+    );
     return SizedBox(
       width: width,
       height: lh,
-      child: InkWell(
-        onTap: onTap,
-        child: Stack(clipBehavior: Clip.hardEdge, children: children),
+      child: Stack(
+        clipBehavior: Clip.hardEdge,
+        children: [Positioned.fill(child: taps), ...boxes],
       ),
     );
   }
@@ -267,11 +344,7 @@ class SapListLineView extends StatelessWidget {
   List<InlineSpan> _spans(ListLine l) {
     final out = <InlineSpan>[];
     var at = 0;
-    final segs = [...l.segments]..sort((a, b) => a.col.compareTo(b.col));
-    final plain = <ListSegment>[
-      for (final s in segs)
-        if (!s.frame && s.icon == null && !s.checkbox) s,
-    ];
+    final plain = _plainOf(l);
     // trailing blanks are not text (the plain text a reader sees)
     var last = plain.length - 1;
     while (last >= 0 && plain[last].text.trim().isEmpty) {
@@ -298,6 +371,23 @@ class SapListLineView extends StatelessWidget {
   }
 }
 
+/// The text runs of [l] in column order (no frame, icon or checkbox cell),
+/// sorted once per line: a cursor move or a busy flip rebuilds the line,
+/// not its runs. The segment count guards a line mutated in place.
+final Expando<(int, List<ListSegment>)> _plainRuns = Expando('list runs');
+
+List<ListSegment> _plainOf(ListLine l) {
+  final memo = _plainRuns[l];
+  if (memo != null && memo.$1 == l.segments.length) return memo.$2;
+  final segs = [...l.segments]..sort((a, b) => a.col.compareTo(b.col));
+  final plain = <ListSegment>[
+    for (final s in segs)
+      if (!s.frame && s.icon == null && !s.checkbox) s,
+  ];
+  _plainRuns[l] = (l.segments.length, plain);
+  return plain;
+}
+
 /// The bands, input cells and box lines of one list line.
 class _ListLinePainter extends CustomPainter {
   _ListLinePainter(this.line, this.cw, this.lh, this.palette);
@@ -321,9 +411,19 @@ class _ListLinePainter extends CustomPainter {
   };
   static const _u = 1, _d = 2, _l = 4, _r = 8;
 
+  /// The painter's brushes, one set for every line (a paint per line per
+  /// frame allocated three).
+  static final Paint _fill = Paint();
+  static final Paint _border = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 1;
+  static final Paint _pen = Paint()
+    ..strokeWidth = 1
+    ..style = PaintingStyle.stroke;
+
   @override
   void paint(Canvas canvas, Size size) {
-    final fill = Paint();
+    final fill = _fill;
     for (final s in line.segments) {
       final band = palette.band(s);
       final rect = Rect.fromLTWH(s.col * cw, 0, s.width * cw, lh);
@@ -335,19 +435,10 @@ class _ListLinePainter extends CustomPainter {
         final r = rect.deflate(1);
         // a coloured input keeps its band (SHOWCOLO's INPUT columns)
         if (band == null) canvas.drawRect(r, fill..color = palette.input);
-        canvas.drawRect(
-          r,
-          Paint()
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = 1
-            ..color = palette.inputBorder,
-        );
+        canvas.drawRect(r, _border..color = palette.inputBorder);
       }
     }
-    final pen = Paint()
-      ..color = palette.frame
-      ..strokeWidth = 1
-      ..style = PaintingStyle.stroke;
+    final pen = _pen..color = palette.frame;
     final y = (lh / 2).floorToDouble() + 0.5;
     // the horizontal arms of a rule join into ONE stroke per run (cell by
     // cell, a fractional cell width paints a dotted rule)

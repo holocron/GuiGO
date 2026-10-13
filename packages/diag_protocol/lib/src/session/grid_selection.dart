@@ -231,13 +231,7 @@ int gridRowIdNumeric(SapGridModel g, int line) =>
     return '${i < g.columnIds.length ? g.columnIds[i] : i + 1}';
   }
 
-  String cellText(int line, String name) {
-    final i = g.columns.indexOf(name);
-    if (i < 0) return '';
-    final r = g.rowAt(line);
-    if (r == null) return '';
-    return i < r.length ? r[i] : '';
-  }
+  String cellText(int line, String name) => g.currentCellText(line, name);
 
   final tables = <GridDataChange>[
     if (hc != null)

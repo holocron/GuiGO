@@ -110,6 +110,36 @@ DecompressedFrame? decompressFrame(Uint8List frame) {
   return _decoded[frame] ??= _decompress(frame);
 }
 
+/// Whether [frame] already has its decode in the [decompressFrame] memo.
+bool isFrameDecoded(Uint8List frame) => _decoded[frame] != null;
+
+/// Seed the [decompressFrame] memo of [frame] with a decode made elsewhere
+/// — the frame decode worker (decode_worker.dart) ran this file's own
+/// [decompressFrame] and [DecompressedFrame.walk] over a copy of [frame]
+/// in another isolate and shipped [body], [partial] and [walk] back. A
+/// frame already decoded keeps its decode (the first decode wins; readers
+/// may hold it): returns false then. The work is counted in [DecodeStats]
+/// as the decode and the walk it is.
+bool seedFrameDecode(
+    Uint8List frame, Uint8List body, String? partial, ItemWalk walk) {
+  if (frame.length < diagHeaderLen || _decoded[frame] != null) return false;
+  DecodeStats.frameDecodes++;
+  DecodeStats.frameWalks++;
+  _decoded[frame] =
+      _SeededFrame(DiagFrameHeader.parse(frame), body, partial, walk);
+  return true;
+}
+
+/// A decode the worker made: its walk arrives built (and frozen).
+class _SeededFrame extends DecompressedFrame {
+  _SeededFrame(super.header, super.body, super.partial, this._seeded);
+
+  final ItemWalk _seeded;
+
+  @override
+  ItemWalk get walk => _seeded;
+}
+
 DecompressedFrame _decompress(Uint8List frame) {
   DecodeStats.frameDecodes++;
   final h = DiagFrameHeader.parse(frame);
@@ -239,7 +269,12 @@ String? diagErrorInfo(Uint8List frame) {
     text = utf8.decode(raw, allowMalformed: true);
   }
   return text
-      .replaceAll(RegExp(r'[\x00-\x08\x0b-\x1f]'), ' ')
-      .replaceAll(RegExp(r'\s+'), ' ')
+      .replaceAll(_diagErrorInfoRx, ' ')
+      .replaceAll(_whitespaceRunRx, ' ')
       .trim();
 }
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _diagErrorInfoRx = RegExp(r'[\x00-\x08\x0b-\x1f]');
+final RegExp _whitespaceRunRx = RegExp(r'\s+');

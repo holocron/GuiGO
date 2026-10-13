@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show Uint8List;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
@@ -28,6 +29,11 @@ class HtmlRun {
     this.href,
     this.button,
     this.control = false,
+    this.image,
+    this.input,
+    this.inputId,
+    this.value = '',
+    this.size,
   });
   final String text;
   final bool bold, italic, mono;
@@ -35,11 +41,33 @@ class HtmlRun {
   final String? button;
   final bool control;
 
+  /// A button's image (`<button><img src="s_t_date.gif">`, an input of
+  /// type image): its src as the page spells it — the button is drawn as
+  /// that image (a pushed part of the document), its label the tooltip.
+  final String? image;
+
+  /// A text input: its field name (`A1F2I4`, what a submit posts), its DOM
+  /// id (`A1F2I4NAME:INPUT_BEGINDT`), its painted value and its `size`.
+  final String? input;
+  final String? inputId;
+  final String value;
+  final int? size;
+
   /// A tap does something: a link, or a form button.
   bool get tappable => href != null || button != null;
 
-  HtmlRun withText(String t) =>
-      HtmlRun(t, bold: bold, italic: italic, mono: mono, href: href, button: button, control: control);
+  HtmlRun withText(String t) => HtmlRun(t,
+      bold: bold,
+      italic: italic,
+      mono: mono,
+      href: href,
+      button: button,
+      control: control,
+      image: image,
+      input: input,
+      inputId: inputId,
+      value: value,
+      size: size);
 }
 
 /// HTML's collapsible whitespace (not U+00A0, which Dart's \s includes).
@@ -145,8 +173,9 @@ List<HtmlBlock> htmlToBlocks(String html) {
   var anchorAt = -1; // the run index the open <a> started at
   String? anchorLabel; // its image's alt / title, else its own title
   String? formAction; // the open SAPEVENT form's action
-  // the open <button>: its id, its sapevent, its first run, its label
-  String? buttonId, buttonHref, buttonLabel;
+  // the open <button>: its id, its sapevent, its first run, its label,
+  // its image
+  String? buttonId, buttonHref, buttonLabel, buttonImage;
   var buttonAt = -1;
   // the open <select>: its options (text, selected)
   List<(String, bool)>? options;
@@ -181,9 +210,19 @@ List<HtmlBlock> htmlToBlocks(String html) {
     if (runsText().trim().isNotEmpty && !runs.last.text.endsWith(' ')) runs.add(HtmlRun(' '));
   }
 
-  void control(String label, {String? button, String? link}) {
+  void control(String label,
+      {String? button, String? link, String? image, String? input, String? inputId, String value = '', int? size}) {
     gap();
-    runs.add(HtmlRun(label, bold: bold > 0, href: link, button: button, control: true));
+    runs.add(HtmlRun(label,
+        bold: bold > 0,
+        href: link,
+        button: button,
+        control: true,
+        image: image,
+        input: input,
+        inputId: inputId,
+        value: value,
+        size: size));
     runs.add(HtmlRun(' '));
   }
 
@@ -288,6 +327,7 @@ List<HtmlBlock> htmlToBlocks(String html) {
         final label = _nonEmpty(a['alt']) ?? _nonEmpty(a['title']);
         if (buttonAt >= 0) {
           buttonLabel ??= label;
+          buttonImage ??= _nonEmpty(a['src']);
         } else if (href != null && label != null) {
           anchorLabel = label;
         }
@@ -299,10 +339,11 @@ List<HtmlBlock> htmlToBlocks(String html) {
         if (closing) {
           if (buttonAt >= 0 && runsText(buttonAt).trim().isEmpty) {
             final id = buttonId;
-            control(buttonLabel ?? (id == null ? 'Button' : _controlName(id)), button: id, link: buttonHref);
+            control(buttonLabel ?? (id == null ? 'Button' : _controlName(id)),
+                button: id, link: buttonHref, image: buttonImage);
           }
           buttonAt = -1;
-          buttonId = buttonHref = buttonLabel = null;
+          buttonId = buttonHref = buttonLabel = buttonImage = null;
         } else {
           final a = _attrs(raw);
           buttonId = _nonEmpty(a['id']);
@@ -324,7 +365,10 @@ List<HtmlBlock> htmlToBlocks(String html) {
                 _nonEmpty(a['title']) ??
                 _nonEmpty(a['name']) ??
                 (id == null ? type : _controlName(id));
-            control(label, button: id, link: _sapeventIn(a['onclick']) ?? (id == null ? null : formAction));
+            control(label,
+                button: id,
+                link: _sapeventIn(a['onclick']) ?? (id == null ? null : formAction),
+                image: type == 'image' ? _nonEmpty(a['src']) : null);
           case 'checkbox':
             control(a.containsKey('checked') ? '☑' : '☐');
           case 'radio':
@@ -332,7 +376,12 @@ List<HtmlBlock> htmlToBlocks(String html) {
           case 'password':
             control('[${'•' * (a['value'] ?? '').length}]');
           default:
-            control('[${a['value'] ?? ''}]');
+            // a text input: editable, its field name posted by a submit
+            control('[${a['value'] ?? ''}]',
+                input: _nonEmpty(a['name']),
+                inputId: id,
+                value: a['value'] ?? '',
+                size: int.tryParse(a['size'] ?? ''));
         }
       case 'select':
         if (closing) {
@@ -376,15 +425,58 @@ List<HtmlBlock> htmlToBlocks(String html) {
 /// An HTML viewer control's document as readable text: headings, paragraphs,
 /// list items, table rows, form controls; a link tap is reported through
 /// [onLink] (SAP's `sapevent:` links go back to the server as the viewer's
-/// event), a form button's through [onFormButton] with its id (the form's
-/// SAPEVENT submit), else — no [onFormButton] — through [onLink] with its
-/// form's action. A page without readable text shows its source.
+/// event), a form button's through [onFormSubmit] with its id and the
+/// values typed into the page's inputs (else [onFormButton] with the id
+/// alone; else — neither — [onLink] with its form's action). A text input
+/// is editable: what is typed rides the next submit's POST body, Enter in
+/// it is the page's InputKeyDown submit ([onFormEnter], `sapin_cl` = the
+/// input + `sapENTER`). A button with an image (`s_t_date.gif`, the
+/// dynamic document's icons) is drawn as that image from [parts] (the
+/// files pushed beside the document, resolved against [baseUrl]), its
+/// label the tooltip. A page without readable text shows its source.
 class SapHtmlView extends StatefulWidget {
-  const SapHtmlView({super.key, required this.html, this.onLink, this.onFormButton});
+  const SapHtmlView({
+    super.key,
+    required this.html,
+    this.onLink,
+    this.onFormButton,
+    this.onFormSubmit,
+    this.onFormEnter,
+    this.parts = const {},
+    this.baseUrl = '',
+  });
 
   final String html;
   final void Function(String href)? onLink;
   final void Function(String buttonId)? onFormButton;
+
+  /// A form button: its id and the page's input values by field name.
+  final void Function(String buttonId, Map<String, String> values)? onFormSubmit;
+
+  /// Enter in a text input: its DOM id (else field name) and the values.
+  final void Function(String inputId, Map<String, String> values)? onFormEnter;
+
+  /// The document's pushed files by url, and the document's own url (the
+  /// relative image srcs resolve against its directory).
+  final Map<String, Uint8List> parts;
+  final String baseUrl;
+
+  /// The pushed file [src] names, null when none was pushed: by its url
+  /// (absolute), its url under [baseUrl]'s directory, else any pushed file
+  /// of that name.
+  static Uint8List? partFor(String src, String baseUrl, Map<String, Uint8List> parts) {
+    if (parts.isEmpty || src.isEmpty) return null;
+    final direct = parts[src];
+    if (direct != null) return direct;
+    final dir = baseUrl.contains('/') ? baseUrl.substring(0, baseUrl.lastIndexOf('/') + 1) : '';
+    final rel = parts['$dir$src'];
+    if (rel != null) return rel;
+    final name = src.split('/').last.toLowerCase();
+    for (final e in parts.entries) {
+      if (e.key.toLowerCase().endsWith('/$name')) return e.value;
+    }
+    return null;
+  }
 
   @override
   State<SapHtmlView> createState() => _SapHtmlViewState();
@@ -401,9 +493,14 @@ class _SapHtmlViewState extends State<SapHtmlView> {
   /// the CURRENT callbacks, so a recognizer outlives a busy toggle.
   final Map<HtmlRun, TapGestureRecognizer> _taps = {};
 
+  /// The text inputs of the current document by field name: what the user
+  /// typed (a new page from the server starts them over at its values).
+  final Map<String, TextEditingController> _inputs = {};
+
   List<HtmlBlock> _blocksOf(String html) {
     if (!identical(html, _parsed) && html != _parsed) {
       _disposeTaps();
+      _disposeInputs();
       _parsed = html;
       _blocks = htmlToBlocks(html);
     }
@@ -417,30 +514,132 @@ class _SapHtmlViewState extends State<SapHtmlView> {
     _taps.clear();
   }
 
+  void _disposeInputs() {
+    for (final c in _inputs.values) {
+      c.dispose();
+    }
+    _inputs.clear();
+  }
+
   @override
   void dispose() {
     _disposeTaps();
+    _disposeInputs();
     super.dispose();
+  }
+
+  /// The values of the page's text inputs by field name, as typed.
+  Map<String, String> get _values => {
+        for (final e in _inputs.entries) e.key: e.value.text,
+      };
+
+  bool get _canSubmit => widget.onFormSubmit != null || widget.onFormButton != null;
+
+  void _submit(HtmlRun r) {
+    final b = r.button, h = r.href;
+    if (b != null && widget.onFormSubmit != null) {
+      widget.onFormSubmit!(b, _values);
+    } else if (b != null && widget.onFormButton != null) {
+      widget.onFormButton!(b);
+    } else if (h != null) {
+      widget.onLink?.call(h);
+    }
   }
 
   TapGestureRecognizer? _tapFor(HtmlRun r) {
     final button = r.button, href = r.href;
-    final form = button != null && widget.onFormButton != null;
+    final form = button != null && _canSubmit;
     if (!form && !(href != null && widget.onLink != null)) return null;
-    return _taps.putIfAbsent(
-      r,
-      () => TapGestureRecognizer()
-        ..onTap = () {
-          // a form button goes to onFormButton when one is set, a link to
-          // onLink — as the run reads at tap time
-          final b = r.button, h = r.href;
-          if (b != null && widget.onFormButton != null) {
-            widget.onFormButton!(b);
-          } else if (h != null) {
-            widget.onLink?.call(h);
-          }
-        },
+    // a form button goes to onFormSubmit / onFormButton when one is set,
+    // a link to onLink — as the run reads at tap time
+    return _taps.putIfAbsent(r, () => TapGestureRecognizer()..onTap = () => _submit(r));
+  }
+
+  /// An editable text input (its painted value to start with, `size`
+  /// characters wide).
+  Widget _inputBox(HtmlRun r, TextStyle style, ColorScheme scheme) {
+    final name = r.input!;
+    final c = _inputs.putIfAbsent(name, () => TextEditingController(text: r.value));
+    final fs = style.fontSize ?? 14;
+    final chars = (r.size ?? 10).clamp(2, 40);
+    final enter = widget.onFormEnter;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
+      child: SizedBox(
+        width: chars * fs * 0.62 + 14,
+        height: fs * 1.9,
+        child: TextField(
+          key: ValueKey('html-input-$name'),
+          controller: c,
+          style: style,
+          textAlignVertical: TextAlignVertical.center,
+          decoration: InputDecoration(
+            isDense: true,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+            border: const OutlineInputBorder(),
+            filled: true,
+            fillColor: scheme.surfaceContainerLowest,
+          ),
+          onSubmitted: enter == null ? null : (_) => enter(r.inputId ?? name, _values),
+        ),
+      ),
     );
+  }
+
+  /// A button drawn as its image (the pushed GIF, else an icon of its
+  /// kind), its label the tooltip.
+  Widget _imageButton(HtmlRun r, TextStyle style, ColorScheme scheme) {
+    final fs = style.fontSize ?? 14;
+    final src = r.image!;
+    final bytes = SapHtmlView.partFor(src, widget.baseUrl, widget.parts);
+    final side = (fs * 1.35).roundToDouble();
+    final fallback = Icon(_iconFor(src), size: side, color: scheme.primary);
+    final img = bytes == null
+        ? fallback
+        : Image.memory(
+            bytes,
+            width: side,
+            height: side,
+            fit: BoxFit.contain,
+            filterQuality: FilterQuality.none,
+            gaplessPlayback: true,
+            errorBuilder: (_, _, _) => fallback,
+          );
+    final label = r.text.trim();
+    final enabled = r.button != null ? _canSubmit : (r.href != null && widget.onLink != null);
+    return Tooltip(
+      message: label,
+      child: Semantics(
+        button: true,
+        label: label,
+        child: InkWell(
+          key: ValueKey('html-button-${r.button ?? r.href ?? label}'),
+          onTap: enabled ? () => _submit(r) : null,
+          borderRadius: BorderRadius.circular(3),
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 1, vertical: 1),
+            padding: const EdgeInsets.all(3),
+            decoration: BoxDecoration(
+              border: Border.all(color: scheme.outline),
+              borderRadius: BorderRadius.circular(3),
+              color: scheme.surfaceContainerHighest,
+            ),
+            child: img,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The icon standing in for a button image that was not pushed: the
+  /// SAP icon file names of the dynamic documents (`s_t_date` the
+  /// calendar, `s_t_time` the clock, `s_b_*` a plain push button).
+  static IconData _iconFor(String src) {
+    final n = src.toLowerCase();
+    if (n.contains('date') || n.contains('cale')) return Icons.calendar_month;
+    if (n.contains('time') || n.contains('clock')) return Icons.schedule;
+    if (n.contains('noac')) return Icons.check_box_outline_blank;
+    return Icons.crop_square;
   }
 
   @override
@@ -456,6 +655,12 @@ class _SapHtmlViewState extends State<SapHtmlView> {
         fontStyle: r.italic ? FontStyle.italic : null,
         fontFamily: r.mono ? 'Menlo' : null,
       );
+      if (r.control && r.input != null) {
+        return WidgetSpan(alignment: PlaceholderAlignment.middle, child: _inputBox(r, st, scheme));
+      }
+      if (r.control && r.image != null) {
+        return WidgetSpan(alignment: PlaceholderAlignment.middle, child: _imageButton(r, st, scheme));
+      }
       if (r.control) {
         st = st.copyWith(
           color: r.tappable ? scheme.onSecondaryContainer : scheme.onSurfaceVariant,
@@ -480,7 +685,7 @@ class _SapHtmlViewState extends State<SapHtmlView> {
             TextSpan(children: [
               if (b.kind == 'li') const TextSpan(text: '•  '),
               for (final r in b.runs)
-                if (!r.control || r.text.trim().isNotEmpty)
+                if (!r.control || r.text.trim().isNotEmpty || r.input != null)
                   span(
                     r,
                     b.kind == 'h'
@@ -496,7 +701,8 @@ class _SapHtmlViewState extends State<SapHtmlView> {
         );
 
     // the blocks built as they scroll into view (an F1 document runs to
-    // hundreds of blocks)
+    // hundreds of blocks); the input controllers live in the state, so a
+    // block scrolled away and back keeps what was typed
     return SelectionArea(
       child: ListView.builder(
         padding: const EdgeInsets.all(12),

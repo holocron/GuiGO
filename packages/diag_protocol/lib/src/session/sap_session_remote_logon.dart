@@ -71,7 +71,9 @@ extension SapSessionRemoteLogon on SapSession {
     _w.relayedWall = null;
     _trace('wall relayed from ${relayedSystem ?? '?'} answered by the user '
         '(${which.name}, step $step)');
-    return _act(windowsWallItems(step, wall, row), dialectReady: true);
+    return _act(
+        windowsWallItems(step, wall, row, windowRect: windowsWindowRect(ctx)),
+        dialectReady: true);
   }
 
   /// Keep a multi-logon wall the RELAYED frames among [frames] paint for

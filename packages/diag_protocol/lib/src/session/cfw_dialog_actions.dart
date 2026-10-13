@@ -141,7 +141,7 @@ List<Uint8List> _tail(ActionContext ctx) => [
   buildApplItem(
     12,
     ctx.modalNo != 0 ? 14 : 8,
-    _u32s([ctx.winPxHeight, ctx.winPxWidth, ctx.winPxHeight, ctx.winPxWidth]),
+    ctx.windowAreaPx(ctx.winPxHeight, ctx.winPxWidth),
   ),
   buildApplItem(
     12,
@@ -267,7 +267,11 @@ List<Uint8List> htmlLinkItems(
 /// form): the Windows OCX's DoSAPEVENT(FrameName, PostDataLen, ppURL1) —
 /// PID0 [frame] (the frame the form's page is shown in, absent when '' as
 /// a link's), PID1 the POST body's byte length [postLength], PID2 [url]
-/// (the action, scheme lower-cased: [SapHtmlForm.windowsUrl]), no PID3..9;
+/// (the action, scheme lower-cased: [SapHtmlForm.windowsUrl] — IE; the
+/// Edge control: no frame, the action verbatim, [SapHtmlForm.submitUrl] /
+/// [SapHtmlForm.submitFrame], a recorded session raw
+/// gui[30] `<PARAM PID ="1" VALUE ="65"/> <PARAM PID ="2" VALUE
+/// ="SAPEVENT:A1F1"/>`), no PID3..9;
 /// the source 16/15/1 at the viewer's custom-control area, the focus IN
 /// the viewer (16/9/18). Real SAP GUI for Windows, a recorded session
 /// raw gui[27]: `<PARAM PID ="0" VALUE ="Frame0"/> <PARAM PID ="1"

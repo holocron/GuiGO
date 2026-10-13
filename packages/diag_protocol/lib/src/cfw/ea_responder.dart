@@ -12,6 +12,8 @@ import '../framing/envelope.dart';
 import '../lzh/lzh.dart';
 import '../screen/sap_calendar.dart'
     show calendarHeldInterval, calendarIntervalAnswer;
+import '../session/gui_profile.dart' show metricsElement;
+import 'browser_launch.dart' show shellExecuteAnswer, shellExecuteVerbs;
 import 'datamanager_grammar.dart';
 import 'dp_cache.dart';
 import 'dragdrop_service.dart';
@@ -249,9 +251,19 @@ class AutomationStream {
 /// One server frame's automation decisions (login_gui_features.fold_frame +
 /// frame_is_call_chunk ports).
 class AutomationFrame {
-  AutomationFrame(this.receiptSteps, this.calls, [this.frontendCalls = const []]);
+  AutomationFrame(this.receiptSteps, this.calls,
+      [this.frontendCalls = const [], this.joinedCalls = const {}]);
   final List<int> receiptSteps; // ≤1 entry: the chunk frame's own step
   final List<(Uint8List, int)> calls; // (completed RFC stream, closing step)
+
+  /// The indices into [calls] of the calls JOINED across frames (a sid-4
+  /// head, its raw continuations and the sid-0 companion that closed
+  /// them) — the shape of a DataProvider push the frontend PULLED, e.g.
+  /// the ABAP editor's LEXER_DATA after the creation answer's `<BLOBS>`
+  /// request (a recorded session srv[35..46]), which
+  /// parses to no verbs yet is owed the empty execution ack
+  /// ([buildExecutionAck]).
+  final Set<int> joinedCalls;
 
   /// The front-end RFC requests the frame carried (frontend_rfc.dart):
   /// (request, the frame's step, the item's sid) — a sid-0/1 one owes a
@@ -259,33 +271,16 @@ class AutomationFrame {
   final List<(Uint8List, int, int)> frontendCalls;
 }
 
-bool _containsBytes(Uint8List haystack, String needle) {
-  final n = needle.codeUnits;
-  final first = n[0];
-  for (var i = 0; i + n.length <= haystack.length; i++) {
-    if (haystack[i] != first) continue;
-    var ok = true;
-    for (var j = 1; j < n.length; j++) {
-      if (haystack[i + j] != n[j]) {
-        ok = false;
-        break;
-      }
-    }
-    if (ok) return true;
-  }
-  return false;
-}
-
 bool _hasParamsColumn(Uint8List value) {
   try {
-    return rfcColumns(value).containsKey('PARAMS');
+    return rfcColumns(value, only: const {'PARAMS'}).containsKey('PARAMS');
   } catch (_) {
     return false; // mid-stream fragments parse no columns — same as the engine
   }
 }
 
 /// The PARAMS column descriptor of an RFC_TR table (`03 01 <u16 6> PARAMS
-/// 03 01`), as text for [_containsBytes].
+/// 03 01`), as text for [containsBytes].
 final String _paramsDescriptor = String.fromCharCodes(
     [0x03, 0x01, 0x00, 0x06, ...'PARAMS'.codeUnits, 0x03, 0x01]);
 
@@ -303,7 +298,7 @@ final String _paramsDescriptor = String.fromCharCodes(
 /// live the test system launch stalled. Every sid-4 OLE head in the corpora (627) opens
 /// with the RFC_TR header and carries the descriptor; 28 decode no PARAMS.
 bool _declaresParams(Uint8List v) =>
-    isRfcHead(v) && _containsBytes(v, _paramsDescriptor);
+    isRfcHead(v) && containsBytes(v, _paramsDescriptor);
 
 /// Fold ONE server frame's automation items — the chunked-call reduction the
 /// 740 logon queue needs, per frame:
@@ -336,6 +331,7 @@ AutomationFrame foldAutomationFrame(
   final receipts = <int>[];
   final calls = <(Uint8List, int)>[];
   final frontend = <(Uint8List, int, int)>[];
+  final joined = <int>{};
   final dec = decompressFrame(frame);
   if (dec != null) {
     var chunkFrame = false;
@@ -346,19 +342,25 @@ AutomationFrame foldAutomationFrame(
             .getUint32(0);
       }
       if (!it.isAppl || it.id != 8 || it.value.isEmpty) continue;
-      final v = Uint8List.fromList(it.value);
+      // the item's own view, not a copy: the decode is memoized on the frame
+      // (immutable once walked), the stream builder copies when it joins,
+      // and the frame's OLE item parse ([_itemCall], keyed on this object)
+      // is the parse the answer reuses ([flushCallOf]; audit #2)
+      final v = it.value;
       // a stream-form PAINT: its sid-4 head and raw sid-4 continuations are
       // receipted like call chunks, its sid-6 tail is not (stream_paint.dart;
       // unreceipted, the server never sends the next chunk — the live the test system
       // ME21N launch stalled at the SAPLMEGUI/0014 head)
-      final ole = _containsBytes(v, 'OLE_FLUSH_CALL');
+      final ole = containsBytes(v, 'OLE_FLUSH_CALL');
       if (!ole && stream.paint.feed(it.sid, v) != PaintPart.none) {
         if (it.sid == 4) chunkFrame = true;
         continue;
       }
-      final hasParams = ole ? _hasParamsColumn(v) : false;
       if (it.sid == 4) {
-        if (ole && (hasParams || _declaresParams(v))) {
+        // the cheap byte scan first: every sid-4 OLE head of the corpora
+        // declares PARAMS, and the column decode inflated EVERY `03 05`
+        // cell of the value (a multi-MB VARS) for a yes it already gave
+        if (ole && (_declaresParams(v) || _hasParamsColumn(v))) {
           stream._start(v); // head chunk of a multi-frame call
           chunkFrame = true;
         } else if (stream.hasPending) {
@@ -377,8 +379,9 @@ AutomationFrame foldAutomationFrame(
           // (a recorded session srv step 19)
           calls.add((v, frameStep));
           stream._pending = null;
-        } else if (stream.hasPending && !hasParams) {
+        } else if (stream.hasPending) {
           // the companion completes the chunked call
+          joined.add(calls.length);
           calls.add((stream._close(v), frameStep));
         } else if (isFrontendCall(v, it.sid)) {
           frontend.add((v, frameStep, it.sid));
@@ -389,7 +392,53 @@ AutomationFrame foldAutomationFrame(
     }
     if (chunkFrame) receipts.add(frameStep);
   }
-  return AutomationFrame(receipts, calls, frontend);
+  return AutomationFrame(receipts, calls, frontend, joined);
+}
+
+/// The EMPTY execution ack of a flush the frontend executes without a
+/// verb to answer: a call JOINED across frames ([AutomationFrame.joinedCalls])
+/// that parses to no verbs and no result slots — the DataProvider push of
+/// data the frontend pulled (the ABAP editor's LEXER_DATA, requested by the
+/// creation answer's `<BLOBS>`), closed by the sid-0 XML_DATA_STREAM
+/// companion. The real SAP GUI for Windows answers it with the call's
+/// PARAMS / VARS / XML_DATA_STREAM columns echoed EMPTY (their `03 02`
+/// dims, no rows) at the closing frame's step: a recorded session
+/// subnode_dblclick gui[38] (step 57) after srv[35..46], then the server
+/// paints the editor screen (srv[47] SAPLS38E/0500); unanswered, the server
+/// keeps its turn open and the source never shows (the reference client's ea_core
+/// queued-batch rule, a recorded session G39). The `06 67` frontend
+/// statistics trailer of the real answer is live telemetry and is left
+/// out, as the reference client leaves it out. Null when [call] is no such call.
+List<Uint8List>? buildExecutionAck(EaSession session, FlushCall call) {
+  if (call.verbs.isNotEmpty) return null;
+  if (call.vars.any(
+      (v) => v.name == '_RESULT' || v.name == '_RESULT_QUEUEONLY')) {
+    return null;
+  }
+  if (!containsBytes(call.raw, 'XML_DATA_STREAM')) return null;
+  final cols = parseCallColumns(call.raw);
+  final out = BytesBuilder(copy: false)
+    ..add(constPrefix)
+    ..add(rfcToken(0x02, 0x01, codepad('EXCEPT_DESCRIPT')))
+    ..add(rfcToken(0x02, 0x03, Uint8List(256)));
+  final seen = <String>{};
+  for (final name in const ['PARAMS', 'VARS', 'XML_DATA_STREAM']) {
+    for (final c in cols) {
+      if (c.name != name || !seen.add(name)) continue;
+      // the column's width, no rows
+      final dims = Uint8List(8);
+      final d = c.desc;
+      if (d != null && d.length >= 4) dims.setRange(0, 4, d);
+      out
+        ..add(rfcToken(0x03, 0x01, codepad(name)))
+        ..add(rfcToken(0x03, 0x02, dims));
+    }
+  }
+  out.add(Uint8List.fromList(rfcTerm));
+  final reply = out.takeBytes();
+  // 16/8/1 RFC reply + EOM (buildApplItem: a reply past the u16 length
+  // throws instead of wrapping)
+  return [_stepItem(session.step), buildApplItem(8, 1, reply), eomBytes];
 }
 
 /// The mint loop (ea_core._mint_object_handles port): for every type-9
@@ -410,7 +459,7 @@ String _clsOfVerb(FlushCall call, int oid) {
   final args = verbArgs(call, oid);
   for (final na in args) {
     final v = na.$2;
-    if (v.isNotEmpty && v.contains(RegExp(r'[A-Za-z]'))) return v;
+    if (v.isNotEmpty && v.contains(_letterRx)) return v;
   }
   return '';
 }
@@ -495,7 +544,7 @@ MintResult mintObjectHandles(
   return MintResult(handles, mintTrace, controlMints, objectMints, hb);
 }
 
-bool _isDigits(String? s) => s != null && RegExp(r'^\d+$').hasMatch(s);
+bool _isDigits(String? s) => s != null && _digitsOnlyRx.hasMatch(s);
 
 /// A FreeObject's #1 releases the handle its VARS row carries: the one
 /// this queue minted into that row so far, else the concrete handle the
@@ -556,9 +605,8 @@ Uint8List controlXml(
     b.write('</CONTROL>');
   }
   b.write('</CONTROLS>');
-  b.write('<COPY id="copy"><GUI id="gui"><METRICS id="metrics" '
-      'X3="${session.screenCols * 8}" X2="8" X1="8" X0="283" '
-      'Y3="${session.screenRows * 29}" Y2="29" Y1="17" Y0="283"/>'
+  b.write('<COPY id="copy"><GUI id="gui">'
+      '${metricsElement(session.screenRows, session.screenCols)}'
       '</GUI></COPY></DATAMANAGER>\u0000');
   return wireText(b.toString());
 }
@@ -578,6 +626,14 @@ List<(String, List<(String, String)>)> registeredControlValues(
   final order = <String>[];
   final byShell = <String, List<(String, String)>>{};
   for (final (shell, prop) in cachedProps ?? call.cachedProps) {
+    // a pair that names no cached prop of a shell — a blank / padded name,
+    // a non-numeric shell, one already listed — is none the real GUI
+    // echoes: CL_GUI_DATAMANAGER dumps CNDP 008 "balise act.: PROPERTY"
+    // on it (datamanager_grammar.dart), in release builds too
+    if (!_soundCachedProp(shell, prop) ||
+        (byShell[shell]?.any((p) => p.$1 == prop) ?? false)) {
+      continue;
+    }
     final echoed = call.setProps[(shell, prop)];
     byShell.putIfAbsent(shell, () {
       order.add(shell);
@@ -586,6 +642,12 @@ List<(String, List<(String, String)>)> registeredControlValues(
   }
   return [for (final sh in order) (sh, byShell[sh]!)];
 }
+
+bool _soundCachedProp(String shell, String prop) =>
+    _digitsOnlyRx.hasMatch(shell) &&
+    prop.isNotEmpty &&
+    prop.trim() == prop &&
+    !prop.contains(' ');
 
 /// The answer value of a registered cached prop with no captured state:
 /// numeric propIds (metrics 120/300, grid row/col ids) and numeric/boolean
@@ -713,7 +775,7 @@ List<Uint8List>? buildAnswer(
   if (svarsXml == null) {
     final hasFeatures = call.verbs.contains('GetGuiFeatures') ||
         call.verbs.contains('getGuiFeatures') ||
-        String.fromCharCodes(call.raw).contains('GetGuiFeatures');
+        containsBytes(call.raw, 'GetGuiFeatures');
     if (hasFeatures) {
       // each dialect declares its own GUI's feature document (the Windows
       // one carries sapinfocntl/platformex — ea_frontend_features)
@@ -785,10 +847,16 @@ List<Uint8List>? buildAnswer(
           for (final a in verbArgs(call, oidByVarsrow[vr]!)) a.$1: a.$2,
         };
         value = publishUrlAnswer(session, (args['#1'] ?? '').trim(), t);
+      } else if (shellExecuteVerbs.contains(vb) && oidByVarsrow[vr] != null) {
+        // CL_GUI_FRONTEND_SERVICES=>EXECUTE: '42' (HINSTANCE > 32) when the
+        // document is a web url handed to the browser — the real Windows
+        // GUI's answer (a recorded session gui[91]); '0' (the ABAP's
+        // "cannot start" failure) for a local file this device never held
+        value = shellExecuteAnswer(call, oidByVarsrow[vr]!);
       } else if (vb == 'GetPlatformEx' && call.dialect == GuiDialect.windows) {
         // SAPfront.dll's GET_PLATFORM enum: the real Windows GUI answers 14
         // (a recorded session gui[21], a recorded session)
-        value = '14';
+        value = windowsPlatformExAnswer;
       } else {
         value = _scalarDefault(t, vb, session,
             owner: ownerByVarsrow[vr], dialect: call.dialect);
@@ -897,14 +965,22 @@ List<Uint8List>? buildAnswer(
   // call (the drive sets it; the offline default stays 20) — the server
   // owns the counter, and a divergent stamp makes SAPLOLEA raise
   // SYSTEM_FAILURE at the logon flush (the engine's step-ladder guard)
-  return [
-    _stepItem(session.step),
-    Uint8List.fromList([0x10, 0x08, 0x01, (reply.length >> 8) & 0xff, reply.length & 0xff, ...reply]),
-    Uint8List.fromList([0x0c]),
-  ];
+  // 16/8/1 RFC reply + EOM (buildApplItem: a reply past the u16 length
+  // throws instead of wrapping)
+  return [_stepItem(session.step), buildApplItem(8, 1, reply), eomBytes];
 }
 
 const int varsW_ = varsW;
+
+/// The `GetPlatformEx` answer of the Windows dialect: SAPfront.dll's
+/// GET_PLATFORM enum value the real SAP GUI for Windows answers
+/// (a recorded session gui[21], a recorded session).
+const String windowsPlatformExAnswer = '14';
+
+/// The `GetColumnWidth` answer when no laid-out width is known: the
+/// engine's ground-truthed default (ea_core; the Easy Access launch flush,
+/// a recorded session srv step 19).
+const String getColumnWidthAnswer = '31';
 
 List<Uint8List> _rowsOf(Uint8List b, int w) {
   return [
@@ -919,7 +995,7 @@ List<Uint8List> _rowsOf(Uint8List b, int w) {
 /// rows stay blank unless a strategy exists. GetContainer keys a container
 /// id by the OWNER object (first-seen 2k+1, '1' for the first — the login
 /// oracle's single container). KNOWN Windows-GUI dialect divergence (the
-/// real Windows GUI — a recorded session, the test host — stamps
+/// real Windows GUI — a recorded session — stamps
 /// SetGrid/AddControl i2 with '-100', GetContainer i4 with its HWND and
 /// a warm PublishUrl bstr 'X'; our Java-oracle shapes 20/'0' were accepted by
 /// prd's kernel and stay until a live Windows-only system says otherwise).
@@ -927,7 +1003,7 @@ String _scalarDefault(int t, String? verb, EaSession session,
     {String? owner, GuiDialect? dialect}) {
   switch (verb) {
     case 'GetColumnWidth':
-      return '31';
+      return getColumnWidthAnswer;
     case 'GetGuiFeatures':
       return '1'; // the SVARS XML item index (the row renames to _SRESULT)
     case 'URLPrefixLocal':
@@ -1003,19 +1079,39 @@ void _capOldest(Map<Object?, Object?> m, int max) {
 /// skip it — a throw here escaped the receive fold and killed the session;
 /// the automation pass counts the call's failure ([SapSession]).
 final Expando<Object> _itemCalls = Expando('frame OLE item call');
-final Object _unparseableItem = Object();
+
+/// An item value whose parse failed, with the failure ([flushCallOf]
+/// rethrows it).
+final class _UnparseableItem {
+  const _UnparseableItem(this.error);
+  final Object error;
+}
 
 FlushCall? _itemCall(Uint8List value) {
   final memo = _itemCalls[value];
-  if (memo != null) return identical(memo, _unparseableItem) ? null : memo as FlushCall;
+  if (memo != null) return memo is FlushCall ? memo : null;
   try {
     final call = parseFlushCall(value);
     _itemCalls[value] = call;
     return call;
-  } catch (_) {
-    _itemCalls[value] = _unparseableItem;
+  } catch (e) {
+    _itemCalls[value] = _UnparseableItem(e);
     return null;
   }
+}
+
+/// The answer's parse of the completed call [value] with [dialect]:
+/// `parseFlushCall(value, dialect: dialect)`, sharing the decode the frame's
+/// readers already made of the same item object ([_itemCall] — a
+/// self-contained call is the item's own value, [foldAutomationFrame]) via
+/// [FlushCall.withDialect]; an item they found unparseable throws its parse
+/// failure again. A value no reader parsed (a call joined across frames) is
+/// parsed here.
+FlushCall flushCallOf(Uint8List value, {GuiDialect? dialect}) {
+  final memo = _itemCalls[value];
+  if (memo is FlushCall) return memo.withDialect(dialect);
+  if (memo is _UnparseableItem) throw memo.error;
+  return parseFlushCall(value, dialect: dialect);
 }
 
 /// Record control facts from a frame's flushes (record_control_facts port,
@@ -1025,7 +1121,7 @@ void recordControlFactsFromFrame(EaSession session, Uint8List frame) {
   if (dec == null) return;
   for (final it in dec.walk.items) {
     if (!it.isAppl || it.id != 8) continue;
-    if (!_containsBytes(it.value, 'OLE_FLUSH_CALL')) continue;
+    if (!containsBytes(it.value, 'OLE_FLUSH_CALL')) continue;
     final call = _itemCall(it.value);
     if (call == null) continue;
     final meta = verbMeta(call);
@@ -1040,7 +1136,7 @@ void recordControlFactsFromFrame(EaSession session, Uint8List frame) {
         final args = verbArgs(call, d + 1);
         own = args.isNotEmpty ? args.first.$2.trim() : null;
       }
-      if (own != null && RegExp(r'^\d+$').hasMatch(own)) {
+      if (own != null && _digitsOnlyRx.hasMatch(own)) {
         session.destroyedControls.add(own);
         final a = session.shellAlias[own];
         if (a != null) session.destroyedControls.add(a);
@@ -1085,7 +1181,7 @@ Set<String> shellsTornDownIn(Iterable<Uint8List> frames) {
     if (dec == null) continue;
     for (final it in dec.walk.items) {
       if (!it.isAppl || it.id != 8) continue;
-      if (!_containsBytes(it.value, 'OLE_FLUSH_CALL')) continue;
+      if (!containsBytes(it.value, 'OLE_FLUSH_CALL')) continue;
       final call = _itemCall(it.value);
       if (call == null) continue;
       final meta = verbMeta(call);
@@ -1111,3 +1207,8 @@ Set<String> shellsTornDownIn(Iterable<Uint8List> frames) {
 // imports used indirectly
 // ignore: unused_element
 final _unusedImport = 0;
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _letterRx = RegExp(r'[A-Za-z]');
+final RegExp _digitsOnlyRx = RegExp(r'^\d+$');

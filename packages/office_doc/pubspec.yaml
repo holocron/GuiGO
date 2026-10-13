@@ -1,0 +1,15 @@
+name: office_doc
+description: Pure-Dart Office document readers and writers for GuiGo (RTF, .docx, .xlsx; OLE2 detection).
+publish_to: none
+version: 0.1.0
+environment:
+  sdk: ^3.13.0
+dependencies:
+  # MIT (Lukas Renggli) — the OOXML parts' XML
+  xml: ^6.6.1
+dev_dependencies:
+  test: ^1.25.0
+  # the recordings' DP pushes are decoded in place by the SO10 RTF test
+  diag_protocol:
+    path: ../diag_protocol
+resolution: workspace

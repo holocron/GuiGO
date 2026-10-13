@@ -7,13 +7,8 @@ class StagedField {
   final String text;
 
   /// A secret's value never reaches a trace: an invisible (password) input,
-  /// or a logon screen's BCODE / password field by name.
-  bool get secret =>
-      field.invisible ||
-      RegExp(
-        r'BCODE|PASSW|PWD',
-        caseSensitive: false,
-      ).hasMatch(field.name ?? '');
+  /// or a logon screen's BCODE / password field by name ([isSecretField]).
+  bool get secret => isSecretField(field);
 
   @override
   String toString() =>
@@ -34,8 +29,11 @@ class StagedListCell {
   /// (the whole buffer cell is rewritten).
   (int, int, String) get write => (line, col, text.padRight(width));
 
+  /// A typed value never reaches a trace or a log (a checkbox's one-char
+  /// tick is shown; any other value only by its length).
   @override
-  String toString() => 'StagedListCell($line,$col="$text")';
+  String toString() => 'StagedListCell($line,$col='
+      '${text.length <= 1 ? '"$text"' : '<${text.length} chars>'})';
 }
 
 /// Deferred field values and value help (reference client engine/deferred_fill +
@@ -62,16 +60,31 @@ extension SapSessionFields on SapSession {
   /// Type [text] into input [f] of the active window WITHOUT a round trip:
   /// the value rides the next action. Typing the same field again replaces
   /// its value and makes it the cursor field.
+  ///
+  /// [f] is matched by its place and name ([_sameField]), not its object
+  /// identity: a same-screen repaint (an auto-refresh, a server push)
+  /// replaces the field objects between the build that showed [f] and the
+  /// keystroke, and the value is staged on the field the screen holds NOW
+  /// (so its current protection decides).
   void stageField(ScreenField f, String text) {
     final m = screen;
-    if (m == null || !m.fields.contains(f)) {
+    ScreenField? cur;
+    if (m != null) {
+      for (final x in m.fields) {
+        if (_sameField(x, f)) {
+          cur = x;
+          break;
+        }
+      }
+    }
+    if (m == null || cur == null) {
       throw ArgumentError('${f.name} is not a field of the active window');
     }
-    if (f.kind != FieldKind.input || f.isProtected) {
+    if (cur.kind != FieldKind.input || cur.isProtected) {
       throw ArgumentError('${f.name} is not an input field');
     }
-    _staged.removeWhere((s) => _sameField(s.field, f));
-    _staged.add(StagedField(f, text));
+    _staged.removeWhere((s) => _sameField(s.field, cur!));
+    _staged.add(StagedField(cur, text));
     _stagedScreen = _screenIdentity(m);
   }
 
@@ -181,7 +194,9 @@ extension SapSessionFields on SapSession {
           'list cell ${line.line},${cell.col} is not an input cell');
     }
     if (text.length > cell.width) {
-      throw ArgumentError('"$text" exceeds the cell width ${cell.width}');
+      // the typed text itself stays out of the error (it reaches logs)
+      throw ArgumentError('the value (${text.length} chars) exceeds the '
+          'cell width ${cell.width}');
     }
     final staged = _w.stagedListCells;
     // one entry per TOUCHED cell, its final value, the last touch last — a

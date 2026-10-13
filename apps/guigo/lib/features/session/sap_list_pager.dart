@@ -2,8 +2,11 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:diag_protocol/diag_protocol.dart';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
+import 'session_busy.dart';
 
 /// A classic ABAP list the server pages (package list_scroll.dart): the
 /// page heading fixed on top, the body a scroll extent covering the WHOLE
@@ -15,7 +18,10 @@ import 'package:flutter/services.dart';
 /// When the scrolling SETTLES ([settle] after the last scroll event — one
 /// round per gesture, not one per frame) with lines on screen the page does
 /// not hold, [onScroll] asks for the page starting at the top line on
-/// screen (the real GUI's VSCROLL round); never while [busy] or while a
+/// screen (the real GUI's VSCROLL round — its scroll-bar drag sends ONE
+/// round on release, its wheel one round PER LINE: a recorded session
+/// _mainwindow_list_scroll g13 / g15..g53; GuiGo settles both, scrolling
+/// locally inside the received page); never while [busy] or while a
 /// previous request is in flight — the check runs again once it is done.
 /// The server's new page lands in place (the lines keep their positions);
 /// a page that moved elsewhere (a paging key) scrolls into view.
@@ -92,6 +98,25 @@ class SapPagedListState extends State<SapPagedList> {
 
   double _offsetOf(int line) => line * widget.lineHeight;
 
+  /// The session's busy ([SessionBusy]) — listened to, not depended on:
+  /// its end runs the owed check without rebuilding the list.
+  ValueListenable<bool>? _scope;
+
+  bool get _busy => widget.busy || (_scope?.value ?? false);
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final s = SessionBusy.listenableOf(context);
+    if (identical(s, _scope)) return;
+    _scope?.removeListener(_scopeBusyChanged);
+    _scope = s?..addListener(_scopeBusyChanged);
+  }
+
+  void _scopeBusyChanged() {
+    if (!_busy) _scheduleCheck();
+  }
+
   @override
   void didUpdateWidget(SapPagedList oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -103,10 +128,15 @@ class SapPagedListState extends State<SapPagedList> {
       final top = _topLine();
       final inside = top >= p.first && top < p.first + math.max(1, p.received);
       if (!inside || widget.identity != old.identity || p.total != o.total) {
-        _c.jumpTo(_offsetOf(p.first)
-            .clamp(0.0, _c.position.maxScrollExtent.isFinite
-                ? math.max(_c.position.maxScrollExtent, 0.0)
-                : double.infinity));
+        // after the layout: a short last page (Page Down past the last
+        // full page) grows the extent the jump needs
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || !_c.hasClients) return;
+          final max = _c.position.maxScrollExtent;
+          _c.jumpTo(_offsetOf(widget.page.first)
+              .clamp(0.0, max.isFinite ? math.max(max, 0.0) : double.infinity));
+          _scheduleCheck();
+        });
       }
     }
     if (moved || (old.busy && !widget.busy) || _owed) _scheduleCheck();
@@ -114,6 +144,7 @@ class SapPagedListState extends State<SapPagedList> {
 
   @override
   void dispose() {
+    _scope?.removeListener(_scopeBusyChanged);
     _settle?.cancel();
     _c.dispose();
     super.dispose();
@@ -147,7 +178,7 @@ class SapPagedListState extends State<SapPagedList> {
     _settle = null;
     final ask = widget.onScroll;
     if (!mounted || ask == null || !_c.hasClients) return;
-    if (widget.busy || _inFlight) {
+    if (_busy || _inFlight) {
       _owed = true;
       return;
     }
@@ -179,7 +210,7 @@ class SapPagedListState extends State<SapPagedList> {
     if (k != LogicalKeyboardKey.pageDown && k != LogicalKeyboardKey.pageUp) {
       return KeyEventResult.ignored;
     }
-    if (widget.busy) return KeyEventResult.handled;
+    if (_busy) return KeyEventResult.handled;
     final hw = HardwareKeyboard.instance;
     final ctrl = hw.isControlPressed || hw.isMetaPressed;
     final down = k == LogicalKeyboardKey.pageDown;
@@ -193,26 +224,44 @@ class SapPagedListState extends State<SapPagedList> {
   Widget build(BuildContext context) {
     final p = widget.page;
     final lh = widget.lineHeight;
-    final body = Scrollbar(
-      controller: _c,
-      thumbVisibility: true,
-      interactive: true,
-      child: NotificationListener<ScrollNotification>(
-        onNotification: _onScroll,
-        child: ListView.builder(
-          key: const ValueKey('sap-paged-list'),
+    // the extent: the whole list — and past its end when the server's page
+    // starts there: Page Down does not stop at the last full page (from
+    // 154 of 220 lines, 46 visible, the server answers first 200 with the
+    // 20 lines left — a recorded session g55), and that
+    // page is shown at the top as on the real GUI
+    final body = LayoutBuilder(
+      builder: (context, cons) {
+        final shown = cons.hasBoundedHeight
+            ? (cons.maxHeight / lh).ceil()
+            : p.visible;
+        final count = math.max(p.total, p.first + shown);
+        return Scrollbar(
           controller: _c,
-          padding: EdgeInsets.zero,
-          itemExtent: lh,
-          itemCount: p.total,
-          itemBuilder: (context, i) {
-            final r = p.rowOfLine(i);
-            if (r != null) return widget.row(r);
-            // a line of the list the server has not sent yet
-            return SizedBox(key: ValueKey('sap-list-pending-$i'), height: lh);
-          },
-        ),
-      ),
+          thumbVisibility: true,
+          interactive: true,
+          child: NotificationListener<ScrollNotification>(
+            onNotification: _onScroll,
+            child: ListView.builder(
+              key: const ValueKey('sap-paged-list'),
+              controller: _c,
+              padding: EdgeInsets.zero,
+              itemExtent: lh,
+              itemCount: count,
+              itemBuilder: (context, i) {
+                final r = p.rowOfLine(i);
+                if (r != null) return widget.row(r);
+                // past the list's end: blank, never asked for
+                if (i >= p.total) {
+                  return SizedBox(key: ValueKey('sap-list-end-$i'), height: lh);
+                }
+                // a line of the list the server has not sent yet
+                return SizedBox(
+                    key: ValueKey('sap-list-pending-$i'), height: lh);
+              },
+            ),
+          ),
+        );
+      },
     );
     final header = [for (var r = 0; r < p.headerRows; r++) widget.row(r)];
     final top = widget.top;

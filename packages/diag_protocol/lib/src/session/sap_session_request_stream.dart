@@ -23,15 +23,32 @@ extension _SapSessionRequestStream on SapSession {
         'buffer $kernelRequestBodyMax B: streaming $n sid-4 chunk(s) of '
         '$requestChunkSize B + a ${plan.tail.length}-B sid-1 tail');
     var at = plan.firstStep ?? step;
-    for (var k = 0; k < n; k++) {
-      await _sendWire(clientFrame(plan.chunkItems(k, at),
-          mode: payload[0], compress: compress));
-      at = await _awaitChunkAck(k, n, at);
+    try {
+      for (var k = 0; k < n; k++) {
+        await _sendWire(clientFrame(plan.chunkItems(k, at),
+            mode: payload[0], compress: compress));
+        at = await _awaitChunkAck(k, n, at);
+      }
+      final tail = clientFrame(plan.tailItems(at), compress: compress);
+      // the tail keeps the original frame's header (mode, flags)
+      tail.setRange(0, 7, payload);
+      await _sendWire(tail);
+    } on _StreamAnsweredOtherwise {
+      // the server answered a chunk with something else (a paint, its error
+      // frame): it is not waiting for the rest — the frame was put back for
+      // the next receive and the session stays as the server left it
+      rethrow;
+    } on SessionClosedError {
+      rethrow;
+    } catch (e) {
+      // no receipt (or the socket failed) after a chunk went out: the
+      // kernel may be left waiting for the rest — every later action would
+      // time out on a session that looks ready; it is failed now, visibly
+      // ([closed] fires, the app offers the reconnect)
+      _abortTransport(StateError('the client request stream was abandoned '
+          'mid-way ($e)'));
+      rethrow;
     }
-    final tail = clientFrame(plan.tailItems(at), compress: compress);
-    // the tail keeps the original frame's header (mode, flags)
-    tail.setRange(0, 7, payload);
-    await _sendWire(tail);
     return true;
   }
 
@@ -50,7 +67,7 @@ extension _SapSessionRequestStream on SapSession {
             'request stream: no 16/8/5 receipt for chunk ${k + 1}/$n');
       }
       if (_isNiPing(payload)) {
-        _sock?.add(niPongFrame);
+        _pong();
         continue;
       }
       var frame = payload;
@@ -63,8 +80,8 @@ extension _SapSessionRequestStream on SapSession {
       if (ackAt == null) {
         _inbox.addFirst(payload);
         final err = diagErrorInfo(frame);
-        throw StateError('request stream: the server answered chunk '
-            '${k + 1}/$n with a frame that is no 16/8/5 receipt'
+        throw _StreamAnsweredOtherwise('request stream: the server answered '
+            'chunk ${k + 1}/$n with a frame that is no 16/8/5 receipt'
             '${err == null ? '' : ' (server error "$err")'}; '
             'the stream is abandoned');
       }
@@ -74,4 +91,10 @@ extension _SapSessionRequestStream on SapSession {
       return ackAt;
     }
   }
+}
+
+/// A chunk of the request stream answered by a frame that is no receipt
+/// (left in the inbox for the next receive). A [StateError], as before.
+class _StreamAnsweredOtherwise extends StateError {
+  _StreamAnsweredOtherwise(super.message);
 }

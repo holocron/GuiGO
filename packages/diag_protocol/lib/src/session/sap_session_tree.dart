@@ -15,19 +15,30 @@ extension SapSessionTree on SapSession {
   /// `pick_tree_event`, TREE_ACTIVATE_EVENTS = (25, 21)). The double-click
   /// selects what it hits: the tree's registered selection props that
   /// change ride the event ([_treeEventRound]).
-  Future<List<Uint8List>> activateTreeNode(String shell, String nodeKey) {
+  ///
+  /// [itemName] = the column the double-click hit on a column tree (its
+  /// cell, not the node text): the ITEMDBLCLICK names it (the real GUI's
+  /// `%_GC 134 22` PARAM1 `&Hierarchy` on the node text,
+  /// a recorded session raw gui[145]).
+  Future<List<Uint8List>> activateTreeNode(
+    String shell,
+    String nodeKey, {
+    String? itemName,
+  }) {
     final reg = _canvasState.tracker.registeredEvents[shell] ?? const <int>{};
     // the double-click selects the node it hits: the tree's SelectionKeys
     // read-back reports it from now on
     noteTreeSelection(shell, nodeKey);
     String? item;
     int ev;
-    if (reg.contains(22)) {
-      ev = 22;
+    if (reg.contains(treeEventItemDoubleClick)) {
+      ev = treeEventItemDoubleClick;
       final items = trees[shell]?.nodes[nodeKey]?.items.keys;
-      item = (items == null || items.isEmpty) ? '1' : items.first;
+      item = itemName ??
+          ((items == null || items.isEmpty) ? '1' : items.first);
     } else {
-      ev = _pickTreeEvent(shell, const [treeEventNodeDoubleClick, 21]);
+      ev = _pickTreeEvent(
+          shell, const [treeEventNodeDoubleClick, treeEventSelectionChange]);
     }
     _ea.recordEvent(shell, {0: nodeKey, if (item != null) 1: item});
     return _act(
@@ -48,7 +59,7 @@ extension SapSessionTree on SapSession {
   int? treeDoubleClickEvent(String shell) {
     final reg = _canvasState.tracker.registeredEvents[shell];
     if (reg == null || reg.isEmpty) return treeEventNodeDoubleClick;
-    if (reg.contains(22)) return 22;
+    if (reg.contains(treeEventItemDoubleClick)) return treeEventItemDoubleClick;
     if (reg.contains(treeEventNodeDoubleClick)) return treeEventNodeDoubleClick;
     return null;
   }
@@ -57,7 +68,9 @@ extension SapSessionTree on SapSession {
   /// server round then (the SM12 navigation tree's, `[15, 21, 40]`),
   /// otherwise a selection stays on the client until a round reads it.
   bool treeSelectionEventRegistered(String shell) =>
-      _canvasState.tracker.registeredEvents[shell]?.contains(21) ?? false;
+      _canvasState.tracker.registeredEvents[shell]
+          ?.contains(treeEventSelectionChange) ??
+      false;
 
   /// A click on node [nodeKey] of tree [shell]: it becomes the tree's
   /// selection (the SelectionKeys read-back, [noteTreeSelection]); a tree
@@ -70,7 +83,7 @@ extension SapSessionTree on SapSession {
     if (!treeSelectionEventRegistered(shell)) return const [];
     _ea.recordEvent(shell, {0: nodeKey});
     return _act(
-      _treeEventRound(shell, 21, nodeKey, selects: true),
+      _treeEventRound(shell, treeEventSelectionChange, nodeKey, selects: true),
       controlEvent: true,
     );
   }
@@ -104,10 +117,484 @@ extension SapSessionTree on SapSession {
   /// Ask tree [shell] for the children of folder [nodeKey] (EVENTID 18
   /// EXPANDNOCHILDREN, or 19 EXPAND when only that one is registered).
   Future<List<Uint8List>> expandTreeNodeOf(String shell, String nodeKey) {
-    final ev = _pickTreeEvent(shell, const [treeEventExpandNoChildren, 19]);
+    final ev = _pickTreeEvent(
+        shell, const [treeEventExpandNoChildren, treeEventExpand]);
     _ea.recordEvent(shell, {0: nodeKey});
     noteTreeExpansion(shell, nodeKey, open: true);
     return _act(_treeEventRound(shell, ev, nodeKey), controlEvent: true);
+  }
+
+  /// SAP GUI's double-click on node [nodeKey] of tree [shell], as the
+  /// WDTTREE.OCX fires it (a recorded session): on a
+  /// FOLDER whose children are still on the server (EXPANDER, none pushed)
+  /// first 18 ExpandNoChildren — its answer the tree fill adding the
+  /// children (srv[70]) — THEN, once that round is answered, the node
+  /// double-click [activateTreeNode] on the same key (gui[61] `%_GC 152 18`
+  /// PID0 `6` + the tree's changed TopNodeKey, gui[63] `%_GC 152 25` PID0
+  /// `6`, answered RemoveAllMarker + SetSavePoint only); the node ends
+  /// expanded and selected (the read-backs gui[67] ExpandedKeys `{1, 4, 5,
+  /// 6, 8}`, gui[69] SelectionKeys `{6}`). A leaf, or a folder whose
+  /// children are pushed, gets the double-click alone (gui[41] / [45] /
+  /// [51] / [57]). A tree that registered no double-click event
+  /// ([treeDoubleClickEvent] null) gets the expansion only. Returns both
+  /// rounds' frames.
+  ///
+  /// [itemName]: the column tree cell the double-click hit
+  /// ([activateTreeNode]).
+  Future<List<Uint8List>> doubleClickTreeNode(
+    String shell,
+    String nodeKey, {
+    String? itemName,
+  }) async {
+    final node = trees[shell]?.nodes[nodeKey];
+    final unloaded = node != null && node.children.isEmpty && node.expander;
+    final out = <Uint8List>[];
+    if (unloaded) out.addAll(await expandTreeNodeOf(shell, nodeKey));
+    if (treeDoubleClickEvent(shell) == null) return out;
+    out.addAll(await activateTreeNode(shell, nodeKey, itemName: itemName));
+    return out;
+  }
+
+  /// The event a click on item [itemName] of node [nodeKey] of column tree
+  /// [shell] sends — the item's own, by its CLASS ([SapTreeItem]), when the
+  /// tree registered it: 35 LINKCLICK on a link item (the /AIF/IFMON count
+  /// cells: a recorded session raw gui[116] `%_GC 136 35` on the root
+  /// ` 1`, item `C 22`), 29 BUTTONCLICK on a button item
+  /// (reference client raw_tree TREE_EVENT_PARAMS: both (node key, item name)). Null
+  /// for a text item, a disabled one, or an event the tree did not
+  /// register: the click then only selects ([selectTreeNode]).
+  int? treeItemClickEvent(String shell, String nodeKey, String itemName) {
+    final cell = trees[shell]?.nodes[nodeKey]?.cells[itemName];
+    if (cell == null || cell.disabled) return null;
+    final reg = _canvasState.tracker.registeredEvents[shell] ?? const <int>{};
+    final ev = switch (cell.itemClass) {
+      SapTreeItem.classLink => treeEventLinkClick,
+      SapTreeItem.classButton => treeEventButtonClick,
+      _ => null,
+    };
+    return ev != null && reg.contains(ev) ? ev : null;
+  }
+
+  /// A click on item [itemName] of node [nodeKey] of column tree [shell]
+  /// (a cell): the item's event ([treeItemClickEvent]) — `%_GC <shell>
+  /// <35|29>`, PARAM0 the node key, PARAM1 the item name, and the cell
+  /// selection it makes in the tree's CONTROL block (its registered
+  /// ABAPSelItemKey / ABAPSelItemName that changed: raw gui[116]
+  /// `ABAPSelItemKey = 1`, `ABAPSelItemName = C 22`).
+  /// An item with no event of its own selects the node ([selectTreeNode]).
+  Future<List<Uint8List>> clickTreeItem(
+    String shell,
+    String nodeKey,
+    String itemName,
+  ) {
+    final ev = treeItemClickEvent(shell, nodeKey, itemName);
+    if (ev == null) return selectTreeNode(shell, nodeKey);
+    noteTreeSelection(shell, nodeKey);
+    _ea.recordEvent(shell, {0: nodeKey, 1: itemName});
+    return _act(
+      _treeEventRound(shell, ev, nodeKey, itemName: itemName, selects: true),
+      controlEvent: true,
+    );
+  }
+
+  /// The column layout of column tree [shell] — its hierarchy column and
+  /// item columns as the server declared them ([foldTreeColumns]: the
+  /// `Structures` / `Headers` collections, the HeaderNames display order),
+  /// null for a tree with no item column (a simple tree, the Easy Access
+  /// menu).
+  SapTreeColumns? treeColumns(String shell) {
+    final f = _treeColumnsOf[_w];
+    if (f == null) return null;
+    final c = f[shell] ?? f[_ea.shellAlias[shell] ?? ''];
+    if (c == null || c.isEmpty) return null;
+    return c;
+  }
+
+  /// The tree a column declaration / HeaderNames assignment addresses by
+  /// [token]: a tree shell, the shell a handle the session minted stands
+  /// for — else (a handle the session never minted: a replayed recording
+  /// keeps the recording client's, `28` for 136 in a recorded session)
+  /// the ONE column tree the window declared; null for another control's.
+  String? _columnTreeOf(String token, Map<String, String> kinds) {
+    final t = token.trim();
+    if (t.isEmpty) return null;
+    if (kinds[t] == 'tree') return t;
+    final a = _ea.shellAlias[t];
+    if (a != null) return kinds[a] == 'tree' ? a : null;
+    if (kinds.containsKey(t)) return null;
+    final known = [
+      for (final k in (_treeColumnsOf[_w] ?? const {}).keys)
+        if (kinds[k] == 'tree' || !kinds.containsKey(k)) k,
+    ];
+    return known.length == 1 ? known.single : null;
+  }
+
+  /// Fold [call]'s column declarations ([foldTreeColumns]) and its
+  /// HeaderNames assignments ([headerNamesAssignments], their display
+  /// order) into the window's column trees.
+  void _foldTreeColumnCall(
+    FlushCall call,
+    List<HeaderNamesAssignment> assigned,
+  ) {
+    Map<String, String>? kinds;
+    Map<String, String> kindsNow() => kinds ??= _layoutState.registry.kinds();
+    final f = _treeColumnsOf[_w] ??= {};
+    foldTreeColumns(
+      call,
+      columnsOf: (t) => f[t] ??= SapTreeColumns(),
+      treeOf: (token) => _columnTreeOf(token, kindsNow()),
+    );
+    for (final a in assigned) {
+      if (a.table.isEmpty) continue;
+      final t = f.containsKey(a.target)
+          ? a.target
+          : _columnTreeOf(a.target, kindsNow());
+      if (t == null) continue;
+      (f[t] ??= SapTreeColumns()).headerNames = a.table.names;
+    }
+  }
+
+  /// The user's view of tree [shell] shows node [nodeKey] as its first row
+  /// (the app's scroll position): the tree's `TopNodeKey` cached property.
+  /// Sends nothing; the next event of the tree flushes it when the server
+  /// does not hold it yet (a recorded session gui[61]:
+  /// `TopNodeKey = 15` with the 18 after the user scrolled).
+  void noteTreeTopNode(String shell, String nodeKey) {
+    _treeTops[shell] = nodeKey;
+  }
+
+  Map<String, String> get _treeTops => _treeTopNodes[_w] ??= {};
+
+  /// The first node tree [shell]'s view shows: the one the app reported
+  /// ([noteTreeTopNode]) while the tree holds it, else its first shown root
+  /// (an unscrolled tree — the real GUI's report after the fill, gui[18]
+  /// ` 1`); null when the session holds no node of it.
+  String? _treeTopNodeKey(String shell) {
+    final t = trees[shell];
+    if (t == null) return null;
+    final r = _treeTops[shell];
+    if (r != null && t.nodes.containsKey(r)) return r;
+    for (final n in t.roots) {
+      if (!n.hidden) return n.key;
+    }
+    return null;
+  }
+
+  /// The tree's `TopNodeKey` when it registered the cached property and
+  /// the server does not hold the view's first node yet, else null.
+  (String, String)? _treeTopNodeDelta(String shell) {
+    final cached = _canvasState.tracker.cachedProps[shell];
+    if (cached == null || !cached.contains(topNodeKeyProp)) return null;
+    final top = _treeTopNodeKey(shell);
+    if (top == null || top.trim().isEmpty) return null;
+    final ch = _ctxMenu.tracker.changed(shell, [(topNodeKeyProp, top)]);
+    return ch.isEmpty ? null : ch.single;
+  }
+
+  /// The tree `TopNodeKey` reports of a flush that FILLS trees (an
+  /// AddR3Table / AddItemTable / UpdateR3Table queue): the OCX reports the
+  /// registered cached property that changed in the flush's answer — the
+  /// first node of the freshly filled tree (a recorded session
+  /// dblclick gui[18] step 41: 152 `TopNodeKey = 1`; gui[4] step
+  /// 16: the Easy Access tree 105 `Favo`); an expansion that keeps the top
+  /// reports nothing (gui[40]). Recorded as what the server holds, so the
+  /// next event does not flush it again (gui[39]: no TopNodeKey). A queue
+  /// that registers the property reports it itself (the responder's
+  /// registration report: gui[15] `TopNodeKey ""`).
+  List<ControlReport> _treeTopNodeReports(FlushCall call) {
+    if (answerDialect != GuiDialect.windows) return const [];
+    if (!call.verbs.any(_treeFillVerbs.contains)) return const [];
+    final cachedAll = _canvasState.tracker.cachedProps;
+    final out = <ControlReport>[];
+    for (final sh in trees.keys) {
+      if (call.cachedProps.contains((sh, topNodeKeyProp))) continue;
+      if (!(cachedAll[sh]?.contains(topNodeKeyProp) ?? false)) continue;
+      final d = _treeTopNodeDelta(sh);
+      if (d == null) continue;
+      _ctxMenu.tracker.noteFlushed(sh, [d]);
+      out.add(ControlReport(sh, props: [d]));
+    }
+    return out;
+  }
+
+  /// The tree shell a control / object token of a tree property verb
+  /// names (`AssignProperty2(…, 43, 'ExpandedKeys')`): the shell itself,
+  /// the responder's alias of the handle, else — the handle unknown, as in
+  /// a replayed recording that keeps the recording client's handles — the
+  /// screen's ONE tree (none guessed among several).
+  String? _treeShellOfToken(String token) {
+    final t = token.trim();
+    final ts = trees;
+    if (ts.containsKey(t)) return t;
+    final a = _ea.shellAlias[t];
+    if (a != null && ts.containsKey(a)) return a;
+    // a tree control whose nodes this very flush pushes: the fill's
+    // tables are folded with the frame, after its answer (SE80's object
+    // list, a recorded session srv[14]: AddR3Table on 43, then
+    // AssignProperty2(47, data, 43, ExpandedKeys) — the root `1` open)
+    if (a != null && _layoutState.registry.kinds()[a] == 'tree') return a;
+    if (a != null && _isShellId(a)) return null; // another control's
+    return ts.length == 1 ? ts.keys.single : null;
+  }
+
+  /// Fold the server's own expansion of tree nodes: `AssignProperty2(<dp>,
+  /// 'data', <tree>, 'ExpandedKeys')` with the node-key table it pushed —
+  /// the root `1` of SE80's object list at its fill (a recorded session
+  /// subnode_dblclick srv[26]), each expanded folder after its children
+  /// (srv[48] `4`, …). The OCX then holds those nodes open: the
+  /// `ExpandedKeys` read-back lists them with the user's own (gui[21]
+  /// `{1}` before any click, gui[67] `{1, 4, 5, 6, 8}`).
+  void _foldTreeKeyPushes(FlushCall call, Uint8List value) {
+    // a fill in a queue that REGISTERS cached props is answered by the
+    // registration report (the responder's, [_editorFlushReport] returns
+    // early): the filled trees' changed TopNodeKey rides it — the one
+    // registered in this queue with the first node, not "" (the
+    // responder's default), one registered before when it moved. The real
+    // GUI's creation answers of the DBA cockpit's navigation tree report
+    // " 1009-", then " 100" (a recorded session
+    // realgui; tree_event_windows_xml_test). A queue registering nothing
+    // reports through [_treeTopNodeReports].
+    if (answerDialect == GuiDialect.windows &&
+        call.cachedProps.isNotEmpty &&
+        call.verbs.any(_treeFillVerbs.contains)) {
+      final cachedAll = _canvasState.tracker.cachedProps;
+      for (final sh in trees.keys) {
+        final here = call.cachedProps.contains((sh, topNodeKeyProp));
+        if (!here && !(cachedAll[sh]?.contains(topNodeKeyProp) ?? false)) {
+          continue;
+        }
+        // the node the same queue selected (`ABAPSelNodeKey(=…)`): the OCX
+        // scrolls it into view of the not yet laid out control — the real
+        // GUI's answer to a recorded session srv[14] (gui[7]) reports
+        // TopNodeKey HDEFAULTS, the server's selection, and its next event
+        // the first node FORMNAME (gui[12]); else the first node
+        final sel = _selectionPutOf(call, sh);
+        final top = sel ?? _treeTopNodeKey(sh);
+        if (top == null || top.trim().isEmpty) continue;
+        if (!here) {
+          if (_ctxMenu.tracker.changed(sh, [(topNodeKeyProp, top)]).isEmpty) {
+            continue;
+          }
+          call.cachedProps.add((sh, topNodeKeyProp));
+        }
+        call.setProps[(sh, topNodeKeyProp)] = top;
+        _ctxMenu.tracker.noteFlushed(sh, [(topNodeKeyProp, top)]);
+      }
+    }
+    _foldTreeExpansionVerbs(call);
+    if (!call.verbs.contains('AssignProperty2')) return;
+    DpCache? own;
+    for (final b in dpPushBindings(call)) {
+      if (b.role != expandedKeysProp || b.attach != null) continue;
+      final sh = b.shell ??
+          _treeShellOfToken(b.owner ?? '') ??
+          _treeFilledBy(call, b.owner ?? '');
+      if (sh == null) continue;
+      final nodes = trees[sh]?.nodes ?? const <String, SapTreeNode>{};
+      for (final u in b.urls) {
+        final seg =
+            (own ??= DpCache()..ingestValue(value)).byUrl[u] ??
+            _ea.dpCache.byUrl[u];
+        if (seg == null) continue;
+        for (final k in nodeKeyTableKeys(seg)) {
+          // the tree's own NODE_KEY spelling (the table pads to 12)
+          final key = nodes.containsKey(k)
+              ? k
+              : nodes.keys.firstWhere(
+                  (n) => n.trim() == k.trim(),
+                  orElse: () => k,
+                );
+          noteTreeExpansion(sh, key, open: true);
+        }
+      }
+    }
+  }
+
+  /// The tree the same [call] fills through object [owner] — its
+  /// `AddR3Table` / `AddItemTable` pushes on that token, whose tables the
+  /// layout fold bound to their shell (or, unbound, the newest live tree
+  /// the session holds them under, as [trees] does) — for a handle the
+  /// session never minted (a replay keeps the recording client's: SE80's
+  /// `43` in a recorded session srv[14]). Null when the call fills no
+  /// tree through it.
+  ///
+  /// An EMPTY [owner] (a verb whose object row the parse could not read —
+  /// the /AIF/IFMON launch batch's `ABAPExpandNodes(1, 1-)`, a recorded session
+  /// wingui_s4b_aif srv[220] verb 978) is the tree the call fills at all.
+  String? _treeFilledBy(FlushCall call, String owner) {
+    final o = owner.trim();
+    final st = _layoutState;
+    var fills = false;
+    for (final b in dpPushBindings(call)) {
+      if (b.attach == null) continue;
+      if (o.isNotEmpty && b.owner?.trim() != o) continue;
+      if (b.role != 'R3Table' && b.role != 'ItemTable') continue;
+      fills = true;
+      for (final u in b.urls) {
+        final sh = st.treeUrlShell[u];
+        if (sh != null) return sh;
+      }
+    }
+    if (!fills) return null;
+    for (final c in _ea.createdControls.reversed) {
+      if (controlKind(c.cls) == 'tree' && _onScreen(c.handle)) return c.handle;
+    }
+    return null;
+  }
+
+  /// Fold the server's own expansion VERBS of tree nodes — what the OCX
+  /// then holds open (the `ExpandedKeys` read-back reports it, the view
+  /// draws it): `ABAPExpandNodes(<key>, <level>)` (CL_TREE_CONTROL_BASE
+  /// expand_node / expand_nodes; the DBA cockpit's navigation tree opens
+  /// its "Statut actuel" `100` alone — a recorded session
+  /// srv[21] verb 168, a recorded session srv[24] — after
+  /// the step-32 read-back answered empty; the Easy Access menu `Favo` and
+  /// `Root`; a re-entered cockpit screen restores the user's folders,
+  /// srv[84] / srv[116], level `1-`), `ABAPExpandAll` (every node the tree
+  /// holds children of: a recorded session srv[25]),
+  /// `ABAPCollapseSubTree(<key>)` (the node and its subtree) and
+  /// `ABAPCollapseAll`. A folder the server did not expand is closed —
+  /// the four EXPANDER folders beside `100` (Performance, Configuration,
+  /// Jobs, Diagnostic) wait for their 18 EXPANDNOCHILDREN. The verb's
+  /// object is the tree's handle ([_treeShellOfToken]).
+  void _foldTreeExpansionVerbs(FlushCall call) {
+    const verbs = {
+      'ABAPExpandNodes',
+      'ABAPExpandAll',
+      'ABAPCollapseSubTree',
+      'ABAPCollapseAll',
+    };
+    if (!call.verbs.any(verbs.contains)) return;
+    final meta = verbMeta(call);
+    for (var i = 1; i <= call.verbs.length && i <= meta.length; i++) {
+      final verb = call.verbs[i - 1];
+      if (!verbs.contains(verb)) continue;
+      final tok = meta[i - 1].objValue;
+      final sh = (tok.trim().isEmpty ? null : _treeShellOfToken(tok)) ??
+          _treeFilledBy(call, tok);
+      if (sh == null) continue;
+      final tree = trees[sh];
+      String own(String k) {
+        final nodes = tree?.nodes;
+        if (nodes == null || nodes.containsKey(k)) return k;
+        for (final n in nodes.keys) {
+          if (n.trim() == k.trim()) return n;
+        }
+        return k;
+      }
+
+      final key = (verbNamedArgs(call, i)['#1'] ?? '').trim();
+      switch (verb) {
+        case 'ABAPExpandNodes':
+          if (key.isEmpty) break;
+          noteTreeExpansion(sh, own(key), open: true);
+          // a level count n > 1 (expand_node level_count: the levels shown
+          // below the node — 0 / 1 the node's own children, `1-` the
+          // cockpit's restore of single folders) opens the loaded folders
+          // n - 1 levels further down
+          final level = int.tryParse(
+                (verbNamedArgs(call, i)['#2'] ?? '').trim(),
+              ) ??
+              0;
+          void open(SapTreeNode m, int depth) {
+            if (depth >= level) return;
+            for (final c in m.children) {
+              if (c.children.isEmpty) continue;
+              noteTreeExpansion(sh, c.key, open: true);
+              open(c, depth + 1);
+            }
+          }
+
+          final n = tree?.nodes[own(key)];
+          if (n != null && level > 1) open(n, 1);
+        case 'ABAPExpandAll':
+          for (final n in tree?.nodes.values ?? const <SapTreeNode>[]) {
+            if (n.children.isNotEmpty) noteTreeExpansion(sh, n.key, open: true);
+          }
+        case 'ABAPCollapseSubTree':
+          final n = tree?.nodes[own(key)];
+          void close(SapTreeNode m) {
+            noteTreeExpansion(sh, m.key, open: false);
+            m.children.forEach(close);
+          }
+
+          if (n != null) {
+            close(n);
+          } else if (key.isNotEmpty) {
+            noteTreeExpansion(sh, key, open: false);
+          }
+        case 'ABAPCollapseAll':
+          _expandedKeys[sh]?.clear();
+      }
+    }
+  }
+
+  /// The keys of tree [shell] the session holds expanded — the server's
+  /// expansion ([_foldTreeExpansionVerbs], its `ExpandedKeys` pushes) and
+  /// the user's own opens and closes ([noteTreeExpansion]) — each in the
+  /// tree's own NODE_KEY spelling where the tree holds it. Empty for a tree
+  /// nothing expanded: a folder is open only when the server or the user
+  /// opened it (an EXPANDER folder is closed until its 18 brings the
+  /// children).
+  Set<String> treeExpandedKeys(String shell) {
+    final keys = _expandedKeys[shell];
+    if (keys == null || keys.isEmpty) return const {};
+    final nodes = trees[shell]?.nodes ?? const <String, SapTreeNode>{};
+    final byTrim = <String, String>{
+      for (final k in nodes.keys) k.trim(): k,
+    };
+    return {
+      for (final k in keys) nodes.containsKey(k) ? k : (byTrim[k.trim()] ?? k),
+    };
+  }
+
+  /// The node of tree [shell] [call] selects by a property put
+  /// `ABAPSelNodeKey(=<key>)` (a recorded session srv[14] verb 127
+  /// `HDEFAULTS`) — the last one naming a node the tree holds; null when
+  /// it puts none.
+  String? _selectionPutOf(FlushCall call, String shell) {
+    final nodes = trees[shell]?.nodes;
+    if (nodes == null || nodes.isEmpty) return null;
+    String? out;
+    for (var i = 1; i <= call.verbs.length; i++) {
+      if (call.verbs[i - 1] != selNodeKeyProp) continue;
+      for (final (n, v) in verbArgs(call, i)) {
+        if (n.trim().startsWith('_')) continue;
+        if (nodes.containsKey(v)) {
+          out = v;
+        } else {
+          for (final k in nodes.keys) {
+            if (k.trim() == v.trim() && v.trim().isNotEmpty) out = k;
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  /// [keys] of tree [shell] in the tree's display order (a pre-order walk
+  /// of its roots) — the order the OCX reads its `ExpandedKeys` /
+  /// `SelectionKeys` back in (a recorded session gui[67]
+  /// `1, 4, 5, 6, 8` for the expansions 1, 4, 5, 8, 6); keys the tree does
+  /// not hold are dropped.
+  List<String> _inTreeOrder(String shell, List<String> keys) {
+    final t = trees[shell];
+    if (t == null || t.nodes.isEmpty) return keys;
+    // (a key the server's verb named unpadded — `ABAPExpandNodes(100, 0)`
+    // — is the tree's own ` 100`)
+    final want = {for (final k in keys) k.trim()};
+    final out = <String>[];
+    void walk(SapTreeNode n) {
+      if (want.contains(n.key.trim())) out.add(n.key);
+      for (final c in n.children) {
+        walk(c);
+      }
+    }
+
+    for (final r in t.roots) {
+      walk(r);
+    }
+    return out;
   }
 
   /// The items of tree event [eventId] on [shell] for [nodeKey] (and
@@ -144,9 +631,20 @@ extension SapSessionTree on SapSession {
       itemName: itemName,
     );
     if (answerDialect != GuiDialect.windows) return items;
-    final selection = selects
+    final picked = selects
         ? _ctxSelectionDelta(shell, nodeKey, itemName, activation: true)
         : const <(String, String)>[];
+    // the view's first node when the server does not hold it (the tree
+    // scrolled: a recorded session gui[61] `%_GC 152 18`
+    // + 152 {TopNodeKey = 15}); between the item key and the item name,
+    // the OCX's order of the ITEM request's selection (sfp gui[12])
+    final top = _treeTopNodeDelta(shell);
+    final at = picked.indexWhere((p) => p.$1 == selItemNameProp);
+    final selection = top == null
+        ? picked
+        : at < 0
+        ? [...picked, top]
+        : [...picked.sublist(0, at), top, ...picked.sublist(at)];
     final controls =
         [
           for (final g in _toolbarGenerics(shell))
@@ -171,6 +669,12 @@ extension SapSessionTree on SapSession {
         if (_isXmlItem(raw)) xmlBlobItem(wireText(xml)) else raw,
     ];
   }
+
+  static const Set<String> _treeFillVerbs = {
+    'AddR3Table',
+    'AddItemTable',
+    'UpdateR3Table',
+  };
 
   bool _isXmlItem(Uint8List raw) {
     final w = walkItems(raw).items;
@@ -198,12 +702,14 @@ extension SapSessionTree on SapSession {
   /// (the launch batch's, joined across its chunks), else the session's
   /// cached one.
   void _noteHeaderNames(FlushCall call, Uint8List value) {
+    var assigned = const <HeaderNamesAssignment>[];
     if (call.verbs.contains('AssignProperty2')) {
       DpCache? own;
       Uint8List? segment(String url) =>
           (own ??= DpCache()..ingestValue(value)).byUrl[url] ??
           _ea.dpCache.byUrl[url];
-      for (final a in headerNamesAssignments(call, segment)) {
+      assigned = headerNamesAssignments(call, segment);
+      for (final a in assigned) {
         if (a.table.isEmpty) continue;
         final keys = {a.target, ?_ea.shellAlias[a.target]}..remove('');
         for (final k in keys) {
@@ -221,6 +727,7 @@ extension SapSessionTree on SapSession {
     if (call.verbs.contains('ABAPWidth')) {
       _w.headerWidths.addAll(declaredHeaderWidths(call));
     }
+    _foldTreeColumnCall(call, assigned);
   }
 
   /// The answers to [call]'s `WidthInChar` reads of tree headers (VARS
@@ -271,3 +778,12 @@ extension SapSessionTree on SapSession {
     return HeaderNamesTable.ofNames(_w.declaredHeaders);
   }
 }
+
+/// Per window: column tree -> its columns ([SapSessionTree.treeColumns]).
+final Expando<Map<String, SapTreeColumns>> _treeColumnsOf = Expando(
+  'treeColumns',
+);
+
+/// Per window: tree shell -> the first node the user's view shows
+/// ([SapSessionTree.noteTreeTopNode]).
+final Expando<Map<String, String>> _treeTopNodes = Expando('treeTopNodes');

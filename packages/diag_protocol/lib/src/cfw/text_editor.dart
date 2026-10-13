@@ -41,6 +41,7 @@ library;
 import 'dart:convert';
 import 'dart:typed_data';
 
+import '../framing/envelope.dart' show containsBytes;
 import 'dp_cache.dart';
 import 'flush_call.dart';
 
@@ -174,14 +175,18 @@ class SapTextEditor {
   /// The cached properties (FirstVisibleLine, LastVisibleLine, LineCount,
   /// SelPos*) as the SERVER last holds them: the control's creation state
   /// (all 1), then every value the client flushed — in a round or in a
-  /// flush's answer — or answered a read-back with, and the property the
-  /// server put itself (`FirstVisibleLine(=n)`). A method that moves one
+  /// flush's answer — or answered a read-back with. A server put
+  /// (`FirstVisibleLine(=n)`) or a method that moves one
   /// (`SetSelectionPosInLine(l, c)`, a document load's LineCount) leaves it
-  /// owed: the flush's answer reports it (a recorded session
-  /// scrolled g[30] / g[32]). A round flushes only the props whose client
-  /// value differs (a recorded session g[26]: the margin click
-  /// after the creation carries LastVisibleLine 28 — the server's 1 is
-  /// stale — and not FirstVisibleLine, read back as 1; g[29]: none;
+  /// owed: the OCX tracks its cached props against what IT last reported,
+  /// so the flush's answer reports the moved value — the put line too
+  /// (a recorded session g[30] / g[32];
+  /// a recorded session gui[43]: `FirstVisibleLine 36`
+  /// after the server's own `FirstVisibleLine(=36)`). A round flushes only
+  /// the props whose client value differs (a recorded session
+  /// g[26]: the margin click after the creation carries LastVisibleLine
+  /// 28 — the server's 1 is stale — and not FirstVisibleLine, read back as
+  /// 1; g[29]: none;
   /// a recorded session g[31]: the scrolled view
   /// 97 / 140 and the caret 92 / 35, LineCount not — its load's answer
   /// reported it).
@@ -381,8 +386,7 @@ class SapTextEditorTracker {
     bool Function(String shell)? isLive,
     FlushCall? parsed,
   }) {
-    final text = latin1.decode(rfc, allowInvalid: true);
-    if (!text.contains('OLE_FLUSH_CALL')) return const {};
+    if (!containsBytes(rfc, 'OLE_FLUSH_CALL')) return const {};
     final call = parsed ?? parseFlushCall(rfc);
     if (call.verbs.isEmpty) return const {};
     final meta = verbMeta(call);
@@ -548,7 +552,10 @@ class SapTextEditorTracker {
           if (n == null) continue;
           e.firstVisibleLine = n;
           e.firstVisibleLinePuts++;
-          e.serverProps['FirstVisibleLine'] = '$n';
+          // NOT what the server holds now: the OCX reports the moved view
+          // in this flush's answer like a method-moved caret
+          // (a recorded session gui[43] / [47] / [53] /
+          // [59]: FirstVisibleLine 36 / 37 / 45 / 1141 after the put)
           // the server scrolled the control: the reported view is stale
           e.viewFirstLine = null;
           e.viewLastLine = null;
@@ -646,14 +653,14 @@ bool _truthy(String? v) {
 
 /// The line numbers of a marker verb's line list (`,378` / `,12,40`).
 List<int> markerLines(String v) => [
-  for (final m in RegExp(r'\d+').allMatches(v)) int.parse(m.group(0)!),
+  for (final m in _markerLinesRx.allMatches(v)) int.parse(m.group(0)!),
 ];
 
 /// Split an editor document into lines (CR, LF or CRLF separated; a
 /// trailing separator ends the last line, it opens no empty one).
 List<String> splitEditorLines(String doc) {
   if (doc.isEmpty) return [];
-  final lines = doc.split(RegExp('\r\n|\r|\n'));
+  final lines = doc.split(_splitEditorLinesRx);
   if (lines.length > 1 && lines.last.isEmpty) lines.removeLast();
   return lines;
 }
@@ -670,8 +677,14 @@ String? databinText(Uint8List seg) {
     b.add(c);
   }
   var raw = b.takeBytes();
-  final c = dpPutContent(seg);
-  final total = c != null && c.column == 'DATABIN' ? c.expected : 0;
+  // dpPutContent's bound of the DATABIN content, without decoding (and
+  // joining) the column a second time (audit #10): TOTALSIZE, else the
+  // declared dims — when no DATAASC column takes precedence
+  final total = name == 'DATABIN' && dpColumnCells(seg, 'DATAASC').$3.isEmpty
+      ? (dpTotalSize(seg) > 0
+          ? dpTotalSize(seg)
+          : (w > 0 && n > 0 ? w * n : raw.length))
+      : 0;
   if (total > 0 && total < raw.length) {
     raw = Uint8List.sublistView(raw, 0, total);
   } else if (w > 0 && n > 0 && w * n < raw.length) {
@@ -694,7 +707,16 @@ String? databinText(Uint8List seg) {
 /// (TextAsR3Stream): the records joined and split at the line breaks.
 List<String>? r3TableText(Uint8List seg, {bool stream = false}) {
   final (name, (w, n), cells) = dpColumnCells(seg, 'DATAASC');
-  if (name.isEmpty || cells.isEmpty) return null;
+  if (name.isEmpty) return null;
+  // a DATAASC column DECLARED with no rows is the empty document, which is
+  // still a delivered body: PPOSE's LONGTEXT TextEdit 162 for an object
+  // with no description (a recorded session srv[17] step 26:
+  // `AssignProperty2(<dp>, data, <162>, TextAsR3Table)` over a DP_PUT whose
+  // DATAASC is (12288, 0) and TOTALSIZE empty). Read as "no body", the
+  // control was never loaded and its area fell to the R9 "no hosted shell
+  // known" wireframe although the TextEdit is up. A column absent, or rows
+  // declared but not (yet) delivered, stays "no body".
+  if (cells.isEmpty) return n == 0 ? <String>[] : null;
   final b = BytesBuilder(copy: false);
   for (final c in cells) {
     b.add(c);
@@ -733,3 +755,8 @@ List<String>? r3TableText(Uint8List seg, {bool stream = false}) {
   }
   return out;
 }
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _markerLinesRx = RegExp(r'\d+');
+final RegExp _splitEditorLinesRx = RegExp('\r\n|\r|\n');

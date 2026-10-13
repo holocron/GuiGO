@@ -89,7 +89,7 @@ String _text(Uint8List data) {
   // the declared 16/6/35 codepage (UTF-8), up to the first NUL, control
   // bytes dropped (reference client _text: wire_decode + strip)
   final s = wireDecodeNull(data);
-  return s.replaceAll(RegExp(r'[\x00-\x1f]'), '').trim();
+  return s.replaceAll(_controlCharsRx, '').trim();
 }
 
 /// One front-end RFC request (reference client parse_frontend_call).
@@ -154,18 +154,6 @@ FrontendCall parseFrontendCall(Uint8List container) {
   return FrontendCall(fname, declared, params, raw, ctx);
 }
 
-bool _contains(Uint8List hay, String needle) {
-  final n = needle.codeUnits;
-  outer:
-  for (var i = 0; i + n.length <= hay.length; i++) {
-    for (var j = 0; j < n.length; j++) {
-      if (hay[i + j] != n[j]) continue outer;
-    }
-    return true;
-  }
-  return false;
-}
-
 /// Whether the 16/8/[sid] item [value] is a front-end RFC request — one
 /// naming a function the automation / DataProvider families do not own
 /// (OLE_FLUSH_CALL, DP_GET_ / DP_PUT_CLIENT_TABLE are answered by their own
@@ -174,9 +162,9 @@ bool _contains(Uint8List hay, String needle) {
 /// is_frontend_call).
 bool isFrontendCall(Uint8List value, int sid) {
   if (sid != 0 && sid != 1 && sid != 6) return false;
-  if (_contains(value, 'OLE_FLUSH_CALL') ||
-      _contains(value, 'DP_GET_CLIENT_TABLE') ||
-      _contains(value, 'DP_PUT_CLIENT_TABLE')) {
+  if (containsBytes(value, 'OLE_FLUSH_CALL') ||
+      containsBytes(value, 'DP_GET_CLIENT_TABLE') ||
+      containsBytes(value, 'DP_PUT_CLIENT_TABLE')) {
     return false;
   }
   for (final (tag, data) in rfcTokens(value)) {
@@ -346,7 +334,7 @@ const int rfcTagAddr2 = 0x0018, rfcTagHost = 0x0008;
 /// token `0008 <len> <host> 0008` inserted right after the 0018 address
 /// token: every Windows reply carries it — a recorded session
 /// gui[10] / gui[11], a recorded session gui[27] (scrubbed), `0008 000d
-/// "the recording host"` (reference client diag_reply_container.with_host_token, 847ec3a);
+/// "<host>"` (a 13-character host name) (reference client diag_reply_container.with_host_token, 847ec3a);
 /// the Java GUI's has none (a recorded session gui[22]). Unchanged when
 /// [host] is empty, the token is already there, or the descriptor does
 /// not parse.
@@ -393,3 +381,7 @@ List<Uint8List> frontendRfcReplyItems(int step, Uint8List reply,
       eomBytes,
       if (windows) eomBytes,
     ];
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _controlCharsRx = RegExp(r'[\x00-\x1f]');

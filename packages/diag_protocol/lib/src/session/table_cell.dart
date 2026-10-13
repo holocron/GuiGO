@@ -74,15 +74,9 @@ final Uint8List winEventWindowPx = Uint8List.fromList([
 /// ([ActionContext.windowSized]), then the window's own pixels — one window,
 /// whatever the round (the server lays the dynpro out from the last 16/12/8
 /// it read).
-Uint8List windowsEventWindowPx(ActionContext ctx) {
-  if (!ctx.windowSized) return winEventWindowPx;
-  final out = ByteData(16)
-    ..setUint32(0, ctx.winPxHeight)
-    ..setUint32(4, ctx.winPxWidth)
-    ..setUint32(8, ctx.winPxHeight)
-    ..setUint32(12, ctx.winPxWidth);
-  return out.buffer.asUint8List();
-}
+Uint8List windowsEventWindowPx(ActionContext ctx) => ctx.windowSized
+    ? ctx.windowAreaPx(ctx.winPxHeight, ctx.winPxWidth)
+    : ctx.windowAreaPx(winEventWindowHeight, winEventWindowWidth);
 
 /// The Windows UI_EVENT_SOURCE control type of a key pressed with the cursor
 /// in a classic table control (a recorded session gui[10]).
@@ -186,7 +180,7 @@ Uint8List? tcWindowsTreeNames(Uint8List painted, [Uint8List? pages]) {
   }
   var first = page;
   if (pages != null) {
-    final m = RegExp(r'([A-Z_][A-Z0-9_]{2,})\x00')
+    final m = _pageNameRx
         .firstMatch(String.fromCharCodes(pages));
     if (m != null) first = Uint8List.fromList([...m.group(1)!.codeUnits, 0]);
   }
@@ -280,11 +274,11 @@ List<Uint8List> tableCellItems(
   final out = <Uint8List>[
     stepItem(ctx.step),
     Uint8List.fromList([itemSes, ...ses]),
-    if (okcode == null) buildApplItem(4, 36, winIdentity36),
+    if (okcode == null) buildApplItem(4, 36, windowsWindowRect(ctx)),
     buildApplItem(6, 35, winCodepageValue),
     if (okcode != null) ...[
       buildApplItem(12, 4, wireText(okcode)),
-      if (ctx.modalNo != 0) buildApplItem(4, 36, winIdentity36),
+      if (ctx.modalNo != 0) buildApplItem(4, 36, windowsWindowRect(ctx)),
     ],
     for (final (sid, value) in winIdentity) buildApplItem(4, sid, value),
     buildApplItem(5, 1, ok),
@@ -332,3 +326,7 @@ Uint8List _charCellGeometry(ActionContext ctx) {
   out[32] = 1;
   return out;
 }
+
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call (audit #7 / zcode P-12).
+final RegExp _pageNameRx = RegExp(r'([A-Z_][A-Z0-9_]{2,})\x00');

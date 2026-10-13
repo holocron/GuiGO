@@ -10,7 +10,8 @@ import '../framing/diag_frame.dart';
 import '../framing/envelope.dart';
 import '../items/dynt_atom.dart';
 import 'frames.dart';
-import 'frontend_profile.dart' show winCodepageValue, winIdentity36;
+import 'frontend_profile.dart' show winCodepageValue, windowsWindowRect;
+import 'gui_profile.dart' show emulatedGuiPatchLevel, emulatedGuiRelease;
 
 class LoginPlane {
   const LoginPlane(this.row, this.col, this.maxlen, this.mlen, this.dlg1,
@@ -236,12 +237,14 @@ Uint8List _u32be(List<int> vals) {
 /// The Windows multi-logon answer (diag_login_wall _OPT2_WIN_ENVELOPE
 /// spelled as fields): the live Step; the SES of a function-key Enter in
 /// the wall popup (eventarray 0x50, modal_no 1, the popup's dims); the
-/// okcode-extra 16/4/36 ([winIdentity36]); the Windows codepage and
+/// okcode-extra 16/4/36 ([windowRect], else [windowsWindowRect]'s
+/// reference value); the Windows codepage and
 /// identity atoms (16/4/15 = 109 on this round); OK event mode 0x05; the
 /// popup's SCROLL_INFOS2 (17 x 80 area, 18 x 82 visible); a zero 16/10/1;
 /// the radio group rebuilt from the live selection (chosen on,
 /// previously-on siblings cleared) and the cursor on the chosen row.
-List<Uint8List> windowsWallItems(int step, WallInfo wall, int chosenRow) {
+List<Uint8List> windowsWallItems(int step, WallInfo wall, int chosenRow,
+    {Uint8List? windowRect}) {
   final group = <Uint8List>[];
   if (chosenRow >= 0) {
     // ONLY the changed members ride the answer: the chosen row turned on
@@ -286,10 +289,10 @@ List<Uint8List> windowsWallItems(int step, WallInfo wall, int chosenRow) {
   return [
     stepItem(step),
     ses,
-    buildApplItem(4, 36, winIdentity36),
+    buildApplItem(4, 36, windowRect ?? windowsWindowRect(null)),
     buildApplItem(6, 35, winCodepageValue),
-    buildApplItem(4, 9, Uint8List.fromList('800'.codeUnits)),
-    buildApplItem(4, 29, Uint8List.fromList('18'.codeUnits)),
+    buildApplItem(4, 9, Uint8List.fromList(emulatedGuiRelease.codeUnits)),
+    buildApplItem(4, 29, Uint8List.fromList(emulatedGuiPatchLevel.codeUnits)),
     buildApplItem(4, 15, _u32be([109])),
     buildApplItem(4, 25, Uint8List(2)),
     buildApplItem(5, 1, okEvent),

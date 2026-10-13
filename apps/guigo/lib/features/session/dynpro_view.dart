@@ -3,12 +3,14 @@ import 'dart:math' as math;
 import 'package:diag_protocol/diag_protocol.dart';
 import 'package:flutter/gestures.dart'
     show kDoubleTapSlop, kDoubleTapTimeout, kTouchSlop;
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 
 import '../../core/sap_icons.dart';
 import 'dynpro_grid.dart';
 import 'sap_list_pager.dart';
 import 'sap_list_view.dart';
+import 'session_busy.dart';
 import 'type_ahead.dart';
 
 /// The grid renderer's character cell bounds (points): below the minimum
@@ -57,6 +59,11 @@ final Expando<_Derived> _derived = Expando('dynpro layout');
 /// How many times a paint was laid out (tests read it).
 @visibleForTesting
 int dynproLayoutCount = 0;
+
+/// How many times a dynpro view was built (tests read it: a list-cursor
+/// tap or a busy flip redraws its leaves, not the view).
+@visibleForTesting
+int dynproBuildCount = 0;
 
 _Derived _derive(ScreenModel m) {
   final d = _derived[m];
@@ -119,6 +126,7 @@ class DynproView extends StatefulWidget {
     this.onEdit,
     this.onValueHelp,
     this.onListPick,
+    this.onListCursor,
     this.onListCell,
     this.onListScroll,
     this.onFocusField,
@@ -178,6 +186,11 @@ class DynproView extends StatefulWidget {
   /// classic F1 popup): the list's own pick (F2 on the line).
   final Future<void> Function(ListLine line)? onListPick;
 
+  /// A tap on a classic list line placed the list cursor at (buffer row,
+  /// column) — locally, the next list round carries it (no round of its
+  /// own; a double-tap then [onListPick]s the line).
+  final void Function(int row, int col)? onListCursor;
+
   /// A list input cell changed (a checkbox ticked: `X` / blank): the
   /// session stages it, and it rides the next list key round.
   final void Function(ListLine line, ListSegment cell, String text)?
@@ -205,12 +218,27 @@ class DynproView extends StatefulWidget {
 /// = column, top = row, width = columns, height = rows (from the dynpro's
 /// origin, the composed window's AREASIZE area corner).
 class DynproOverlay {
-  const DynproOverlay(this.cells, this.child, {this.id});
+  const DynproOverlay(
+    this.cells,
+    this.child, {
+    this.id,
+    this.minPoints,
+    this.builder,
+  });
   final Rect cells;
   final Widget child;
 
   /// Keys the overlay's box on the canvas (`ValueKey('overlay-$id')`).
   final String? id;
+
+  /// The box's least extent in points, grown about its centre (a sash
+  /// grip's finger-wide hit area across a zero-width line); a zero-width or
+  /// zero-height [cells] is drawn only with one.
+  final Size? minPoints;
+
+  /// Builds the child for the canvas' own cell (points per column x per
+  /// row) — what a drag on it converts by; [child] without one.
+  final Widget Function(Size cell)? builder;
 }
 
 // ---------------------------------------------------------------------------
@@ -328,12 +356,15 @@ DynproLayout layoutDynpro(List<ScreenField> fields) {
   return DynproLayout(captionOf, panel, rows);
 }
 
+final RegExp _quickInfoRx = RegExp(r'@[0-9A-Z]{0,2}\\Q([^@]*)@');
+
 /// The quick-info of an icon token (`@1F\QSélection multiple@` → "Sélection
 /// multiple"; an icon-less `@\QSélection options de sélection@` too — the
 /// empty option button of SAPLALDB/3000), or null when the text carries
 /// none.
 String? iconQuickInfo(String text) {
-  final m = RegExp(r'@[0-9A-Z]{0,2}\\Q([^@]*)@').firstMatch(text);
+  if (!text.contains('@')) return null; // most fields carry no token
+  final m = _quickInfoRx.firstMatch(text);
   return m?.group(1)?.trim();
 }
 
@@ -465,12 +496,32 @@ class _DynproViewState extends State<DynproView> {
   /// column — the paint's own value until the server repaints the list.
   final Map<ListLine, Map<int, bool>> _listTicks = Map.identity();
 
+  /// The list cursor a tap placed since the paint (buffer row, column) —
+  /// the paint's own ([ScreenModel.listCursor]) until then; a repaint of
+  /// the list sets it again (the server's cursor). A notifier: a tap
+  /// redraws the cursor's old and new lines, not the whole view.
+  final ValueNotifier<(int, int)?> _listCursor = ValueNotifier(null);
+
   /// The zoom memory when no [DynproZoomScope] provides the session's.
   final Map<String, int> _ownWidest = {};
+
+  /// Busy now — the view's own flag or the session's ([SessionBusy]) —
+  /// for a gesture handler (no dependency: the view does not rebuild).
+  bool get _busyNow => widget.busy || SessionBusy.peek(context);
+
+  /// A field drawn from the busy state: it alone rebuilds when the
+  /// session's busy flips, not the whole view ([BusyBuilder]).
+  Widget _leaf(Widget Function(bool busy) build) =>
+      BusyBuilder(busy: widget.busy, builder: (_, busy) => build(busy));
 
   @override
   void didUpdateWidget(DynproView old) {
     super.didUpdateWidget(old);
+    // a repainted list: the server's cursor again
+    if (!identical(old.model.listPaint.firstOrNull,
+        widget.model.listPaint.firstOrNull)) {
+      _listCursor.value = null;
+    }
     // a repainted list drops the ticks of the lines it no longer paints
     if (_listTicks.isNotEmpty) {
       final now = Set<ListLine>.identity()..addAll(widget.model.listPaint);
@@ -532,11 +583,13 @@ class _DynproViewState extends State<DynproView> {
     for (final c in _tcScroll.values) {
       c.dispose();
     }
+    _listCursor.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    dynproBuildCount++;
     final body = _buildBody(context);
     final menu = widget.onContextMenu;
     if (menu == null) return body;
@@ -829,6 +882,32 @@ class _DynproViewState extends State<DynproView> {
     return rows;
   }
 
+  /// The pickable lines of [lines] as an identity set, once per list (a
+  /// rebuild — a tick, busy — does not re-hash every line); the length
+  /// guards a list mutated in place (tests build models so).
+  static final Expando<(int, Set<ListLine>)> _pickableMemo =
+      Expando('pickable lines');
+
+  static Set<ListLine> _pickableOf(List<ListLine> lines) {
+    final memo = _pickableMemo[lines];
+    if (memo != null && memo.$1 == lines.length) return memo.$2;
+    final set = Set<ListLine>.identity()..addAll(lines);
+    _pickableMemo[lines] = (lines.length, set);
+    return set;
+  }
+
+  /// [sapListColumns] of [rows], once per rows list ([_listRows] memoizes
+  /// the list per model).
+  static final Expando<(int, int)> _columnsMemo = Expando('list columns');
+
+  static int _columnsOf(List<ListLine?> rows) {
+    final memo = _columnsMemo[rows];
+    if (memo != null && memo.$1 == rows.length) return memo.$2;
+    final cols = sapListColumns(rows);
+    _columnsMemo[rows] = (rows.length, cols);
+    return cols;
+  }
+
   /// The list on SAP's character grid: the cell fitted to the width (down
   /// to a legible minimum, then the list scrolls sideways — a 170-column
   /// where-used list), the frame drawn as continuous lines, the checkboxes
@@ -842,8 +921,8 @@ class _DynproViewState extends State<DynproView> {
   ) {
     final palette = SapListPalette.of(context);
     final icons = SapIconAtlasStrip.of(context);
-    final pickable = Set<ListLine>.identity()..addAll(widget.model.listLines);
-    final cols = math.max(1, sapListColumns(rows));
+    final pickable = _pickableOf(widget.model.listLines);
+    final cols = math.max(1, _columnsOf(rows));
     const base = TextStyle(
       fontFamily: 'Menlo',
       fontFamilyFallback: ['Courier New', 'monospace'],
@@ -858,29 +937,54 @@ class _DynproViewState extends State<DynproView> {
           mt = SapListMetrics.of(base, math.max(10.0, fit.floorToDouble()));
         }
         final width = cols * mt.cw;
+        final painted = widget.model.listCursor;
+        final cursorColor = Theme.of(context).colorScheme.primary;
         Widget line(int i) {
           final l = rows[i];
-          final pick = l != null &&
-              pickable.contains(l) &&
-              !widget.busy &&
-              widget.onListPick != null;
+          if (l == null) return SizedBox(width: width, height: mt.lh);
           final cell = widget.onListCell;
-          return SapListLineView(
-            line: l,
-            metrics: mt,
-            palette: palette,
-            width: width,
-            icons: icons,
-            onTap: pick ? () => widget.onListPick!(l) : null,
-            onCheck: l == null || cell == null || widget.busy
-                ? null
-                : (s, on) {
-                    setState(() => (_listTicks[l] ??= {})[s.col] = on);
-                    cell(l, s, on ? 'X' : ' ');
-                  },
-            checkedOf: l == null
-                ? null
-                : (s) => _listTicks[l]?[s.col] ?? s.checked,
+          // a tap places the list cursor (no round); a double-tap is the
+          // pick there — F2 with the cursor on the tapped cell
+          void tapAt(int col) {
+            _listCursor.value = (l.line, col);
+            widget.onListCursor?.call(l.line, col);
+          }
+
+          // busy and the cursor redraw this line alone
+          return _leaf(
+            (busy) => _ListCursorLine(
+              cursor: _listCursor,
+              painted: painted,
+              row: l.line,
+              builder: (cursorCol) {
+                final pick = pickable.contains(l) &&
+                    !busy &&
+                    widget.onListPick != null;
+                return SapListLineView(
+                  line: l,
+                  metrics: mt,
+                  palette: palette,
+                  width: width,
+                  icons: icons,
+                  cursorCol: cursorCol,
+                  cursorColor: cursorColor,
+                  onTapAt: busy ? null : tapAt,
+                  onDoubleTapAt: busy
+                      ? null
+                      : (col) {
+                          tapAt(col);
+                          if (pick) widget.onListPick!(l);
+                        },
+                  onCheck: cell == null || busy
+                      ? null
+                      : (s, on) {
+                          setState(() => (_listTicks[l] ??= {})[s.col] = on);
+                          cell(l, s, on ? 'X' : ' ');
+                        },
+                  checkedOf: (s) => _listTicks[l]?[s.col] ?? s.checked,
+                );
+              },
+            ),
           );
         }
 
@@ -999,7 +1103,7 @@ class _DynproViewState extends State<DynproView> {
     }
     // the cells of a scrolling control's moving columns, per control, at
     // cells relative to its scroll origin
-    final moving = <String, List<Widget>>{};
+    final moving = <String, List<_TcCell>>{};
     bool moves(TableControlInfo tc, int column) =>
         scrolling[tc.name] != null && column >= scrolling[tc.name]!.fixed;
     for (final tc in widget.model.tableControls) {
@@ -1046,10 +1150,24 @@ class _DynproViewState extends State<DynproView> {
             ),
           ),
         );
-        (move ? moving.putIfAbsent(tc.name, () => []) : children).add(w);
+        if (move) {
+          moving
+              .putIfAbsent(tc.name, () => [])
+              .add(_TcCell(left, left + tc.widths[i] * cw, w));
+        } else {
+          children.add(w);
+        }
       }
     }
     final tcByName = {for (final tc in widget.model.tableControls) tc.name: tc};
+    // the fields, keyed by their cell (a repaint that adds or drops a field
+    // keeps every other field's element — its TextField, its focus) and
+    // grouped by painted row, each row its own repaint boundary: a caret
+    // blink or a typed character repaints its row, not the screen
+    final fieldsAt = children.length;
+    final keys = <String>{};
+    final rowFields = <int, List<Widget>>{};
+    final rowRight = <int, double>{};
     for (final c in grid.cells) {
       final f = c.field;
       final w = c.width * cw;
@@ -1092,32 +1210,36 @@ class _DynproViewState extends State<DynproView> {
         case FieldKind.pushbutton:
           child = _gridButton(f, icons, font);
         case FieldKind.tabstrip:
-          child = _GridTab(
-            text: icons?.stripTokens(f.text).trim() ?? f.text.trim(),
-            active: f.on,
-            fontSize: font,
-            onTap: (widget.busy || (f.fcode ?? '').isEmpty)
-                ? null
-                : () => widget.onOkcode(f.fcode!),
+          child = _leaf(
+            (busy) => _GridTab(
+              text: icons?.stripTokens(f.text).trim() ?? f.text.trim(),
+              active: f.on,
+              fontSize: font,
+              onTap: (busy || (f.fcode ?? '').isEmpty)
+                  ? null
+                  : () => widget.onOkcode(f.fcode!),
+            ),
           );
         case FieldKind.checkbox:
-          child = _gridChoice(
-            f,
-            font,
-            ch,
-            Checkbox(
-              value: f.on,
-              visualDensity: VisualDensity.compact,
-              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              onChanged: widget.busy || f.isProtected
-                  ? null
-                  : (_) => widget.onPress(0),
+          child = _leaf(
+            (busy) => _gridChoice(
+              f,
+              font,
+              ch,
+              Checkbox(
+                value: f.on,
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                onChanged: busy || f.isProtected
+                    ? null
+                    : (_) => widget.onPress(0),
+              ),
+              busy || f.isProtected ? null : () => widget.onPress(0),
             ),
-            widget.busy || f.isProtected ? null : () => widget.onPress(0),
           );
         case FieldKind.radio:
           final group = radioGroups['${f.area}:${f.block}:${f.group}'] ?? [f];
-          child = _gridRadio(f, group, font, ch);
+          child = _leaf((busy) => _gridRadio(f, group, font, ch, busy));
       }
       // a composed window's small fixed cell: every field fills its row
       // (a 4-point inset would clip the glyphs of a 12-point row)
@@ -1126,15 +1248,44 @@ class _DynproViewState extends State<DynproView> {
       final move = tc != null && moves(tc, (f.tcColumn ?? 1) - 1);
       // a table cell keeps to its column; a free checkbox keeps a target
       final choice = f.kind == FieldKind.checkbox || f.kind == FieldKind.radio;
+      final cellKey = '${f.area}:${f.row}:${f.col}';
+      var k = 'field-$cellKey';
+      for (var n = 1; !keys.add(k); n++) {
+        k = 'field-$cellKey#$n'; // two fields painted at one cell
+      }
+      final left = (c.col - (move ? scrolling[tc.name]!.left : 0)) * cw;
+      final width = choice && tc == null ? math.max(w, ch + 8) : w;
       final placed = Positioned(
-        left: (c.col - (move ? scrolling[tc.name]!.left : 0)) * cw,
-        top: (move ? (c.row - tc.row) * ch : y(c.row)) + (ch - h) / 2,
-        width: choice && tc == null ? math.max(w, ch + 8) : w,
+        key: ValueKey(k),
+        left: left,
+        // a row's field: from its row's top
+        top: (move ? (c.row - tc.row) * ch : 0) + (ch - h) / 2,
+        width: width,
         height: h,
         child: child,
       );
-      (move ? moving.putIfAbsent(tc.name, () => []) : children).add(placed);
+      if (move) {
+        moving
+            .putIfAbsent(tc.name, () => [])
+            .add(_TcCell(left, left + width, placed, cellKey));
+      } else {
+        rowFields.putIfAbsent(c.row, () => []).add(placed);
+        rowRight[c.row] = math.max(rowRight[c.row] ?? 0, left + width);
+      }
     }
+    children.insertAll(fieldsAt, [
+      for (final e in rowFields.entries)
+        Positioned(
+          key: ValueKey('row-${e.key}'),
+          left: 0,
+          top: y(e.key),
+          width: rowRight[e.key],
+          height: ch,
+          child: RepaintBoundary(
+            child: Stack(clipBehavior: Clip.none, children: e.value),
+          ),
+        ),
+    ]);
     for (final tc in widget.model.tableControls) {
       final sc = scrolling[tc.name];
       if (sc == null) continue;
@@ -1154,7 +1305,15 @@ class _DynproViewState extends State<DynproView> {
               child: SizedBox(
                 width: (sc.content - sc.left) * cw,
                 height: tc.height * ch,
-                child: Stack(children: moving[tc.name] ?? const []),
+                // only the columns near the scrolled window are built
+                child: RepaintBoundary(
+                  child: _TcColumns(
+                    controller: ctl,
+                    viewport: (sc.right - sc.left) * cw,
+                    cells: moving[tc.name] ?? const [],
+                    keep: _focused,
+                  ),
+                ),
               ),
             ),
           ),
@@ -1185,22 +1344,42 @@ class _DynproViewState extends State<DynproView> {
     // a composed window's regions on this dynpro, exactly at their cells
     // (a one-row bar stays one row: no legibility minimum)
     if (rowHeight != null) {
+      // one area may hold several regions (a splitter's cells: /AIF/IFMON's
+      // MAIN_CUSTOM holds the HTML form AND the date navigator) — a repeated
+      // id gets a '#n' suffix, the first keeps the plain key
+      final seenIds = <String, int>{};
       for (final o in widget.overlays) {
         final r = o.cells;
-        if (r.width <= 0 || r.height <= 0) continue;
-        final left = r.left * cw, t = (r.top - top) * ch;
+        final min = o.minPoints;
+        if (min == null && (r.width <= 0 || r.height <= 0)) continue;
+        if (r.width < 0 || r.height < 0) continue;
+        var left = r.left * cw, t = (r.top - top) * ch;
+        var w = r.width * cw, h = r.height * ch;
+        if (min != null && w < min.width) {
+          left -= (min.width - w) / 2;
+          w = min.width;
+        }
+        if (min != null && h < min.height) {
+          t -= (min.height - h) / 2;
+          h = min.height;
+        }
+        String? key;
+        if (o.id != null) {
+          final n = seenIds.update(o.id!, (v) => v + 1, ifAbsent: () => 0);
+          key = n == 0 ? 'overlay-${o.id}' : 'overlay-${o.id}#$n';
+        }
         children.add(
           Positioned(
-            key: o.id == null ? null : ValueKey('overlay-${o.id}'),
+            key: key == null ? null : ValueKey(key),
             left: left,
             top: t,
-            width: r.width * cw,
-            height: r.height * ch,
-            child: o.child,
+            width: w,
+            height: h,
+            child: o.builder?.call(Size(cw, ch)) ?? o.child,
           ),
         );
-        canvasW = math.max(canvasW, left + r.width * cw);
-        canvasH = math.max(canvasH, t + r.height * ch);
+        canvasW = math.max(canvasW, left + w);
+        canvasH = math.max(canvasH, t + h);
       }
     }
     final canvas = SizedBox(
@@ -1265,99 +1444,109 @@ class _DynproViewState extends State<DynproView> {
       () => TextEditingController(text: f.text),
     );
     _syncPainted(key, ctrl, f.text);
-    final enabled = !widget.busy && !f.isProtected;
     final scheme = Theme.of(context).colorScheme;
-    final f4 =
-        f.hasF4 && enabled && widget.onValueHelp != null && _focused == key;
-    return Focus(
-      onKeyEvent: (_, e) => _typeAheadKey(key, f, ctrl, e),
-      onFocusChange: (has) {
-        _typeAheadFocus(key, f, has, ctrl);
-        // SAP GUI's cursor field: it stays the current field when the
-        // keyboard is put away (F1 / F4 still act on it) until another
-        // field takes the focus or the screen changes — a focus loss, or
-        // the cursor field taking the focus again, changes nothing to draw
-        if (!has) return;
-        widget.onFocusField?.call(f);
-        if (_focused != key) setState(() => _focused = key);
-      },
-      child: _typeAheadAnchor(key, f, ctrl, TextField(
-        controller: ctrl,
-        enabled: enabled,
-        obscureText: f.invisible,
-        maxLength: f.maxnrchars > 0 ? f.maxnrchars : null,
-        textAlignVertical: TextAlignVertical.center,
-        style: TextStyle(
-          fontSize: font,
-          fontFamily: 'Menlo',
-          fontFamilyFallback: const ['Courier New', 'monospace'],
-          // no tracking: Material 3's body text adds 0.5 pt a glyph, which
-          // pushed a full field's last glyph past its box
-          letterSpacing: 0,
-        ),
-        onTap: () => _edited.add(key),
-        onChanged: (value) {
-          _edited.add(key);
-          widget.onEdit?.call(f, value);
-          _typeAheadEdited(key, ctrl);
+    return _leaf((busy) {
+      final enabled = !busy && !f.isProtected;
+      final f4 =
+          f.hasF4 && enabled && widget.onValueHelp != null && _focused == key;
+      return Focus(
+        onKeyEvent: (_, e) => _typeAheadKey(key, f, ctrl, e),
+        onFocusChange: (has) {
+          _typeAheadFocus(key, f, has, ctrl);
+          // SAP GUI's cursor field: it stays the current field when the
+          // keyboard is put away (F1 / F4 still act on it) until another
+          // field takes the focus or the screen changes — a focus loss, or
+          // the cursor field taking the focus again, changes nothing to draw
+          if (!has) return;
+          widget.onFocusField?.call(f);
+          if (_focused != key) setState(() => _focused = key);
         },
-        contextMenuBuilder: widget.onContextMenu == null
-            ? null
-            : (context, state) => _fieldTextMenu(context, state, f),
-        onSubmitted: (value) async {
-          _edited.remove(key);
-          _typeAheadSubmitted(key, value);
-          await widget.onFill(f, value);
-        },
-        decoration: InputDecoration(
-          // SAP GUI's F4 button at the right edge of the focused field
-          suffixIcon: f4
-              ? IconButton(
-                  tooltip: 'Value help (F4)',
-                  padding: EdgeInsets.zero,
-                  visualDensity: VisualDensity.compact,
-                  iconSize: font + 2,
-                  icon: const Icon(Icons.manage_search),
-                  onPressed: () => widget.onValueHelp!(f),
-                )
-              : null,
-          suffixIconConstraints: BoxConstraints.tightFor(
-            width: font + 8,
-            height: font + 6,
+        child: _typeAheadAnchor(key, f, ctrl, TextField(
+          controller: ctrl,
+          enabled: enabled,
+          obscureText: f.invisible,
+          maxLength: f.maxnrchars > 0 ? f.maxnrchars : null,
+          textAlignVertical: TextAlignVertical.center,
+          style: TextStyle(
+            fontSize: font,
+            fontFamily: 'Menlo',
+            fontFamilyFallback: const ['Courier New', 'monospace'],
+            // no tracking: Material 3's body text adds 0.5 pt a glyph, which
+            // pushed a full field's last glyph past its box
+            letterSpacing: 0,
           ),
-          isDense: true,
-          counterText: '',
-          filled: true,
-          fillColor: f.isProtected
-              ? scheme.surfaceContainerHighest
-              : scheme.surfaceContainerLowest,
-          contentPadding: EdgeInsets.symmetric(
-            horizontal: cw * 0.3,
-            vertical: 0,
+          onTap: () => _edited.add(key),
+          onChanged: (value) {
+            _edited.add(key);
+            widget.onEdit?.call(f, value);
+            _typeAheadEdited(key, ctrl);
+          },
+          contextMenuBuilder: widget.onContextMenu == null
+              ? null
+              : (context, state) => _fieldTextMenu(context, state, f),
+          onSubmitted: (value) async {
+            _edited.remove(key);
+            _typeAheadSubmitted(key, value);
+            await widget.onFill(f, value);
+          },
+          decoration: InputDecoration(
+            // SAP GUI's F4 button at the right edge of the focused field
+            suffixIcon: f4
+                ? IconButton(
+                    tooltip: 'Value help (F4)',
+                    padding: EdgeInsets.zero,
+                    visualDensity: VisualDensity.compact,
+                    iconSize: font + 2,
+                    icon: const Icon(Icons.manage_search),
+                    onPressed: () => widget.onValueHelp!(f),
+                  )
+                : null,
+            suffixIconConstraints: BoxConstraints.tightFor(
+              width: font + 8,
+              height: font + 6,
+            ),
+            isDense: true,
+            counterText: '',
+            filled: true,
+            fillColor: f.isProtected
+                ? scheme.surfaceContainerHighest
+                : scheme.surfaceContainerLowest,
+            contentPadding: EdgeInsets.symmetric(
+              horizontal: cw * 0.3,
+              vertical: 0,
+            ),
+            // gapPadding 0: the outline's label gap (4 pt a side, for a
+            // floating label these fields never have) is taken off the
+            // text's width — 8 pt a 2-cell field cannot spare
+            border: OutlineInputBorder(
+              gapPadding: 0,
+              borderRadius: BorderRadius.circular(3),
+              borderSide: BorderSide(color: scheme.outlineVariant),
+            ),
+            enabledBorder: OutlineInputBorder(
+              gapPadding: 0,
+              borderRadius: BorderRadius.circular(3),
+              // the cursor field keeps its mark without the keyboard
+              borderSide: _focused == key
+                  ? BorderSide(color: scheme.primary, width: 1.5)
+                  : BorderSide(color: scheme.outlineVariant),
+            ),
           ),
-          // gapPadding 0: the outline's label gap (4 pt a side, for a
-          // floating label these fields never have) is taken off the
-          // text's width — 8 pt a 2-cell field cannot spare
-          border: OutlineInputBorder(
-            gapPadding: 0,
-            borderRadius: BorderRadius.circular(3),
-            borderSide: BorderSide(color: scheme.outlineVariant),
-          ),
-          enabledBorder: OutlineInputBorder(
-            gapPadding: 0,
-            borderRadius: BorderRadius.circular(3),
-            // the cursor field keeps its mark without the keyboard
-            borderSide: _focused == key
-                ? BorderSide(color: scheme.primary, width: 1.5)
-                : BorderSide(color: scheme.outlineVariant),
-          ),
-        ),
-      )),
-    );
+        )),
+      );
+    });
   }
 
-  Widget _gridButton(ScreenField f, SapIconAtlas? icons, double font) {
-    final enabled = !widget.busy && (f.fcode ?? '').isNotEmpty;
+  Widget _gridButton(ScreenField f, SapIconAtlas? icons, double font) =>
+      _leaf((busy) => _gridButtonOf(f, icons, font, busy));
+
+  Widget _gridButtonOf(
+    ScreenField f,
+    SapIconAtlas? icons,
+    double font,
+    bool busy,
+  ) {
+    final enabled = !busy && (f.fcode ?? '').isNotEmpty;
     final tip = iconQuickInfo(f.text);
     final plain = (icons?.stripTokens(f.text) ?? f.text).trim();
     final token = SapIconAtlas.tokenRx.firstMatch(f.text);
@@ -1448,7 +1637,9 @@ class _DynproViewState extends State<DynproView> {
     final cb = widget.onDoubleClick;
     if (cb == null || !enabled) return child;
     return DoubleTapListener(
-      onDoubleTap: widget.busy ? null : () => cb(f),
+      onDoubleTap: () {
+        if (!_busyNow) cb(f);
+      },
       child: child,
     );
   }
@@ -1528,6 +1719,7 @@ class _DynproViewState extends State<DynproView> {
     List<ScreenField> group,
     double font,
     double ch,
+    bool busy,
   ) {
     ScreenField? current =
         widget.radioSelection != null && group.contains(widget.radioSelection)
@@ -1538,7 +1730,7 @@ class _DynproViewState extends State<DynproView> {
       current = painted.isNotEmpty ? painted.first : null;
     }
     final enabled =
-        !widget.busy && (widget.onRadio != null || widget.onRadioTap != null);
+        !busy && (widget.onRadio != null || widget.onRadioTap != null);
     void choose() {
       if (widget.onRadio != null) {
         widget.onRadio!(group, f);
@@ -1742,31 +1934,35 @@ class _DynproViewState extends State<DynproView> {
           _input(f, layout.captionOf.containsKey(f), maxWidth),
         );
       case FieldKind.checkbox:
-        return _Choice(
-          leading: Checkbox(
-            value: f.on,
-            onChanged: widget.busy ? null : (_) => widget.onPress(0),
+        return _leaf(
+          (busy) => _Choice(
+            leading: Checkbox(
+              value: f.on,
+              onChanged: busy ? null : (_) => widget.onPress(0),
+            ),
+            text: _choiceText(f),
+            onTap: busy ? null : () => widget.onPress(0),
           ),
-          text: _choiceText(f),
-          onTap: widget.busy ? null : () => widget.onPress(0),
         );
       case FieldKind.radio:
         final group = radioGroups['${f.area}:${f.block}:${f.group}'] ?? [f];
-        return _radio(f, group);
+        return _leaf((busy) => _radio(f, group, busy));
       case FieldKind.pushbutton:
-        return _button(f, icons);
+        return _leaf((busy) => _button(f, icons, busy));
       case FieldKind.tabstrip:
-        return ChoiceChip(
-          label: Text(icons?.stripTokens(f.text).trim() ?? f.text),
-          selected: f.on,
-          onSelected: (widget.busy || (f.fcode ?? '').isEmpty)
-              ? null
-              : (_) => widget.onOkcode(f.fcode!),
+        return _leaf(
+          (busy) => ChoiceChip(
+            label: Text(icons?.stripTokens(f.text).trim() ?? f.text),
+            selected: f.on,
+            onSelected: (busy || (f.fcode ?? '').isEmpty)
+                ? null
+                : (_) => widget.onOkcode(f.fcode!),
+          ),
         );
     }
   }
 
-  Widget _radio(ScreenField f, List<ScreenField> group) {
+  Widget _radio(ScreenField f, List<ScreenField> group, bool busy) {
     // an explicit selection wins; else the painted-ON member
     ScreenField? current =
         widget.radioSelection != null && group.contains(widget.radioSelection)
@@ -1777,7 +1973,7 @@ class _DynproViewState extends State<DynproView> {
       current = painted.isNotEmpty ? painted.first : null;
     }
     final enabled =
-        !widget.busy && (widget.onRadio != null || widget.onRadioTap != null);
+        !busy && (widget.onRadio != null || widget.onRadioTap != null);
     void choose() {
       if (widget.onRadio != null) {
         widget.onRadio!(group, f);
@@ -1800,8 +1996,8 @@ class _DynproViewState extends State<DynproView> {
     );
   }
 
-  Widget _button(ScreenField f, SapIconAtlas? icons) {
-    final enabled = !widget.busy && (f.fcode ?? '').isNotEmpty;
+  Widget _button(ScreenField f, SapIconAtlas? icons, bool busy) {
+    final enabled = !busy && (f.fcode ?? '').isNotEmpty;
     final onPressed = enabled ? () => widget.onOkcode(f.fcode!) : null;
     final tip = iconQuickInfo(f.text);
     final plain = (icons?.stripTokens(f.text) ?? f.text).trim();
@@ -1842,9 +2038,9 @@ class _DynproViewState extends State<DynproView> {
       64.0,
       maxWidth.clamp(64.0, 440.0),
     );
-    final field = TextField(
+    Widget field(bool busy) => TextField(
         controller: ctrl,
-        enabled: !widget.busy && !f.isProtected,
+        enabled: !busy && !f.isProtected,
         obscureText: f.invisible,
         onTap: () => _edited.add(key),
         onChanged: (value) {
@@ -1874,11 +2070,11 @@ class _DynproViewState extends State<DynproView> {
     return ConstrainedBox(
       constraints: BoxConstraints(minWidth: 48, maxWidth: width),
       child: TypeAheadScope.maybeOf(context) == null
-          ? field
+          ? _leaf(field)
           : Focus(
               onKeyEvent: (_, e) => _typeAheadKey(key, f, ctrl, e),
               onFocusChange: (has) => _typeAheadFocus(key, f, has, ctrl),
-              child: _typeAheadAnchor(key, f, ctrl, field),
+              child: _leaf((busy) => _typeAheadAnchor(key, f, ctrl, field(busy))),
             ),
     );
   }
@@ -2201,4 +2397,145 @@ class _DoubleTapListenerState extends State<DoubleTapListener> {
     },
     child: widget.child,
   );
+}
+
+/// A classic list line drawn with the list cursor when it is on [row]:
+/// [cursor] (a tap's) over [painted] (the paint's). A tap moves the cursor
+/// by the notifier — the line it left and the line it lands on rebuild,
+/// the view and every other line do not.
+class _ListCursorLine extends StatefulWidget {
+  const _ListCursorLine({
+    required this.cursor,
+    required this.painted,
+    required this.row,
+    required this.builder,
+  });
+
+  final ValueListenable<(int, int)?> cursor;
+  final (int, int)? painted;
+  final int row;
+  final Widget Function(int? cursorCol) builder;
+
+  @override
+  State<_ListCursorLine> createState() => _ListCursorLineState();
+}
+
+class _ListCursorLineState extends State<_ListCursorLine> {
+  int? _col;
+
+  int? _colNow() {
+    final c = widget.cursor.value ?? widget.painted;
+    return c != null && c.$1 == widget.row ? c.$2 : null;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    widget.cursor.addListener(_moved);
+  }
+
+  @override
+  void didUpdateWidget(_ListCursorLine old) {
+    super.didUpdateWidget(old);
+    if (!identical(old.cursor, widget.cursor)) {
+      old.cursor.removeListener(_moved);
+      widget.cursor.addListener(_moved);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.cursor.removeListener(_moved);
+    super.dispose();
+  }
+
+  void _moved() {
+    if (_colNow() != _col) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.builder(_col = _colNow());
+}
+
+/// One cell of a table control's scrolling columns (a heading, a field)
+/// between [left] and [right] on the scrolled content; [cellKey] names a
+/// field's cell (the focus is kept on it).
+class _TcCell {
+  _TcCell(this.left, this.right, this.widget, [this.cellKey]);
+  final double left, right;
+  final Widget widget;
+  final String? cellKey;
+}
+
+/// A table control's scrolling columns, only those near the scrolled
+/// window built (a viewport of margin on either side — TC_1211's 35
+/// columns are all of them; a control hundreds of cells wide builds a
+/// few): rebuilt when the scroll moves a viewport, not per scroll frame.
+/// The [keep] cell (the cursor field) stays built wherever it scrolls, so
+/// it keeps its focus.
+class _TcColumns extends StatefulWidget {
+  const _TcColumns({
+    required this.controller,
+    required this.viewport,
+    required this.cells,
+    this.keep,
+  });
+
+  final ScrollController controller;
+  final double viewport;
+  final List<_TcCell> cells;
+  final String? keep;
+
+  @override
+  State<_TcColumns> createState() => _TcColumnsState();
+}
+
+class _TcColumnsState extends State<_TcColumns> {
+  int _page = 0;
+
+  int _pageNow() {
+    final c = widget.controller;
+    if (!c.hasClients || widget.viewport <= 0) return 0;
+    return (c.offset / widget.viewport).floor();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_scrolled);
+  }
+
+  @override
+  void didUpdateWidget(_TcColumns old) {
+    super.didUpdateWidget(old);
+    if (!identical(old.controller, widget.controller)) {
+      old.controller.removeListener(_scrolled);
+      widget.controller.addListener(_scrolled);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_scrolled);
+    super.dispose();
+  }
+
+  void _scrolled() {
+    if (_pageNow() != _page) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final page = _page = _pageNow();
+    final v = widget.viewport;
+    final lo = (page - 1) * v, hi = (page + 3) * v;
+    return Stack(
+      children: [
+        for (final c in widget.cells)
+          if ((c.right >= lo && c.left <= hi) ||
+              (c.cellKey != null && c.cellKey == widget.keep))
+            c.widget,
+      ],
+    );
+  }
 }
