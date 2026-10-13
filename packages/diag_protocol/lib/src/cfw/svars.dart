@@ -1,6 +1,7 @@
 /// SVARS: the OLE_FLUSH_CALL variable-table columns (diag_svars port).
 library;
 
+import 'dart:convert';
 import 'dart:typed_data';
 
 import '../lzh/lzh.dart';
@@ -22,8 +23,11 @@ class Rec {
   final Uint8List raw;
   late final int width = raw.length;
 
-  String _t(int start, int end) =>
-      String.fromCharCodes(raw, start, end < raw.length ? end : raw.length);
+  // clamped at both ends: a record cut short (a hostile / corrupt cell)
+  // reads its missing fields as empty, never a RangeError out of the parse
+  String _t(int start, int end) => start >= raw.length
+      ? ''
+      : String.fromCharCodes(raw, start, end < raw.length ? end : raw.length);
 
   // The fields are decoded once per record: a flush's PARAMS / VARS rows
   // are read by every side model of the call (audit #8) and a record's
@@ -59,8 +63,27 @@ class Rec {
   }
 
   /// [valueBytes] as text, trimmed (an argument value as the verb readers
-  /// take it), decoded once.
-  late final String valueText = String.fromCharCodes(valueBytes).trim();
+  /// take it), decoded once — in the session codepage: UTF-8 on 4110, so
+  /// an AddButton quickinfo reads `Entrées possibles`, not `EntrÃ©es
+  /// possibles` (a recorded session srv[11] toolbar 151); a value that
+  /// is no valid UTF-8 stays latin-1 (the reference client's ea_flushcall.arg_text).
+  late final String valueText = _argText(valueBytes).trim();
+}
+
+String _argText(Uint8List b) {
+  var ascii = true;
+  for (final x in b) {
+    if (x >= 0x80) {
+      ascii = false;
+      break;
+    }
+  }
+  if (ascii) return String.fromCharCodes(b);
+  try {
+    return utf8.decode(b);
+  } on FormatException {
+    return String.fromCharCodes(b);
+  }
 }
 
 /// Slice a decompressed SVARS blob into fixed-width records.

@@ -7,18 +7,22 @@ import 'package:flutter/services.dart';
 import 'package:local_auth/local_auth.dart';
 
 import '../../core/connections.dart';
+import '../../core/error_text.dart';
 import '../../core/open_lock_icon.dart';
 import '../../core/password_dialog.dart';
+import '../../core/password_gate.dart';
 import '../../core/sap_icons.dart';
 import 'dynpro_view.dart';
 import 'frame_coalescer.dart';
 import 'sap_calendar_view.dart';
 import 'sap_canvas_layout.dart';
 import 'sap_chart_view.dart';
+import 'sap_combo_box_view.dart';
 import 'sap_control_toolbar.dart';
 import 'sap_graph_view.dart';
 import 'sap_grid_view.dart';
 import 'sap_html_view.dart';
+import 'sap_picture_view.dart';
 import 'sap_value_help_view.dart';
 import 'sap_window_size.dart';
 import 'sap_source_view.dart';
@@ -27,6 +31,7 @@ import 'sap_toolbar.dart';
 import 'screen_composer.dart';
 import 'sap_tree_view.dart';
 import 'modal_window.dart';
+import 'type_ahead.dart';
 
 class SessionArgs {
   SessionArgs(this.entry, this.store);
@@ -360,9 +365,7 @@ class _SessionScreenState extends State<SessionScreen>
         if (identical(_attempt, failed)) _attempt = null;
         await _closeQuietly(failed);
       }
-      if (mounted) {
-        setState(() => _error = e.toString());
-      }
+      if (mounted) setState(() => _fail(e));
     } finally {
       // the connect log was the logon's: no timer outlives it
       _logTimer?.cancel();
@@ -448,31 +451,26 @@ class _SessionScreenState extends State<SessionScreen>
   }
 
   /// The password for this logon and whether it came from the store:
-  /// the stored one behind the biometric gate, else typed (null when the
-  /// user cancels).
+  /// the stored one as [releaseStoredPassword] releases it (read only
+  /// after Face ID / Touch ID / fingerprint when enrolled; used directly
+  /// when none is), else typed (null when the user cancels).
   Future<(String?, bool)> _gatePassword() async {
-    final stored = await _args.store.readPassword(_args.entry.id);
-    if (stored == null || stored.isEmpty) {
-      return (await _promptPassword(), false);
-    }
-    try {
-      // with no Face ID / Touch ID enrolled (a simulator, an iPad without
-      // biometrics) there is no gate to pass: the stored password is used —
-      // the Keychain itself only releases it while the device is unlocked
-      // (KeychainAccessibility.unlocked_this_device)
-      final enrolled = await _localAuth.getAvailableBiometrics();
-      if (enrolled.isEmpty) return (stored, true);
-      final ok = await _localAuth.authenticate(
+    final store = _args.store;
+    final id = _args.entry.id;
+    final stored = await releaseStoredPassword(
+      hasStored: () => store.hasPassword(id),
+      biometricsEnrolled: () async =>
+          (await _localAuth.getAvailableBiometrics()).isNotEmpty,
+      authenticate: () => _localAuth.authenticate(
         localizedReason: 'Unlock the stored password for ${_args.entry.name}',
         options: const AuthenticationOptions(
           stickyAuth: true,
           biometricOnly: false,
         ),
-      );
-      if (ok) return (stored, true);
-    } catch (_) {
-      // no biometrics enrolled / unavailable — fall through to manual entry
-    }
+      ),
+      read: () => store.readPassword(id),
+    );
+    if (stored != null) return (stored, true);
     return (await _promptPassword(), false);
   }
 
@@ -497,13 +495,43 @@ class _SessionScreenState extends State<SessionScreen>
     );
   }
 
+  /// Activate [key] of the screen's tree (the full-screen Easy Access
+  /// tree, a tree beside a canvas): its node double-click event.
+  Future<void> _activateScreenTreeNode(String key) => _run(() async {
+    final sh = _session!.treeShell;
+    if (sh == null) throw StateError('no tree control on this screen');
+    await _session!.activateTreeNode(sh, key);
+  });
+
+  /// Whether tree [shell] handles a double-click (registered 25 / 22):
+  /// the tree view then sends it for a folder too instead of toggling.
+  bool _treeHandlesDoubleClick(String? shell) =>
+      shell == null || _session?.treeDoubleClickEvent(shell) != null;
+
+  /// A tap selected [key] of tree [shell]: the tree's selection (its
+  /// SelectionKeys read-back), a 21 SELCHANGE round when it registered one.
+  void _selectTreeNode(String? shell, String key) {
+    final s = _session;
+    if (s == null || shell == null) return;
+    if (s.treeSelectionEventRegistered(shell)) {
+      _run(() async => s.selectTreeNode(shell, key));
+    } else {
+      s.noteTreeSelection(shell, key);
+    }
+  }
+
+  /// Folder [key] of tree [shell] was opened / closed on the client.
+  void _toggledTreeNode(String? shell, String key, bool open) {
+    if (shell != null) _session?.noteTreeExpansion(shell, key, open: open);
+  }
+
   Future<void> _run(Future<void> Function() fn) async {
     if (_busy || _session == null) return;
     _busy = true;
     try {
       await fn();
     } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
+      if (mounted) setState(() => _fail(e));
     } finally {
       _lastActivity = DateTime.now();
       if (mounted) _busy = false;
@@ -585,7 +613,8 @@ class _SessionScreenState extends State<SessionScreen>
   @override
   Widget build(BuildContext context) {
     SessionScreen.debugScaffoldBuilds++;
-    return DynproZoomScope(
+    _refreshTypeAhead();
+    final body = DynproZoomScope(
       widest: _widestCols,
       child: PopScope(
         // the edge-swipe back is SAP's Back (F3) too while a session is live
@@ -688,23 +717,42 @@ class _SessionScreenState extends State<SessionScreen>
                 // keyboard inset from its body's MediaQuery
                 keyboard: MediaQuery.viewInsetsOf(this.context).bottom,
               );
-              return _region((_) {
-                SessionScreen.debugBodyBuilds++;
-                final m = _screen;
-                return _error != null
-                    ? _errorView()
-                    : m == null
-                    ? _connectingView()
-                    : _withPlaintextBanner(
-                        _withRemoteLogonBanner(_sessionStack(m)),
-                      );
-              });
+              // the keyboard does not squeeze the screen: it keeps the
+              // height it had without it (so the composer's scale, and
+              // every element's width, stay) and scrolls under the
+              // keyboard instead — a focused field scrolls itself into
+              // view. One widget shape with or without the keyboard, so
+              // the focused field is not remounted when it comes up.
+              final keyboardUp =
+                  MediaQuery.viewInsetsOf(this.context).bottom > 0;
+              final full = _bodySize?.height ?? cons.maxHeight;
+              final height = keyboardUp && full > cons.maxHeight
+                  ? full
+                  : cons.maxHeight;
+              return SingleChildScrollView(
+                child: SizedBox(
+                  width: cons.maxWidth,
+                  height: height,
+                  child: _region((_) {
+                    SessionScreen.debugBodyBuilds++;
+                    final m = _screen;
+                    return _error != null
+                        ? _errorView()
+                        : m == null
+                        ? _connectingView()
+                        : _withPlaintextBanner(
+                            _withRemoteLogonBanner(_sessionStack(m)),
+                          );
+                  }),
+                ),
+              );
             },
           ),
           bottomNavigationBar: _region((_) => _statusAndKeys(_screen)),
         ),
       ),
     );
+    return _withTypeAhead(context, body);
   }
 
   /// No SNC on this logon: the DIAG stream — the logon included — travels
@@ -887,10 +935,7 @@ class _SessionScreenState extends State<SessionScreen>
         );
     final composed = content.isNotEmpty && !soleGrid;
     if (composed) {
-      final panes = [
-        for (final r in _onePerShell(regions))
-          ?_regionPane(base, r, modalActive),
-      ];
+      final panes = _composedPanes(base, regions, modalActive);
       return IgnorePointer(
         ignoring: modalActive,
         child: Opacity(
@@ -913,6 +958,7 @@ class _SessionScreenState extends State<SessionScreen>
               // the session's own window: its rows end at the body's bottom
               fillHeight: true,
               panes: panes,
+              onDockResize: _dockResized,
             ),
           ),
         ),
@@ -958,6 +1004,14 @@ class _SessionScreenState extends State<SessionScreen>
                         _run(() async => _session!.okcode('/n$tcode')),
                     onExpand: (key) =>
                         _run(() async => _session!.expandTreeNode(key)),
+                    onActivate: _activateScreenTreeNode,
+                    handlesDoubleClick: _treeHandlesDoubleClick(
+                      _session?.treeShell,
+                    ),
+                    onSelect: (key) =>
+                        _selectTreeNode(_session?.treeShell, key),
+                    onToggle: (key, open) =>
+                        _toggledTreeNode(_session?.treeShell, key, open),
                     onContextMenu: (key, at) {
                       final sh = _session?.treeShell;
                       if (sh != null) _treeMenu(sh, key, at);
@@ -996,6 +1050,13 @@ class _SessionScreenState extends State<SessionScreen>
             onRunTcode: (tcode) =>
                 _run(() async => _session!.okcode('/n$tcode')),
             onExpand: (key) => _run(() async => _session!.expandTreeNode(key)),
+            // the Easy Access double-click: `%_GC 105 25` + ABAPSelNodeKey
+            // (a recorded session gui[39]), never a typed /n<tcode>
+            onActivate: _activateScreenTreeNode,
+            handlesDoubleClick: _treeHandlesDoubleClick(_session?.treeShell),
+            onSelect: (key) => _selectTreeNode(_session?.treeShell, key),
+            onToggle: (key, open) =>
+                _toggledTreeNode(_session?.treeShell, key, open),
             onContextMenu: (key, at) {
               final sh = _session?.treeShell;
               if (sh != null) _treeMenu(sh, key, at);
@@ -1042,9 +1103,7 @@ class _SessionScreenState extends State<SessionScreen>
       (r) => r.kind != 'dynpro' && r.shell != null && _hasContent(r.shell!),
     );
     if (!hosts) return null;
-    final panes = [
-      for (final r in _onePerShell(regions)) ?_regionPane(popup, r, false),
-    ];
+    final panes = _composedPanes(popup, regions, false);
     final extent = ScreenComposer.extentOf(panes);
     const cw = 10.0;
     final size = Size(
@@ -1129,7 +1188,9 @@ class _SessionScreenState extends State<SessionScreen>
       // the rows past the pushed block: fetched as they scroll into view,
       // the way the real GUI's DATAREQUEST asks for them
       rowCount: grid.totalRows ?? grid.rows.length,
-      rowAt: (i) => grid.rowAt(i + 1),
+      // one closure per grid model, so the view's `identical` re-push
+      // guard only fires when the rows really changed (a new model)
+      rowAt: gridRowAt(grid),
       onNeedRows: (line, top) async {
         if (_busy || _session == null) return false; // asked again shortly
         await _run(() async {
@@ -1199,15 +1260,29 @@ class _SessionScreenState extends State<SessionScreen>
     );
   }
 
-  /// The largest extent the composed window reached in the current
-  /// transaction (by program): the scale holds while the user moves between
-  /// its screens (ST04's tree picks swap the detail panes), and a new
-  /// transaction fits its own window again.
+  /// The composed window's extent: the SAP window the server laid the
+  /// screen out in (the paint's 16/12/7 window pair) — the scale holds
+  /// while the user moves between its screens (ST04's tree picks swap the
+  /// detail panes) and follows the server when it lays the window out
+  /// anew (a rotation's resize round). Without a pair: the largest extent
+  /// the panes reached in the current transaction (by program).
+  ///
+  /// The largest-extent rule alone kept a window the server had since laid
+  /// out SMALLER: after the resize round of a rotation (the reset keyed on
+  /// GuiGo's own size ran on the build before the server's repaint, with
+  /// the old, wider panes) every pane of the new layout was drawn in the
+  /// old width — the live iPad ST04 load history ended its grids at ~79 %
+  /// and its message strip at ~72 % of the body.
   String? _extentProgram;
   (int?, int?)? _extentWindow;
   Size? _extentMax;
 
   Size? _stableExtent(String? program, List<ComposedPane> panes) {
+    final painted = _session?.windowExtent;
+    if (painted != null && painted.$1 > 0 && painted.$2 > 0) {
+      _extentMax = null; // a pair-less screen later starts over
+      return Size(painted.$2.toDouble(), painted.$1.toDouble());
+    }
     final e = ScreenComposer.extentOf(panes);
     // a new window size (a rotation) lays the screen out anew: the zoom
     // starts over from it
@@ -1229,6 +1304,40 @@ class _SessionScreenState extends State<SessionScreen>
 
   /// The least height a control pane lays out at; a shorter pane clips it.
   static const double _minPaneHeight = 72;
+
+  /// The height a control toolbar's button row is drawn at (its 30-px
+  /// buttons and the scroll bar's 6-px strip).
+  static const double _controlRowHeight = 36;
+
+  /// A control row [c] in its pane ([cons]): laid out in the pane's own
+  /// height, a [scaled] one (a toolbar's buttons) drawn at
+  /// [_controlRowHeight] and scaled down to a pane shorter than that. Laid
+  /// out in the [_minPaneHeight] and clipped like the other panes, a
+  /// one-cell row showed only the top edge of its controls: SE80's dock
+  /// (live iPad landscape, 68 rows: ~16-px rows) drew its toolbars as
+  /// empty boxes and a bare blue bar — each button stretched to the 72 px,
+  /// its icon and text centered below the cut — and its combo box / input
+  /// field row as nothing.
+  static Widget _controlRow(
+    Widget c,
+    BoxConstraints cons, {
+    required bool scaled,
+  }) {
+    final h = cons.maxHeight, w = cons.maxWidth;
+    if (!scaled ||
+        !h.isFinite ||
+        !w.isFinite ||
+        h <= 0 ||
+        h >= _controlRowHeight) {
+      return c;
+    }
+    final k = h / _controlRowHeight;
+    return FittedBox(
+      fit: BoxFit.contain,
+      alignment: Alignment.topLeft,
+      child: SizedBox(width: w / k, height: _controlRowHeight, child: c),
+    );
+  }
 
   /// One region per control shell: the layout can name a hosted control
   /// both at its container and at its own box (ST04's INI-file tree drew
@@ -1278,7 +1387,84 @@ class _SessionScreenState extends State<SessionScreen>
         v.netPlans.any((g) => g.shell == shell) ||
         v.canvases.any((c) => c.shell == shell) ||
         s.calendarFor(shell) != null ||
+        v.drawnPictures.contains(shell) ||
         v.controlToolbars.containsKey(shell);
+  }
+
+  /// The panes of a composed window: every region at its window cells —
+  /// except the regions lying ON the dynpro (its custom-control areas: the
+  /// DB50 overview's bars, a chart, the grids of a splitter in one), which
+  /// are drawn on the dynpro's own canvas at their dynpro cells. As panes
+  /// of their own they stayed at their window cells when a sash drag moved
+  /// the dynpro pane (the live ST04 overview: the memory bars overflowing
+  /// the "Mémoire" box with the sash right, inside the disk box with it
+  /// left), and their cells widened the window when they reached past the
+  /// dynpro's area.
+  List<ComposedPane> _composedPanes(
+    ScreenModel base,
+    List<ScreenRegion> regions,
+    bool modal,
+  ) {
+    final all = _onePerShell(regions);
+    final dyn = all.where((r) => r.kind == 'dynpro').firstOrNull?.rect;
+    bool onDynpro(ScreenRegion r) {
+      if (dyn == null || r.kind == 'dynpro' || r.kind == 'sash') return false;
+      const e = 0.01;
+      final c = r.rect;
+      return c.row >= dyn.row - e &&
+          c.col >= dyn.col - e &&
+          c.row + c.rows <= dyn.row + dyn.rows + e &&
+          c.col + c.cols <= dyn.col + dyn.cols + e;
+    }
+
+    final nested = <(Rect, String?, ComposedPane)>[
+      for (final r in all)
+        if (onDynpro(r))
+          if (_regionPane(base, r, modal) case final p?)
+            (
+              Rect.fromLTWH(
+                r.rect.col - dyn!.col,
+                r.rect.row - dyn.row,
+                r.rect.cols,
+                r.rect.rows,
+              ),
+              r.container ?? r.shell,
+              p,
+            ),
+    ];
+    final s = _session;
+    return [
+      for (final r in all)
+        if (!onDynpro(r))
+          if (_regionPane(base, r, modal, nested: nested) case final p?)
+            r.kind == 'dynpro' || s == null
+                ? p
+                : p.withDock(
+                    s.dockOf(r.shell ?? '') ?? s.dockOf(r.container ?? ''),
+                  ),
+    ];
+  }
+
+  /// The user dragged the edge of docking container [dock] to [cols]
+  /// window cells ([ScreenComposer.onDockResize]): the session realizes the
+  /// new extent at once (its regions follow) and reports it in the layout
+  /// round, now or with the next paint ([SapSession.resizeDock]); the
+  /// server then lays the dynpro area out to it.
+  Future<void> _dockResized(String dock, double cols) async {
+    final s = _session;
+    if (!mounted || s == null) return;
+    final wasBusy = _busy;
+    if (!wasBusy) _busy = true;
+    final round = s.resizeDock(dock, cols); // the regions follow at once
+    setState(() {});
+    try {
+      await round;
+    } catch (_) {
+      // a round the server did not answer: the extent rides the next one
+    } finally {
+      if (mounted && !wasBusy) _busy = false;
+    }
+    if (mounted && _current(s)) setState(() => _screen = s.screen);
   }
 
   /// One region of a composed window as a pane, by the reference client's rung:
@@ -1286,7 +1472,15 @@ class _SessionScreenState extends State<SessionScreen>
   /// paired field, a chart / network graph / canvas by its shell, R7 (no
   /// content delivered yet) a dashed placeholder with the reference client's legend.
   /// Null for a region that paints nothing.
-  ComposedPane? _regionPane(ScreenModel base, ScreenRegion r, bool modal) {
+  ///
+  /// The dynpro's pane draws [nested] — the regions on it, at their dynpro
+  /// cells — on its canvas ([_composedPanes]).
+  ComposedPane? _regionPane(
+    ScreenModel base,
+    ScreenRegion r,
+    bool modal, {
+    List<(Rect, String?, ComposedPane)> nested = const [],
+  }) {
     if (r.kind == 'sash') return null; // a fixed divider: nothing to draw
     final cells = Rect.fromLTWH(
       r.rect.col,
@@ -1309,6 +1503,22 @@ class _SessionScreenState extends State<SessionScreen>
           model: base,
           busy: _busy || modal,
           cell: cell,
+          overlays: [
+            for (final (cells, id, p) in nested)
+              DynproOverlay(
+                cells,
+                id: id,
+                DecoratedBox(
+                  decoration: BoxDecoration(
+                    border: Border.all(
+                      color: Theme.of(context).colorScheme.outlineVariant,
+                      width: 0.5,
+                    ),
+                  ),
+                  child: p.builder(context, cell),
+                ),
+              ),
+          ],
           onFill: _fillField,
           onPress: (vkey) => _run(() async => _session!.press(vkey)),
           onOkcode: (cmd) => _run(() async => _session!.okcode(cmd)),
@@ -1376,6 +1586,7 @@ class _SessionScreenState extends State<SessionScreen>
           breakpoints: e.breakpoints,
           currentLine: e.cursorLine,
           firstVisibleLine: e.firstVisibleLine,
+          scrollSerial: e.firstVisibleLinePuts,
           onToggleBreakpoint: (line) =>
               _run(() async => _session!.editorToggleBreakpoint(e, line)),
           onNavigate: (line, col) =>
@@ -1393,6 +1604,14 @@ class _SessionScreenState extends State<SessionScreen>
             e,
             caretLine: line,
             caretCol: col,
+          ),
+          // a selection: SelPosStart* .. SelPosEnd* (end column exclusive)
+          onSelection: (sl, sc, el, ec) => _session?.setEditorClientState(
+            e,
+            caretLine: sl,
+            caretCol: sc,
+            selEndLine: el,
+            selEndCol: ec,
           ),
         );
       } else if (html.isNotEmpty) {
@@ -1417,6 +1636,9 @@ class _SessionScreenState extends State<SessionScreen>
               _run(() async => _session!.expandTreeNodeOf(shell, key)),
           onActivate: (key) =>
               _run(() async => _session!.activateTreeNode(shell, key)),
+          handlesDoubleClick: _treeHandlesDoubleClick(shell),
+          onSelect: (key) => _selectTreeNode(shell, key),
+          onToggle: (key, open) => _toggledTreeNode(shell, key, open),
           onContextMenu: (key, at) => _treeMenu(shell, key, at),
         );
       } else if (grid != null) {
@@ -1435,6 +1657,23 @@ class _SessionScreenState extends State<SessionScreen>
         content = _netPlanView(graph.first);
       } else if (canvas.isNotEmpty) {
         content = _canvasView(canvas.first);
+      } else if ((view?.drawnPictures.contains(shell) ?? false) &&
+          view?.pictures[shell] != null) {
+        final pic = view!.pictures[shell]!;
+        // a picture control (the STMS landscape picture): the bytes the
+        // server pushed, scaled by its display mode
+        content = SapPictureView(key: ValueKey('picture-$shell'), picture: pic);
+      } else if (cfwFieldControlView(
+            _session,
+            shell,
+            busy: _busy || modal,
+            run: _run,
+            icons: _icons,
+          )
+          case final w?) {
+        // a CFW combo box / input field (SE80's object-list type and
+        // object name, sap_combo_box_view.dart)
+        content = w;
       } else if (view?.controlToolbars[shell]?.kind ==
           SapControlToolbarKind.standalone) {
         // a SAP.Toolbar.1 in its own box (the ALV tree's, ME21N's
@@ -1444,13 +1683,22 @@ class _SessionScreenState extends State<SessionScreen>
     }
     if (content != null) {
       final c = content;
+      // a control ROW: a toolbar's buttons ('TB'), a combo box / input
+      // field ('CF')
+      final controlRow = r.rung == 'TB' || r.rung == 'CF';
       return ComposedPane(
         cells: cells,
+        // a control row keeps its height when a row divider moves
+        // (ScreenComposer: the divider moves it along)
+        rigidRows: controlRow,
         // a pane shorter than its control's chrome (a 3-row bottom dock on
-        // a small window) is cut off at its edge, as SAP GUI's is
+        // a small window) is cut off at its edge, as SAP GUI's is — but a
+        // control row is drawn in its own height (_controlRow)
         builder: (context, cell) => ClipRect(
           child: LayoutBuilder(
-            builder: (context, cons) => cons.maxHeight >= _minPaneHeight
+            builder: (context, cons) => controlRow
+                ? _controlRow(c, cons, scaled: r.rung == 'TB')
+                : cons.maxHeight >= _minPaneHeight
                 ? c
                 : SingleChildScrollView(
                     physics: const NeverScrollableScrollPhysics(),
@@ -1597,16 +1845,25 @@ class _SessionScreenState extends State<SessionScreen>
   /// else pans the canvas;
   /// * a double tap on a table or row is its OnLeftButtonDblClk
   /// `%_GC <shell> 32` (a recorded session gui[51] / [52]);
-  /// * a tap selects (outlined): wire-silent on every recorded canvas, and
-  /// where the canvas registered OnObjectSelected (RSNPG_TEST_NETPLAN1)
-  /// its PARAMs are on no capture, so the selection stays the client's;
+  /// * a tap selects (outlined): where the canvas announced
+  /// OnObjectSelected (RSNPG_TEST_NETPLAN1) it is event 134217728 with
+  /// the TABLE (a row's too) `(id, 0)`, a tap on the empty canvas
+  /// `(-1, -1)` (a recorded session gui[8] / [14]);
+  /// wire-silent on the SQVI / SQ02 canvases;
+  /// * a drag on a table (its header, its frame) moves it, its rows and
+  /// their links following — the real GUI sends only the mouse-down's
+  /// select, the move is wire-silent (same capture, gui[24]) and stays
+  /// the view's until the server places the table anew;
   /// * a long press released on the node, or a secondary click, is the
   /// right-click `%_GC <shell> 4194304` and its menu;
   /// * a tree row dropped on a canvas row is the CFW drop (the server then
   /// reads the drag&drop service).
-  /// Node moves stay off: no recorded GUI shows how a move reaches the
-  /// server.
   Widget _canvasView(SapCanvasModel c) {
+    void select(String? id) {
+      if (id != null && c.node(id) == null) return; // a repaint is on its way
+      _run(() async => _session!.canvasClick(c, id));
+    }
+
     final (nodes, edges) = canvasGraph(
       c,
       tableFill: Theme.of(context).colorScheme.surfaceContainerHigh,
@@ -1617,17 +1874,12 @@ class _SessionScreenState extends State<SessionScreen>
       nodes: nodes,
       edges: edges,
       // links join rows (a recorded session: 3 -> 15, 46 -> 15);
-      // a drag on a table's header pans
+      // a drag on a table moves it
       canLinkFrom: (n) => n.type == 'row',
-      onTapNode: (n) {
-        try {
-          _session?.canvasClick(c, n.id);
-        } on UnsupportedError {
-          // OnObjectSelected registered but unrecorded: select locally
-        } on ArgumentError {
-          // a node the model no longer holds (a repaint is on its way)
-        }
-      },
+      canMove: (n) => n.type == 'table',
+      onMoveStart: (n) => select(n.id),
+      onTapNode: (n) => select(n.id),
+      onTapEmpty: () => select(null),
       onDoubleTapNode: (n, at) {
         if (c.node(n.id) == null) return;
         _run(
@@ -1674,7 +1926,9 @@ class _SessionScreenState extends State<SessionScreen>
 
   /// A NetPlan / JNet network graph: the server's layout raster where it
   /// placed the nodes, its highlight colours; a node tap is the control's
-  /// node double-click (the event the real GUI raises on every click).
+  /// node double-click (the event the real GUI raises on every click). A
+  /// drag moves a node on the view only: no capture shows a JNet move on
+  /// the wire.
   Widget _netPlanView(SapNetPlanModel g) {
     return SapGraphView(
       key: ValueKey('netplan-${g.shell ?? g.title}'),
@@ -1693,6 +1947,7 @@ class _SessionScreenState extends State<SessionScreen>
           ),
       ],
       edges: [for (final e in g.edges) GraphEdge(e.from, e.to, label: e.label)],
+      canMove: (_) => true,
       onTapNode: g.shell == null
           ? null // an inline graph has no control to raise the event on
           : (n) {
@@ -2103,6 +2358,37 @@ class _SessionScreenState extends State<SessionScreen>
     );
   }
 
+  /// The app root's input history plus this logon's server type-ahead:
+  /// the `%_SEARCH <text>` round of a field the server armed
+  /// ([ScreenField.typeAhead], SapSession.fieldTypeAhead).
+  Widget _withTypeAhead(BuildContext context, Widget child) {
+    final base = TypeAheadScope.maybeOf(context);
+    if (base == null) return child;
+    return TypeAheadScope(
+      config: base.copyWith(server: _fieldTypeAhead),
+      child: child,
+    );
+  }
+
+  /// One provider pair per logon (a stable identity: the scope does not
+  /// notify on every build); none on the Java dialect (no Java type-ahead
+  /// round is recorded).
+  void _refreshTypeAhead() {
+    final s = _session;
+    if (identical(_typeAheadSession, s)) return;
+    _typeAheadSession = s;
+    final win = s != null && s.answerDialect == GuiDialect.windows;
+    _fieldTypeAhead = win
+        ? ServerTypeAheadProvider((f, t) => s.fieldTypeAhead(f, t))
+        : null;
+    _commandTypeAhead =
+        win ? CommandFieldTypeAheadProvider(s.commandFieldTypeAhead) : null;
+  }
+
+  SapSession? _typeAheadSession;
+  TypeAheadProvider? _fieldTypeAhead;
+  TypeAheadProvider? _commandTypeAhead;
+
   /// SAP GUI's command field: a transaction code is at most 20
   /// characters, with its `/n` / `/o` prefix 22 — the field is sized for
   /// that (input is not cut: SY-UCOMM takes longer function codes).
@@ -2134,9 +2420,19 @@ class _SessionScreenState extends State<SessionScreen>
           const SizedBox(width: 8),
           SizedBox(
             width: 300,
-            child: TextField(
+            child: TypeAheadInput(
+              config: TypeAheadScope.maybeOf(context)
+                  ?.copyWith(server: _commandTypeAhead),
+              model: _screen ?? ScreenModel(),
+              field: commandFieldOf(),
               controller: _okcodeCtrl,
-              onSubmitted: (_) => _submitOkcode(),
+              builder: (context, onChanged, onSubmitted) => TextField(
+              controller: _okcodeCtrl,
+              onChanged: onChanged,
+              onSubmitted: (v) {
+                onSubmitted(v);
+                _submitOkcode();
+              },
               maxLength: 70,
               autocorrect: false,
               enableSuggestions: false,
@@ -2148,6 +2444,7 @@ class _SessionScreenState extends State<SessionScreen>
                 isDense: true,
                 counterText: '',
               ),
+            ),
             ),
           ),
           const SizedBox(width: 8),
@@ -2234,12 +2531,13 @@ class _SessionScreenState extends State<SessionScreen>
   /// ICON_EXECUTE_OBJECT (`@15@`) in the bundled SAP icon font.
   static const _sapExecuteIcon = IconData(0xE004, fontFamily: 'SapIcons');
 
-  /// The status bar's system values, as SAP GUI's dropdown lists them.
+  /// The status bar's system values, as SAP GUI's dropdown lists them
+  /// (GuiGo's own labels, in English like the rest of its chrome).
   static const _statusInfoLabels = {
-    'system': 'Système',
-    'client': 'Mandant',
-    'user': 'Utilisateur',
-    'program': 'Programme',
+    'system': 'System',
+    'client': 'Client',
+    'user': 'User',
+    'program': 'Program',
     'tcode': 'Transaction',
   };
 
@@ -2360,11 +2658,29 @@ class _SessionScreenState extends State<SessionScreen>
     );
   }
 
+  /// The technical text of the failure [_error] reads for (the
+  /// exception's own text), shown in the trace area under it.
+  ({String message, String detail})? _errorText;
+
+  /// Show [e] as the error: a readable sentence, its technical text kept
+  /// for the trace area.
+  void _fail(Object e) {
+    final t = describeError(e);
+    _errorText = t;
+    _error = t.message;
+  }
+
   Widget _errorView() {
     // The session's trace log (last steps of the handshake) — the one line
     // that names where a live logon diverged.
     final trace = _trace ?? _connectLog.value;
-    final tail = trace.length <= 6 ? trace : trace.sublist(trace.length - 6);
+    final last = trace.length <= 6 ? trace : trace.sublist(trace.length - 6);
+    // the failure's technical text heads it (only for the error shown)
+    final t = _errorText;
+    final tail = [
+      if (t != null && t.message == _error && t.detail != t.message) t.detail,
+      ...last,
+    ];
     // scrolls: a long trace tail must never push the Retry button off
     // the screen (it overflowed under the ST04 timeout)
     return Center(
@@ -2518,12 +2834,9 @@ class _SessionScreenState extends State<SessionScreen>
                     ),
                   );
                 }
-                // during the wall wait the active model IS the wall popup
-                final modalModel = wallWait != null
-                    ? (m.modalLevel > 0
-                          ? m
-                          : (_session?.baseScreen?.modalLevel == 0 ? m : m))
-                    : m;
+                // the window draws the active screen [m] — during the wall
+                // wait that IS the wall popup (the session's turn painted
+                // it), so no separate model is picked
                 // a popup hosting grids / trees in its containers (the ALV
                 // sort and filter dialogs): its regions composed at a fixed
                 // 10 x 20 pt cell, the dynpro's buttons between the grids
@@ -2534,7 +2847,7 @@ class _SessionScreenState extends State<SessionScreen>
                     : null;
                 final wallPrompt = wallWait != null || relayedWall != null;
                 final composedModal = !wallPrompt
-                    ? _composedModal(modalModel)
+                    ? _composedModal(m)
                     : null;
                 final wallSel = wallPrompt && m.modalLevel > 0
                     ? _selectedWallField(m)
@@ -2547,7 +2860,7 @@ class _SessionScreenState extends State<SessionScreen>
                   onListPick: !wallPrompt ? _listPick : null,
                   onListCell: !wallPrompt ? _stageListCell : null,
                   onDoubleClick: !wallPrompt ? _doubleClick : null,
-                  model: modalModel,
+                  model: m,
                   content: composedModal?.$1,
                   contentWidth: composedModal?.$2,
                   busy: wallWait != null ? false : _busy,
@@ -2704,9 +3017,26 @@ class _SessionView {
   late final List<SapCanvasModel> canvases = session.canvases;
   late final Map<String, SapControlToolbar> controlToolbars =
       session.controlToolbars;
+  late final Map<String, SapPicture> pictures = session.pictures;
+
+  /// The pictures the composition draws (its R3 regions): a picture shell
+  /// named by another rung (an R7 placeholder, the Easy Access
+  /// IMAGE_CONTAINER beside its tree) is not drawn over that region.
+  late final Set<String> drawnPictures = {
+    for (final r in [...regions, ...modalRegions])
+      if (r.rung == 'R3' && pictures.containsKey(r.shell)) r.shell!,
+  };
 
   /// The composed base window / popup: a composition walks the whole
   /// control registry (audit #15), so once per generation, not per build.
   late final List<ScreenRegion> regions = session.regions;
   late final List<ScreenRegion> modalRegions = session.modalRegions;
 }
+
+final _gridRowAts = Expando<List<String>? Function(int)>('gridRowAt');
+
+/// [grid]'s 0-based row lookup for [SapGridView.rowAt] — the same closure
+/// for the same model (the session builds a new [SapGridModel] whenever
+/// its content changes, the same instance otherwise).
+List<String>? Function(int) gridRowAt(SapGridModel grid) =>
+    _gridRowAts[grid] ??= (i) => grid.rowAt(i + 1);

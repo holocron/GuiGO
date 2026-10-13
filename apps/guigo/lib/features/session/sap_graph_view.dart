@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
@@ -19,6 +20,7 @@ class GraphNode {
     this.row,
     this.fill,
     this.border,
+    this.parent,
   });
   final String id;
   final String label;
@@ -29,6 +31,10 @@ class GraphNode {
   /// The server's own colours (a NetPlan highlight set); null = tint by
   /// [type].
   final Color? fill, border;
+
+  /// The node this one sits inside (a canvas row's table): it moves with
+  /// it, and a drag on it is never a move of its own.
+  final String? parent;
 }
 
 class GraphEdge {
@@ -97,11 +103,18 @@ class TreeRowDrag {
 /// * tap a node → it is selected (outlined), [onTapNode];
 /// * double-tap a node → [onDoubleTapNode] with the point (control
 /// coordinates);
-/// * drag a node → it moves; released → [onMoveNode] with its new
-/// position in the control's coordinates;
-/// * with no [onMoveNode], drag from a node [canLinkFrom] accepts onto
+/// * drag a node [canMove] accepts (with no [canMove]: every node when
+/// [onMoveNode] is set) → it moves, with the nodes inside it
+/// ([GraphNode.parent]) and the links attached to them, clamped to the
+/// surface: [onMoveStart] when it starts (after the touch slop, so a
+/// tap or double tap stays one), [onMoveNode] with its new position in
+/// the control's coordinates when released. The move is the view's own:
+/// it survives rebuilds whose graph places that node where it was, and
+/// is dropped when the server places it anew (or drops it);
+/// * drag from a node that does not move and [canLinkFrom] accepts, onto
 /// another → [onConnect] (a rubber-band line follows the finger) —
 /// the canvas pans from everywhere else;
+/// * tap the empty surface → the selection clears, [onTapEmpty];
 /// * long-press a node and drag onto another → [onConnect] too;
 /// * drop a dragged tree row ([TreeRowDrag]) on the surface →
 /// [onExternalDrop] with the drop point (control coordinates) and the
@@ -116,6 +129,9 @@ class SapGraphView extends StatefulWidget {
     this.onTapNode,
     this.onDoubleTapNode,
     this.onMoveNode,
+    this.canMove,
+    this.onMoveStart,
+    this.onTapEmpty,
     this.canLinkFrom,
     this.onConnect,
     this.onExternalDrop,
@@ -132,8 +148,20 @@ class SapGraphView extends StatefulWidget {
   final void Function(GraphNode n, Offset at)? onDoubleTapNode;
   final void Function(GraphNode n, Offset to)? onMoveNode;
 
-  /// Which nodes a plain drag draws a link from (with [onConnect] and no
-  /// [onMoveNode]); null = every node.
+  /// Which nodes a plain drag moves; null = every node when [onMoveNode]
+  /// is set, none otherwise. A node with a [GraphNode.parent] never moves
+  /// on its own.
+  final bool Function(GraphNode n)? canMove;
+
+  /// A move starts on [n] (the real GUI's mouse-down select); not while
+  /// [busy] — the move itself goes on regardless.
+  final void Function(GraphNode n)? onMoveStart;
+
+  /// A tap on the surface outside every node.
+  final VoidCallback? onTapEmpty;
+
+  /// Which nodes a plain drag draws a link from (with [onConnect], among
+  /// the nodes that do not move); null = every node.
   final bool Function(GraphNode n)? canLinkFrom;
   final void Function(GraphNode from, GraphNode to)? onConnect;
   final void Function(TreeRowDrag drag, Offset at, GraphNode? onto)?
@@ -222,6 +250,9 @@ bool _sameKey(List<Object?> a, List<Object?> b) {
   return true;
 }
 
+/// How far the view pans past the surface (and a move may take a box).
+const double _panMargin = 400;
+
 class _SapGraphViewState extends State<SapGraphView> {
   final _tc = TransformationController();
   final _surface = GlobalKey();
@@ -245,22 +276,65 @@ class _SapGraphViewState extends State<SapGraphView> {
     _laidKey = key;
     return layoutGraph(nodes, edges);
   }
-  final Map<String, Offset> _moved = {}; // local drags not yet repainted
+  /// The local moves, by moved node (a group's root: a table, its rows
+  /// following): the shift from where the layout placed it.
+  final Map<String, Offset> _shift = {};
+  int _movedVersion = 0; // bumped on every [_shift] change
   String? _dragging, _linkFrom, _selected;
-  Offset? _linkEnd;
   String? _hoverDrop;
   String? _fitted; // the graph the view was last fitted to
+
+  /// The node each node sits inside ([GraphNode.parent]), of this build.
+  Map<String, String> _parentOf = const {};
+
+  /// The dragged group's live shift while a move is in flight: each
+  /// pointer move sets it — the group follows by a transform and the edges
+  /// repaint through it, nothing rebuilds ([setState] only at the drag's
+  /// start and end).
+  final _dragShift = ValueNotifier<Offset?>(null);
+
+  /// The finger's travel since the move started (the shift before the
+  /// clamp), and the room the surface leaves the dragged group.
+  Offset _dragRaw = Offset.zero;
+  Rect _dragRoom = Rect.largest;
+
+  /// What a node not being dragged listens to: never notifies.
+  final _still = ValueNotifier<Offset?>(null);
+
+  /// The rubber band's loose end while a link gesture is in flight
+  /// (surface coordinates), likewise repainted without a rebuild.
+  final _linkEnd = ValueNotifier<Offset?>(null);
+
+  late final Listenable _repaint = Listenable.merge([_dragShift, _linkEnd]);
+  final _labels = _LabelPainters();
 
   @override
   void dispose() {
     _tc.dispose();
+    _dragShift.dispose();
+    _still.dispose();
+    _linkEnd.dispose();
+    _labels.dispose();
     super.dispose();
   }
 
+  /// The group [id] moves with: its parent's (when laid out), else its own.
+  String _rootOf(String id) {
+    final p = _parentOf[id];
+    return p != null && _boxes.containsKey(p) ? p : id;
+  }
+
+  /// The committed shift of [id]'s group.
+  Offset _committed(String id) => _shift[_rootOf(id)] ?? Offset.zero;
+
+  /// [id]'s box as last built (its committed move included).
+  Rect _builtBox(String id) => _boxes[id]!.shift(_committed(id));
+
+  /// [id]'s box now: an in-flight move included.
   Rect _box(String id) {
-    final b = _boxes[id]!;
-    final m = _moved[id];
-    return m == null ? b : Rect.fromLTWH(m.dx, m.dy, b.width, b.height);
+    final root = _rootOf(id);
+    final live = root == _dragging ? _dragShift.value : null;
+    return _boxes[id]!.shift(live ?? _shift[root] ?? Offset.zero);
   }
 
   GraphNode? _nodeAt(Offset p) {
@@ -276,23 +350,40 @@ class _SapGraphViewState extends State<SapGraphView> {
     return rb == null ? global : rb.globalToLocal(global);
   }
 
-  @override
-  void didUpdateWidget(SapGraphView old) {
-    super.didUpdateWidget(old);
-    // a server repaint places the nodes itself
-    if (!identical(old.nodes, widget.nodes)) _moved.clear();
+  /// A new layout: a local move stays where the server still places its
+  /// node as before, and goes where it placed it anew or dropped it.
+  void _keepMoves(Map<String, Rect> before, Map<String, Rect> after) {
+    if (_shift.isEmpty || identical(before, after)) return;
+    final gone = [
+      for (final id in _shift.keys)
+        if (before[id] != after[id] && id != _dragging) id,
+    ];
+    if (gone.isEmpty) return;
+    gone.forEach(_shift.remove);
+    _movedVersion++;
   }
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    _boxes = _layout();
+    final laid = _layout();
+    _keepMoves(_boxes, laid);
+    _boxes = laid;
+    _parentOf = {
+      for (final n in widget.nodes)
+        n.id: ?n.parent,
+    };
+    if (_dragging != null && !_boxes.containsKey(_dragging)) {
+      // the server dropped the node being moved: its gesture went with it
+      _dragging = null;
+      _dragShift.value = null;
+    }
     if (_boxes.isEmpty) {
       return const Center(child: Text('(empty graph)'));
     }
     var extent = Rect.zero;
     for (final id in _boxes.keys) {
-      extent = extent.expandToInclude(_box(id));
+      extent = extent.expandToInclude(_builtBox(id));
     }
     final size = Size(extent.right + 80, extent.bottom + 80);
     final types = widget.nodes.map((n) => n.type).toSet().toList()..sort();
@@ -307,11 +398,67 @@ class _SapGraphViewState extends State<SapGraphView> {
       ).toColor();
     }
 
-    // a plain drag from a node draws a link when nodes do not move
+    // a plain drag moves a node; from one that does not move, it draws a
+    // link
+    bool movable(GraphNode n) =>
+        n.parent == null &&
+        (widget.canMove?.call(n) ?? widget.onMoveNode != null);
     bool linkDrag(GraphNode n) =>
         widget.onConnect != null &&
-        widget.onMoveNode == null &&
+        !movable(n) &&
         (widget.canLinkFrom?.call(n) ?? true);
+
+    // a move: the node and the nodes inside it follow the finger, kept on
+    // the surface; local, whatever the server is doing
+    void startMove(GraphNode n) {
+      final group = [
+        for (final id in _boxes.keys)
+          if (_rootOf(id) == n.id) _builtBox(id),
+      ];
+      final bounds = group.reduce((a, b) => a.expandToInclude(b));
+      final at = _committed(n.id);
+      // the shifts that keep the group on the surface: never past its
+      // origin, and right / down no further than the view pans (the
+      // surface grows to take it in when the move ends)
+      _dragRoom = Rect.fromLTRB(
+        at.dx - bounds.left,
+        at.dy - bounds.top,
+        at.dx + math.max(0, size.width + _panMargin - bounds.right),
+        at.dy + math.max(0, size.height + _panMargin - bounds.bottom),
+      );
+      _dragRaw = at;
+      _dragShift.value = at;
+      setState(() => _dragging = _selected = n.id);
+      if (!widget.busy) widget.onMoveStart?.call(n);
+    }
+
+    void updateMove(Offset delta) {
+      _dragRaw += delta;
+      _dragShift.value = Offset(
+        _dragRaw.dx.clamp(_dragRoom.left, _dragRoom.right),
+        _dragRaw.dy.clamp(_dragRoom.top, _dragRoom.bottom),
+      );
+    }
+
+    void endMove(GraphNode n) {
+      final live = _dragShift.value ?? _committed(n.id);
+      // control coordinates are whole pixels
+      final at = Offset(
+        live.dx.roundToDouble(),
+        live.dy.roundToDouble(),
+      );
+      if (at == Offset.zero) {
+        _shift.remove(n.id);
+      } else {
+        _shift[n.id] = at;
+      }
+      _movedVersion++;
+      _dragShift.value = null;
+      setState(() => _dragging = null);
+      if (_boxes.containsKey(n.id)) {
+        widget.onMoveNode?.call(n, _box(n.id).topLeft);
+      }
+    }
     // the link gesture ends at [at] (surface coordinates): onto another
     // node → onConnect; released on the node itself (a long press) → its
     // context menu
@@ -322,10 +469,8 @@ class _SapGraphViewState extends State<SapGraphView> {
       Offset? global,
     }) {
       final target = at == null ? null : _nodeAt(at);
-      setState(() {
-        _linkFrom = null;
-        _linkEnd = null;
-      });
+      setState(() => _linkFrom = null);
+      _linkEnd.value = null;
       if (target != null && target.id != from.id) {
         widget.onConnect!(from, target);
       } else if (contextMenu && target?.id == from.id && global != null) {
@@ -333,94 +478,99 @@ class _SapGraphViewState extends State<SapGraphView> {
       }
     }
 
+    void startLink(GraphNode n, Offset global) {
+      _linkEnd.value = _toSurface(global);
+      setState(() => _linkFrom = n.id);
+    }
+
+    void cancelLink() {
+      _linkEnd.value = null;
+      setState(() => _linkFrom = null);
+    }
+
     final nodes = <Widget>[
       for (final n in widget.nodes)
         if (_boxes.containsKey(n.id))
           Positioned.fromRect(
-            rect: _box(n.id),
-            child: _NodeBox(
-              key: ValueKey('graph-node-${n.id}'),
-              node: n,
-              color: n.fill ?? tint(n.type),
-              selected:
-                  _dragging == n.id ||
-                  _linkFrom == n.id ||
-                  _hoverDrop == n.id ||
-                  _selected == n.id,
-              onTap:
-                  (widget.onTapNode == null &&
-                          widget.onDoubleTapNode == null) ||
-                      widget.busy
-                  ? null
-                  : () {
-                      setState(() => _selected = n.id);
-                      widget.onTapNode?.call(n);
-                    },
-              onDoubleTap: widget.onDoubleTapNode == null || widget.busy
-                  ? null
-                  : (global) {
-                      setState(() => _selected = n.id);
-                      widget.onDoubleTapNode!(n, _toSurface(global));
-                    },
-              onPanStart: widget.busy
-                  ? null
-                  : widget.onMoveNode != null
-                  ? (_) => setState(() => _dragging = n.id)
-                  : linkDrag(n)
-                  ? (d) => setState(() {
-                      _linkFrom = n.id;
-                      _linkEnd = _toSurface(d.globalPosition);
-                    })
-                  : null,
-              onPanUpdate: widget.busy
-                  ? null
-                  : widget.onMoveNode != null
-                  ? (d) => setState(() {
-                      final b = _box(n.id);
-                      _moved[n.id] = b.topLeft + d.delta;
-                    })
-                  : linkDrag(n)
-                  ? (d) =>
-                        setState(() => _linkEnd = _toSurface(d.globalPosition))
-                  : null,
-              onPanEnd: widget.busy
-                  ? null
-                  : widget.onMoveNode != null
-                  ? (_) {
-                      final to = _box(n.id).topLeft;
-                      setState(() => _dragging = null);
-                      widget.onMoveNode!(n, to);
-                    }
-                  : linkDrag(n)
-                  ? (_) => endLink(n, _linkEnd, contextMenu: false)
-                  : null,
-              onPanCancel: widget.onMoveNode == null && linkDrag(n)
-                  ? () => setState(() {
-                      _linkFrom = null;
-                      _linkEnd = null;
-                    })
-                  : null,
-              onSecondaryTapUp: widget.onContextMenu == null || widget.busy
-                  ? null
-                  : (d) => widget.onContextMenu!(n, d.globalPosition),
-              onLongPressStart: widget.onConnect == null || widget.busy
-                  ? null
-                  : (d) => setState(() {
-                      _linkFrom = n.id;
-                      _linkEnd = _toSurface(d.globalPosition);
-                    }),
-              onLongPressMove: widget.onConnect == null || widget.busy
-                  ? null
-                  : (d) =>
-                        setState(() => _linkEnd = _toSurface(d.globalPosition)),
-              onLongPressEnd: widget.onConnect == null || widget.busy
-                  ? null
-                  : (d) => endLink(
-                      n,
-                      _toSurface(d.globalPosition),
-                      contextMenu: true,
-                      global: d.globalPosition,
-                    ),
+            // keyed: a node the server drops does not hand its place (and
+            // a drag in flight) to the next one
+            key: ValueKey('graph-at-${n.id}'),
+            rect: _builtBox(n.id),
+            // the same shape whether dragged or not (a change would drop
+            // the node's gesture recognizers mid-drag)
+            child: _DragShift(
+              at: _rootOf(n.id) == _dragging ? _dragShift : _still,
+              origin: _committed(n.id),
+              child: _NodeBox(
+                key: ValueKey('graph-node-${n.id}'),
+                node: n,
+                color: n.fill ?? tint(n.type),
+                selected:
+                    _dragging == n.id ||
+                    _linkFrom == n.id ||
+                    _hoverDrop == n.id ||
+                    _selected == n.id,
+                onTap:
+                    (widget.onTapNode == null &&
+                            widget.onDoubleTapNode == null) ||
+                        widget.busy
+                    ? null
+                    : () {
+                        setState(() => _selected = n.id);
+                        widget.onTapNode?.call(n);
+                      },
+                onDoubleTap: widget.onDoubleTapNode == null || widget.busy
+                    ? null
+                    : (global) {
+                        setState(() => _selected = n.id);
+                        widget.onDoubleTapNode!(n, _toSurface(global));
+                      },
+                // a move is local: it keeps its recognizer through a busy
+                // turn (the one its own start may have begun)
+                onPanStart: movable(n)
+                    ? (_) => startMove(n)
+                    : linkDrag(n) && !widget.busy
+                    ? (d) => startLink(n, d.globalPosition)
+                    : null,
+                onPanUpdate: movable(n)
+                    ? (d) {
+                        if (_dragging == n.id) updateMove(d.delta);
+                      }
+                    : linkDrag(n) && !widget.busy
+                    ? (d) => _linkEnd.value = _toSurface(d.globalPosition)
+                    : null,
+                onPanEnd: movable(n)
+                    ? (_) {
+                        if (_dragging == n.id) endMove(n);
+                      }
+                    : linkDrag(n) && !widget.busy
+                    ? (_) => endLink(n, _linkEnd.value, contextMenu: false)
+                    : null,
+                onPanCancel: movable(n)
+                    ? () {
+                        if (_dragging == n.id) endMove(n);
+                      }
+                    : linkDrag(n)
+                    ? cancelLink
+                    : null,
+                onSecondaryTapUp: widget.onContextMenu == null || widget.busy
+                    ? null
+                    : (d) => widget.onContextMenu!(n, d.globalPosition),
+                onLongPressStart: widget.onConnect == null || widget.busy
+                    ? null
+                    : (d) => startLink(n, d.globalPosition),
+                onLongPressMove: widget.onConnect == null || widget.busy
+                    ? null
+                    : (d) => _linkEnd.value = _toSurface(d.globalPosition),
+                onLongPressEnd: widget.onConnect == null || widget.busy
+                    ? null
+                    : (d) => endLink(
+                        n,
+                        _toSurface(d.globalPosition),
+                        contextMenu: true,
+                        global: d.globalPosition,
+                      ),
+              ),
             ),
           ),
     ];
@@ -429,19 +579,42 @@ class _SapGraphViewState extends State<SapGraphView> {
       key: _surface,
       size: size,
       child: Stack(
+        // a node dragged past the surface stays drawn until the drag ends
+        // (the surface grows on the rebuild then)
+        clipBehavior: Clip.none,
         children: [
           Positioned.fill(
             child: CustomPaint(
               painter: _EdgePainter(
                 edges: widget.edges,
                 box: (id) => _boxes.containsKey(id) ? _box(id) : null,
+                boxes: _boxes,
+                movedVersion: _movedVersion,
                 color: scheme.onSurfaceVariant,
-                rubberFrom: _linkFrom == null ? null : _box(_linkFrom!).center,
+                rubberFrom: _linkFrom == null || !_boxes.containsKey(_linkFrom)
+                    ? null
+                    : _box(_linkFrom!).center,
                 rubberTo: _linkEnd,
                 accent: scheme.primary,
+                labels: _labels,
+                repaint: _repaint,
               ),
             ),
           ),
+          // over the edges (a CustomPaint takes every hit), under the nodes
+          if (widget.onTapEmpty != null)
+            Positioned.fill(
+              child: GestureDetector(
+                key: const ValueKey('graph-surface'),
+                behavior: HitTestBehavior.opaque,
+                onTap: widget.busy
+                    ? null
+                    : () {
+                        setState(() => _selected = null);
+                        widget.onTapEmpty!();
+                      },
+              ),
+            ),
           ...nodes,
         ],
       ),
@@ -510,7 +683,7 @@ class _SapGraphViewState extends State<SapGraphView> {
                 child: InteractiveViewer(
                   transformationController: _tc,
                   constrained: false,
-                  boundaryMargin: const EdgeInsets.all(400),
+                  boundaryMargin: const EdgeInsets.all(_panMargin),
                   minScale: 0.2,
                   maxScale: 3,
                   // node drags and link gestures own the pointer while active
@@ -679,23 +852,95 @@ class _NodeBox extends StatelessWidget {
   }
 }
 
+/// A node box shifted to where its drag has taken it, [at] being the
+/// node's live top-left and [origin] the one it was laid out at: only the
+/// dragged node listens (the others get a notifier that never fires).
+class _DragShift extends StatelessWidget {
+  const _DragShift({
+    required this.at,
+    required this.origin,
+    required this.child,
+  });
+
+  final ValueListenable<Offset?> at;
+  final Offset origin;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder<Offset?>(
+    valueListenable: at,
+    child: child,
+    builder: (_, to, child) => Transform.translate(
+      offset: to == null ? Offset.zero : to - origin,
+      child: child,
+    ),
+  );
+}
+
+/// The edge labels' laid-out painters, kept across paints: a label is
+/// shaped once per text and colour, not on every repaint.
+class _LabelPainters {
+  final _cache = <String, TextPainter>{};
+  Color? _color;
+
+  TextPainter of(String text, Color color) {
+    if (color != _color) {
+      dispose();
+      _color = color;
+    }
+    return _cache[text] ??= TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(color: color, fontSize: 11),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout(maxWidth: 140);
+  }
+
+  void dispose() {
+    for (final tp in _cache.values) {
+      tp.dispose();
+    }
+    _cache.clear();
+  }
+}
+
+/// Where an edge between boxes [a] and [b] starts and ends: on each box's
+/// border, on the line between their centres.
+(Offset, Offset) graphEdgeEnds(Rect a, Rect b) =>
+    (_EdgePainter.exit(a, b.center), _EdgePainter.exit(b, a.center));
+
 class _EdgePainter extends CustomPainter {
   _EdgePainter({
     required this.edges,
     required this.box,
+    required this.boxes,
+    required this.movedVersion,
     required this.color,
     required this.accent,
+    required this.labels,
+    required this.rubberTo,
     this.rubberFrom,
-    this.rubberTo,
+    super.repaint,
   });
 
   final List<GraphEdge> edges;
+
+  /// A node's current box (its drag included); read at paint time, so a
+  /// drag repaints through the repaint listenable alone.
   final Rect? Function(String id) box;
+
+  /// What [box] answers from, compared by [shouldRepaint]: the laid-out
+  /// boxes and the version of the local moves.
+  final Map<String, Rect> boxes;
+  final int movedVersion;
   final Color color, accent;
-  final Offset? rubberFrom, rubberTo;
+  final _LabelPainters labels;
+  final Offset? rubberFrom;
+  final ValueListenable<Offset?> rubberTo;
 
   /// Where the segment from [r]'s centre towards [to] leaves [r]'s border.
-  static Offset _exit(Rect r, Offset to) {
+  static Offset exit(Rect r, Offset to) {
     final c = r.center;
     final d = to - c;
     if (d == Offset.zero) return c;
@@ -726,25 +971,21 @@ class _EdgePainter extends CustomPainter {
     for (final e in edges) {
       final a = box(e.from), b = box(e.to);
       if (a == null || b == null || e.from == e.to) continue;
-      final from = _exit(a, b.center), to = _exit(b, a.center);
+      final (from, to) = graphEdgeEnds(a, b);
       _arrow(canvas, from, to, p);
-      if (e.label.trim().isNotEmpty) {
-        final tp = TextPainter(
-          text: TextSpan(
-            text: e.label.trim(),
-            style: TextStyle(color: color, fontSize: 11),
-          ),
-          textDirection: TextDirection.ltr,
-        )..layout(maxWidth: 140);
+      final label = e.label.trim();
+      if (label.isNotEmpty) {
+        final tp = labels.of(label, color);
         final mid = (from + to) / 2;
         tp.paint(canvas, mid - Offset(tp.width / 2, tp.height + 2));
       }
     }
-    if (rubberFrom != null && rubberTo != null) {
+    final loose = rubberTo.value;
+    if (rubberFrom != null && loose != null) {
       _arrow(
         canvas,
         rubberFrom!,
-        rubberTo!,
+        loose,
         Paint()
           ..color = accent
           ..strokeWidth = 2,
@@ -753,5 +994,12 @@ class _EdgePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_EdgePainter old) => true;
+  bool shouldRepaint(_EdgePainter old) =>
+      !identical(old.edges, edges) ||
+      !identical(old.boxes, boxes) ||
+      old.movedVersion != movedVersion ||
+      old.color != color ||
+      old.accent != accent ||
+      old.rubberFrom != rubberFrom ||
+      !identical(old.rubberTo, rubberTo);
 }

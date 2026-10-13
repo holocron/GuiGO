@@ -231,10 +231,17 @@ extension SapSessionToolbar on SapSession {
         eventParams: params,
       );
       final e = head.lastIndexOf('</DATAMANAGER>');
-      xml =
-          '${head.substring(0, e)} <CONTROLS>${staged.$2}</CONTROLS>'
-          '${head.substring(e)}';
-      _gridStateFlushed(); // it rides this frame, not the next one
+      if (e < 0) {
+        // no document close to splice before (never from the builder):
+        // the staged state stays staged for the next round, never a
+        // RangeError out of the action
+        xml = head;
+      } else {
+        xml =
+            '${head.substring(0, e)} <CONTROLS>${staged.$2}</CONTROLS>'
+            '${head.substring(e)}';
+        _gridStateFlushed(); // it rides this frame, not the next one
+      }
     } else {
       xml = ocxDataManagerXml(
         eventShell: shell,
@@ -346,6 +353,7 @@ extension SapSessionToolbar on SapSession {
       // (the buttons themselves: sap_session_html.dart, in queue order)
       if (sh != null) st.staticMenus.remove(sh);
     }
+    DpCache? own;
     for (final b in dpPushBindings(call)) {
       if (b.role != 'ButtonGroupData') continue;
       final s = b.shell?.trim() ?? '';
@@ -353,8 +361,10 @@ extension SapSessionToolbar on SapSession {
       final sh = tb(s) ? s : toolbarOf('', o);
       if (sh == null) continue;
       for (final u in b.urls) {
-        final seg =
-            _ea.dpCache.byUrl[u] ?? (DpCache()..ingestValue(value)).byUrl[u];
+        // the call's own pushes indexed ONCE (they were re-snooped per url
+        // the session cache lacks)
+        final seg = _ea.dpCache.byUrl[u] ??
+            (own ??= DpCache()..ingestValue(value)).byUrl[u];
         if (seg == null) continue;
         final buttons = decodeToolbarButtonsPush(seg);
         if (buttons.isEmpty) continue;
@@ -362,6 +372,18 @@ extension SapSessionToolbar on SapSession {
         for (final nb in buttons) {
           if (nb.code.isNotEmpty) list.removeWhere((x) => x.code == nb.code);
           list.add(nb);
+        }
+        // the composition draws a toolbar in its box by the buttons the
+        // layout registry holds (render_stacked.draw_toolbars), which only
+        // AddButton fed: a toolbar filled by a button group alone took no
+        // region and was never drawn — SE80's browser selection 133 and
+        // its tree toolbar 154 in the Repository Browser dock
+        // (a recorded session srv[10] / srv[12])
+        final codes = _layoutState.registry.toolbarButtons[sh] ??= [];
+        for (final nb in buttons) {
+          if (nb.code.isNotEmpty && !codes.contains(nb.code)) {
+            codes.add(nb.code);
+          }
         }
         _trace('toolbar $sh: ButtonGroupData ${buttons.length} button(s)');
       }

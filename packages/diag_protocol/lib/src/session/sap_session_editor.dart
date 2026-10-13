@@ -215,6 +215,15 @@ extension SapSessionEditor on SapSession {
     EditorKeyFocus focus,
   ) {
     _requireWindowsEditor(e);
+    // the view the user scrolled to rides the key round as the control's
+    // dirty props, FirstVisibleLine and LastVisibleLine both (the real
+    // GUI's margin click flushes the props that changed, a recorded session
+    // abap_debugger g[26] `LastVisibleLine 28`; a scrolled view both, as
+    // gui[21] of a recorded session); unscrolled, the
+    // reference client's FirstVisibleLine alone (a recorded session
+    // reference_live step 32)
+    final view = e.viewFirstLine;
+    final scrolled = view != null && view != (e.firstVisibleLine ?? 1);
     _noteEditorCursor(e, line, col);
     return _act(
       editorKeyItems(
@@ -224,7 +233,8 @@ extension SapSessionEditor on SapSession {
         props: editorCursorProps(
           line,
           col,
-          firstVisibleLine: e.viewFirstLine ?? e.firstVisibleLine ?? 1,
+          firstVisibleLine: view ?? e.firstVisibleLine ?? 1,
+          lastVisibleLine: scrolled ? e.viewLastLine : null,
         ),
         focus: focus,
       ),
@@ -255,12 +265,19 @@ extension SapSessionEditor on SapSession {
   /// GUI answers from the control's live state (gui[22]: 184 / 208 / 30
   /// after the user scrolled). A server `FirstVisibleLine(=n)` put resets
   /// the view (the control scrolled).
+  ///
+  /// A selection is the caret (its start) with [selEndLine] / [selEndCol]
+  /// (1-based, the column after its last character), answering the
+  /// `SelPosEndLine` / `SelPosEndCol` read-backs; a caret given without
+  /// them collapses the selection (a plain tap).
   void setEditorClientState(
     SapTextEditor e, {
     int? firstVisibleLine,
     int? lastVisibleLine,
     int? caretLine,
     int? caretCol,
+    int? selEndLine,
+    int? selEndCol,
   }) {
     if (firstVisibleLine != null && firstVisibleLine >= 1) {
       e.viewFirstLine = firstVisibleLine;
@@ -270,6 +287,16 @@ extension SapSessionEditor on SapSession {
     }
     if (caretLine != null && caretLine >= 1) e.cursorLine = caretLine;
     if (caretCol != null && caretCol >= 1) e.cursorCol = caretCol;
+    if (caretLine != null || caretCol != null) {
+      final span = selEndLine != null &&
+          selEndLine >= 1 &&
+          selEndCol != null &&
+          selEndCol >= 1 &&
+          (selEndLine, selEndCol) != (e.cursorLine, e.cursorCol);
+      e
+        ..selEndLine = span ? selEndLine : null
+        ..selEndCol = span ? selEndCol : null;
+    }
   }
 
   /// The cursor an editor action flushed: the server reads it back
@@ -277,7 +304,9 @@ extension SapSessionEditor on SapSession {
   void _noteEditorCursor(SapTextEditor e, int line, int col) {
     e
       ..cursorLine = line
-      ..cursorCol = col;
+      ..cursorCol = col
+      ..selEndLine = null
+      ..selEndCol = null;
   }
 
   /// VARS row -> value of the editor property read-backs a flush call
@@ -318,8 +347,12 @@ extension SapSessionEditor on SapSession {
               (e.lines.isEmpty
                   ? 1
                   : (first + screenRows - 2).clamp(1, e.lines.length)),
-        'SelPosStartLine' || 'SelPosEndLine' => line,
-        'SelPosStartCol' || 'SelPosEndCol' => col,
+        'SelPosStartLine' => line,
+        'SelPosStartCol' => col,
+        // the user's selection when the app reported one, else the
+        // collapsed span on the cursor
+        'SelPosEndLine' => e.selEndLine ?? line,
+        'SelPosEndCol' => e.selEndCol ?? col,
         'LineCount' => e.lines.length,
         _ => 0, // TextModified, Version
       };

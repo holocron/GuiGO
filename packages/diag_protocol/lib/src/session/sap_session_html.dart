@@ -161,12 +161,13 @@ extension SapSessionHtml on SapSession {
 
   /// Click button [button] (its DOM id `A1F2B3NAME:BT_SELECTDT`, or the
   /// SAP name after `NAME:`) of a `SAPEVENT:` form in [doc] (a dynamic
-  /// document's form, [SapHtmlDocument.forms]): the browser's submit —
-  /// `%_GC <viewer> 1` with (frame0, the POST length, `SAPEVENT:<form>`,
-  /// 7 x '') and the POST body armed for the server's PostData pull (real
-  /// GUI a recorded session gui[38] + gui[41]; reference client
-  /// raw_dialogs.html_event). [values] overrides input values by field
-  /// name or control id.
+  /// document's form, [SapHtmlForm]s — /AIF/IFMON's selection pane): the
+  /// browser's submit — `%_GC <viewer> 1` with (the form's frame `Frame0`,
+  /// the POST length, `sapevent:<form>`) and the POST body armed for the
+  /// server's PostData / SaveDataToUrl / DP_GET pull, answered with the
+  /// Windows OCX's object ([htmlWindowsPostAnswer]) — the real SAP GUI for
+  /// Windows, a recorded session raw gui[27] + gui[30]. [values]
+  /// overrides input values by field name or control id.
   Future<List<Uint8List>> htmlFormButton(
     SapHtmlDocument doc,
     String button, {
@@ -189,24 +190,21 @@ extension SapSessionHtml on SapSession {
     }
     await _flushStagedFirst();
     final body = form.postBytes(id, values: values);
-    final url = 'SAPEVENT:${form.event}';
+    final url = form.windowsUrl;
     _ea.recordEvent(doc.shell, {
-      0: htmlTargetFrame,
+      if (form.frame.isNotEmpty) 0: form.frame,
       1: '${body.length}',
       2: url,
     });
     _htmlState.post = body;
+    _trace('html form ${form.name} $id on ${doc.shell}: ${body.length} B');
     return _act(
-      cfwEventItems(
+      htmlFormSubmitItems(
         ctx,
-        shell: doc.shell,
-        eventId: htmlSapEvent,
-        params: [
-          htmlTargetFrame,
-          '${body.length}',
-          url,
-          for (var i = 3; i < 10; i++) '',
-        ],
+        viewerShell: doc.shell,
+        url: url,
+        postLength: body.length,
+        frame: form.frame,
         sourcePath: _hostedSourcePath(doc.shell),
       ),
       dialectReady: true,
@@ -256,8 +254,8 @@ extension SapSessionHtml on SapSession {
     return _act(items, dialectReady: true);
   }
 
-  /// The POST body an [htmlLink] armed for the server's PostData pull
-  /// (once), or null.
+  /// The POST body an [htmlLink] / [htmlFormButton] armed for the
+  /// server's PostData pull (once), or null.
   Uint8List? _takeHtmlPost() {
     final b = _htmlState.post;
     _htmlState.post = null;

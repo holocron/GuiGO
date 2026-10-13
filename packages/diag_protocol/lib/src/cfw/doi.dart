@@ -238,8 +238,8 @@ String? _shellOfObject(EaSession session, FlushCall call, VerbMeta m, Map<String
     final res = meta[i].result?.trim() ?? '';
     if (res == obj) {
       final args = verbArgs(call, i + 1);
-      for (final (_n, v) in args) {
-        if (_n == '#1' && RegExp(r'^\d+$').hasMatch(v.trim())) return v.trim();
+      for (final (n, v) in args) {
+        if (n == '#1' && RegExp(r'^\d+$').hasMatch(v.trim())) return v.trim();
       }
     }
   }
@@ -534,7 +534,7 @@ void doiNoteAnswer(DoiState st, FlushCall call) {
       'GetContainer', 'GetDataAsFormat', 'automationObject', 'GetActiveSheet'
     };
     if (mintVerbs.contains(verb) && k < mints.length) {
-      final (mv, handle, _al) = mints[k];
+      final (mv, handle, _) = mints[k];
       if (mv == verb) {
         minted = handle.toString();
         k++;
@@ -601,7 +601,12 @@ String? dpgetInurl(Uint8List requestV) {
   while (j < end - 4) {
     if (requestV[j] == 0x03 && requestV[j + 1] == 0x04) {
       final rl = bd.getUint16(j + 2);
-      if (rl >= 77) records.add(Uint8List.sublistView(requestV, j + 4, j + 4 + rl));
+      // a record running past the FORMAT region is a truncated or hostile
+      // request: it ends the records, never a RangeError
+      if (j + 4 + rl > end) break;
+      if (rl >= _fmtRecMin) {
+        records.add(Uint8List.sublistView(requestV, j + 4, j + 4 + rl));
+      }
       j += 6 + rl;
     } else if (requestV[j] == 0x03 && requestV[j + 1] == 0x05) {
       final cell = find0305Cells(Uint8List.sublistView(requestV, j, end));
@@ -611,12 +616,13 @@ String? dpgetInurl(Uint8List requestV) {
         final blob = lzhInflate(p.lzh);
         if (blob != null) {
           final w = width > 0 ? width : 80;
-          for (var q = 0; q + w <= blob.length; q += w) {
+          // records narrower than a descriptor cannot be read by [fmtRec]
+          for (var q = 0; w >= _fmtRecMin && q + w <= blob.length; q += w) {
             records.add(Uint8List.sublistView(blob, q, q + w));
           }
         }
       }
-      j = cell.first.endOff;
+      j += cell.first.endOff; // the cell's offsets are relative to j
     } else {
       j += 1;
     }
@@ -652,6 +658,10 @@ int _indexOfBytes(Uint8List b, List<int> needle, int from) {
   return -1;
 }
 
+/// The shortest FORMAT descriptor record [fmtRec] reads (its type byte is
+/// at 76).
+const int _fmtRecMin = 77;
+
 class FmtRec {
   FmtRec(this.index, this.offset, this.length, this.decimals, this.type, this.raw);
   final int index;
@@ -679,6 +689,9 @@ List<Uint8List> layoutRowsByFormat(List<Uint8List> records, List<Map<String, Str
     final extent = f.offset + f.length;
     if (extent > rowLen) rowLen = extent;
   }
+  // the descriptor's u32 offsets/lengths come off the wire: a row layout
+  // past what any decode could produce is a hostile request, not a table
+  if (rowLen * rows.length > csMaxDecodedLength) return const [];
   final out = <Uint8List>[];
   for (final row in rows) {
     final buf = Uint8List(rowLen)..fillRange(0, rowLen, 0x20);
@@ -710,7 +723,13 @@ Uint8List? buildPropertyTableAnswer(Uint8List requestV, List<Uint8List> rows) {
     if (extent > fmtLen) fmtLen = extent;
   }
   final rowLen = fmtLen;
-  if (rowLen <= 0) return null;
+  // the request's u32 width / offsets / lengths come off the wire: a table
+  // past what any decode could produce is a hostile request
+  if (rowLen <= 0 ||
+      rowLen * rows.length > csMaxDecodedLength ||
+      width * records.length > csMaxDecodedLength) {
+    return null;
+  }
   final cells = [
     for (final x in rows)
       Uint8List.fromList([

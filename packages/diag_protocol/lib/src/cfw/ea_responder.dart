@@ -12,6 +12,7 @@ import '../framing/envelope.dart';
 import '../lzh/lzh.dart';
 import '../screen/sap_calendar.dart'
     show calendarHeldInterval, calendarIntervalAnswer;
+import 'datamanager_grammar.dart';
 import 'dp_cache.dart';
 import 'dragdrop_service.dart';
 import 'flush_call.dart';
@@ -220,7 +221,26 @@ class EaSession {
 /// sid-0 item closes (the 740 kernel's logon full-build queue: ~30 kB head
 /// + 512 B continuation + sid-0 companion, a recorded session).
 class AutomationStream {
-  Uint8List? pending; // chunks received, no closer yet
+  /// The chunks of a multi-frame call received so far, no closer yet —
+  /// gathered, not re-joined per continuation (a 100-chunk call copied
+  /// the whole stream 100 times).
+  BytesBuilder? _pending;
+
+  /// The call stream received so far (a copy), null when none is pending.
+  Uint8List? get pending => _pending?.toBytes();
+
+  bool get hasPending => _pending != null;
+
+  void _start(Uint8List head) => _pending = BytesBuilder(copy: false)..add(head);
+
+  void _append(Uint8List chunk) => _pending!.add(chunk);
+
+  /// The pending stream with [closer] appended; the stream is reset.
+  Uint8List _close(Uint8List closer) {
+    final b = _pending!..add(closer);
+    _pending = null;
+    return b.takeBytes();
+  }
 
   /// The stream-form paint being received (stream_paint.dart).
   final PaintStreamState paint = PaintStreamState();
@@ -339,10 +359,10 @@ AutomationFrame foldAutomationFrame(
       final hasParams = ole ? _hasParamsColumn(v) : false;
       if (it.sid == 4) {
         if (ole && (hasParams || _declaresParams(v))) {
-          stream.pending = v; // head chunk of a multi-frame call
+          stream._start(v); // head chunk of a multi-frame call
           chunkFrame = true;
-        } else if (stream.pending != null) {
-          stream.pending = Uint8List.fromList([...stream.pending!, ...v]);
+        } else if (stream.hasPending) {
+          stream._append(v);
           chunkFrame = true; // raw continuation slice
         }
         // else: a data push / DP_GET fetch — not a call part, no receipt
@@ -356,13 +376,10 @@ AutomationFrame foldAutomationFrame(
           // server then waits forever and the transaction never paints
           // (a recorded session srv step 19)
           calls.add((v, frameStep));
-          stream.pending = null;
-        } else if (stream.pending != null && !hasParams) {
-          calls.add((
-            Uint8List.fromList([...stream.pending!, ...v]),
-            frameStep,
-          )); // the companion completes the chunked call
-          stream.pending = null;
+          stream._pending = null;
+        } else if (stream.hasPending && !hasParams) {
+          // the companion completes the chunked call
+          calls.add((stream._close(v), frameStep));
         } else if (isFrontendCall(v, it.sid)) {
           frontend.add((v, frameStep, it.sid));
         }
@@ -839,6 +856,10 @@ List<Uint8List>? buildAnswer(
   if (xml == null && includeMetrics && call.cachedProps.isNotEmpty) {
     xml = controlXml(session, call, call.cachedProps);
   }
+  // the answer's DATAMANAGER is parsed by the same CL_GUI_DATAMANAGER as a
+  // round's item 17 (datamanager_grammar.dart): debug / tests hold it to
+  // the grammar
+  assert(xml == null || debugCheckDatamanager(xml, what: 'flush answer'));
 
   final reply = buildReply(
     call.raw,
@@ -962,11 +983,25 @@ void _capOldest(Map<Object?, Object?> m, int max) {
 /// [recordControlFactsFromFrame] at the automation pass parsed every item
 /// each (audit #8). Keyed on the item value: the frame's shared walk
 /// ([DecompressedFrame.walk]) hands both readers the same object. Readers
-/// only: the answer parses its own call.
-final Expando<FlushCall> _itemCalls = Expando('frame OLE item call');
+/// only: the answer parses its own call. An item that does not parse (a
+/// corrupt / hostile call) is null to both, memoized as such: the readers
+/// skip it — a throw here escaped the receive fold and killed the session;
+/// the automation pass counts the call's failure ([SapSession]).
+final Expando<Object> _itemCalls = Expando('frame OLE item call');
+final Object _unparseableItem = Object();
 
-FlushCall _itemCall(Uint8List value) =>
-    _itemCalls[value] ??= parseFlushCall(value);
+FlushCall? _itemCall(Uint8List value) {
+  final memo = _itemCalls[value];
+  if (memo != null) return identical(memo, _unparseableItem) ? null : memo as FlushCall;
+  try {
+    final call = parseFlushCall(value);
+    _itemCalls[value] = call;
+    return call;
+  } catch (_) {
+    _itemCalls[value] = _unparseableItem;
+    return null;
+  }
+}
 
 /// Record control facts from a frame's flushes (record_control_facts port,
 /// creation subset): CreateControl verbs → the session's control registry.
@@ -977,6 +1012,7 @@ void recordControlFactsFromFrame(EaSession session, Uint8List frame) {
     if (!it.isAppl || it.id != 8) continue;
     if (!_containsBytes(it.value, 'OLE_FLUSH_CALL')) continue;
     final call = _itemCall(it.value);
+    if (call == null) continue;
     final meta = verbMeta(call);
     // the server's own teardown (ea_facts): destroyTab's object / DestroyWindow's
     // shell arg mark the control dead, together with its alias
@@ -1036,6 +1072,7 @@ Set<String> shellsTornDownIn(Iterable<Uint8List> frames) {
       if (!it.isAppl || it.id != 8) continue;
       if (!_containsBytes(it.value, 'OLE_FLUSH_CALL')) continue;
       final call = _itemCall(it.value);
+      if (call == null) continue;
       final meta = verbMeta(call);
       for (var d = 0; d < call.verbs.length; d++) {
         final vb = call.verbs[d];

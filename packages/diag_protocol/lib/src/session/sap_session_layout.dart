@@ -86,6 +86,7 @@ extension SapSessionLayout on SapSession {
         contentShells: st.contentShells,
         editorLines: _editorLines,
         htmlShells: _htmlShells,
+        pictureShells: _pictureShells,
         calendarShells: _calendarShells,
         isLive: _onScreen,
         sinceStep: st.baseSinceStep ?? _progSinceStep,
@@ -127,6 +128,7 @@ extension SapSessionLayout on SapSession {
             if (mine(e.key)) e.key: e.value,
         },
         htmlShells: _htmlShells.where(mine).toSet(),
+        pictureShells: _pictureShells.where(mine).toSet(),
         calendarShells: _calendarShells.where(mine).toSet(),
         isLive: mine,
         sinceStep: since,
@@ -186,9 +188,13 @@ extension SapSessionLayout on SapSession {
       final sh = st.treeUrlShell[url] ?? fallback;
       if (sh == null) continue;
       final list = byShell[sh] ??= [];
-      final isNodes = t.columns.contains('RELATKEY');
+      // (an update push names nodes the tree holds: no new tree —
+      // isTreeUpdateTable)
+      final isNodes = t.columns.contains('RELATKEY') && !isTreeUpdateTable(t);
       if (isNodes && t.rows.any((r) => (r['RELATKEY'] ?? '').isEmpty)) {
-        list.removeWhere((x) => x.columns.contains('RELATKEY'));
+        list.removeWhere(
+          (x) => x.columns.contains('RELATKEY') && !isTreeUpdateTable(x),
+        );
       }
       list.add(t);
     }
@@ -377,6 +383,81 @@ extension SapSessionLayout on SapSession {
   double? get dockFraction => _layoutState.dockFraction;
   set dockFraction(double? v) => _layoutState.dockFraction = v;
   set layoutRoundEnabled(bool v) => _layoutState.layoutRoundEnabled = v;
+
+  /// The docking container (`SAPGUI.DOCKINGCTRL`) whose subtree [shell]
+  /// lies in — [shell] itself when it is one — or null: the pane of a
+  /// composed window a dock-edge drag resizes ([resizeDock]).
+  String? dockOf(String shell) {
+    final reg = _layoutState.registry;
+    final classes = reg.classes();
+    final seen = <String>{};
+    String? sh = shell;
+    while (sh != null && seen.add(sh)) {
+      if ((classes[sh] ?? '').toUpperCase().contains('DOCKING')) return sh;
+      sh = reg.parents[sh];
+    }
+    return null;
+  }
+
+  /// [SapSession.resizeDock]
+  Future<bool> _resizeDock(String dock, double cols) async {
+    final st = _layoutState;
+    final w = st.window, a = st.area;
+    final side = st.registry.props[dock]?['470'];
+    if (w == null || a == null || w.$2 <= 1) {
+      _trace('dock $dock resize ignored: no AREASIZE painted');
+      return false;
+    }
+    if (side != '1' && side != '2') {
+      _trace('dock $dock resize ignored: not a left / right dock');
+      return false;
+    }
+    final c = cols.round().clamp(1, w.$2 - 1);
+    // once per paint: the same extent again before the server answered
+    // (its step unchanged) owes nothing new
+    final mark = '$dock:$c@$step';
+    if (st.draggedRound == mark) {
+      _trace('dock $dock resize: already reported at step $step');
+      return false;
+    }
+    st
+      ..dockFraction = c / w.$2
+      ..reportedDocks = null; // the realized extent changed: owed again
+    st.registry.draggedDelta[dock] = w.$2 - a.$2;
+    _trace('dock $dock dragged to $c of ${w.$2} cols');
+    String? refusal() {
+      if (answerDialect != GuiDialect.windows) return 'not Windows';
+      if (state != SessionState.ready && !offlineReplay) {
+        return 'the logon is not live (${state.name})';
+      }
+      final s = screen;
+      if (s == null || s.program == null) return 'no screen painted';
+      if (s.modalLevel > 0 || ctx.modalNo != 0) return 'a popup is up';
+      if (_staged.isNotEmpty) return 'typed values are staged';
+      return null;
+    }
+
+    if (busy) {
+      _trace('dock round owed to the next paint: an action is running');
+      return false;
+    }
+    if (refusal() case final why?) {
+      _trace('dock round owed to the next paint: $why');
+      return false;
+    }
+    return _exclusive('dock resize', () async {
+      if (refusal() case final why?) {
+        _trace('dock round owed to the next paint: $why');
+        return false;
+      }
+      st.reportedDocks = null;
+      await _maybeLayoutRound();
+      // the round stamps the docks it reported
+      if (st.reportedDocks == null) return false;
+      st.draggedRound = mark;
+      return true;
+    });
+  }
 
   /// The real Windows GUI reports the layout it realized for a docked
   /// screen in its own `%_GS 0 3` round right after the paint
@@ -738,6 +819,10 @@ class _LayoutState {
 
   /// the docking containers' requested extents last reported
   String? reportedDocks;
+
+  /// `dock:cols@step` of the last dock drag a round reported
+  /// ([SapSession.resizeDock])
+  String? draggedRound;
 
   /// the last server SCROLL_INFOS2 (16/12/6) value, echoed by the round
   Uint8List? scrollInfos2;

@@ -27,22 +27,26 @@ import '../cfw/reply_container.dart' show constPrefix;
 import '../cfw/html_viewer.dart';
 import '../cfw/stream_paint.dart';
 import '../cfw/text_editor.dart';
+import '../cfw/tree_header_names.dart';
 import '../screen/sap_calendar.dart';
 import '../screen/sap_canvas.dart';
 import '../screen/sap_chart.dart';
 import '../screen/grid_rows.dart';
 import '../screen/sap_grid.dart';
 import '../screen/sap_netplan.dart';
+import '../screen/sap_picture.dart';
 import '../screen/sap_tree.dart';
 import '../screen/sap_value_help.dart';
 import '../screen/screen_layout.dart';
 import '../screen/screen_model.dart';
+import '../screen/type_ahead.dart';
 import '../snc/snc_context.dart';
 import 'frontend_profile.dart';
 import 'layout_round.dart';
 import 'resize_round.dart';
 import '../snc/snc_frame.dart';
 import 'actions.dart';
+import 'answered_calls.dart';
 import 'calendar_actions.dart';
 import 'canvas_actions.dart';
 import 'context_menu_actions.dart';
@@ -58,12 +62,15 @@ import 'login.dart';
 import 'logon_frames.dart';
 import 'table_cell.dart';
 import 'trace_ring.dart';
+import 'type_ahead_actions.dart';
 import 'value_help_actions.dart';
 
 part 'sap_session_calendar.dart';
 part 'sap_session_canvas.dart';
+part 'sap_session_cfw_fields.dart';
 part 'sap_session_context_menu.dart';
 part 'sap_session_editor.dart';
+part 'sap_session_field_type_ahead.dart';
 part 'sap_session_fields.dart';
 part 'sap_session_grid.dart';
 part 'sap_session_grid_edit.dart';
@@ -71,6 +78,7 @@ part 'sap_session_grid_rows.dart';
 part 'sap_session_html.dart';
 part 'sap_session_layout.dart';
 part 'sap_session_menu.dart';
+part 'sap_session_picture.dart';
 part 'sap_session_remote_logon.dart';
 part 'sap_session_request_stream.dart';
 part 'sap_session_resize.dart';
@@ -105,6 +113,14 @@ enum SessionState { disconnected, connecting, loggingIn, ready, failed, closed }
 /// still in flight (or started after) fails with.
 class SessionClosedError extends StateError {
   SessionClosedError() : super('session closed');
+}
+
+/// The SNC context failed on a received frame (a DATA_MIC frame failed its
+/// integrity check, [SncContext.error]): the protected connection cannot be
+/// trusted, so the logon ends at once with that error — the frame was
+/// skipped silently and the action hung to its 30 s receive timeout.
+class SncFailedError extends StateError {
+  SncFailedError(String reason) : super('SNC failed: $reason');
 }
 
 /// A receive turn that timed out after PART of it arrived: [frames] were
@@ -354,7 +370,7 @@ class SapSession {
         }
         for (final payload in payloads) {
           if (_isNiPing(payload)) {
-            _sock?.add(niFrame(Uint8List.fromList(niPong)));
+            _sock?.add(niPongFrame);
             _trace('NI_PING answered (NI_PONG)');
             continue;
           }
@@ -470,6 +486,31 @@ class SapSession {
     }
     _sncCtx = ctx;
   }
+
+  /// [payload] unwrapped by [ctx]; null = no DIAG frame to read (a
+  /// non-data SNC frame). A frame that FAILS the context ([SncState.failed]:
+  /// its integrity check) ends the logon now with [SncContext.error] —
+  /// [SncFailedError] thrown, [closed] fired with it, the socket destroyed.
+  Uint8List? _sncUnwrap(SncContext ctx, Uint8List payload) {
+    final plain = ctx.unwrapFrame(payload);
+    if (plain != null || ctx.state != SncState.failed) return plain;
+    final e = SncFailedError(ctx.error ?? 'the SNC context failed');
+    _trace(e.message);
+    _sockError ??= e;
+    if (state != SessionState.closed) state = SessionState.failed;
+    lastError = e.toString();
+    if (!closedByPeer) {
+      closedByPeer = true; // the onDone of the socket destroyed below
+      if (!_closedController.isClosed) _closedController.add(e.message);
+    }
+    _sock?.destroy();
+    _wakeReader();
+    throw e;
+  }
+
+  /// Test hook: run the session over an established SNC context [ctx]
+  /// (built with [SncContext.sncForTest]) without a KDC handshake.
+  void sncForTest(SncContext ctx) => _sncCtx = ctx;
 
   void _wakeReader() {
     final w = _wake;
@@ -610,15 +651,13 @@ class SapSession {
         // NI_PING first: its 8 bytes (`NI_PING\0`, 0x49 has the EOP bit)
         // read as a mode-control frame and went unanswered
         if (_isNiPing(payload)) {
-          _sock?.add(niFrame(Uint8List.fromList(niPong)));
+          _sock?.add(niPongFrame);
           continue;
         }
         var frame = payload;
         if (_sncCtx != null) {
-          final plain = _sncCtx!.unwrapFrame(payload);
-          if (plain == null) {
-            continue; // failed integrity / non-data frame
-          }
+          final plain = _sncUnwrap(_sncCtx!, payload);
+          if (plain == null) continue; // a non-data frame
           frame = plain;
         }
         _noteServerError(frame);
@@ -859,6 +898,17 @@ class SapSession {
     _trace('$where failed: $e');
   }
 
+  /// The side-model ingests whose fold FAILS on a call that does not
+  /// parse, in [_driveAutomationIn]'s order: grid, chart, NetPlan, context
+  /// menu, editor ([_ingestCanvasCall]'s tracker drops it silently).
+  static const List<String> _sideModelsFailingUnparsed = [
+    'grid ingest',
+    'chart ingest',
+    'netplan ingest',
+    'context menu ingest',
+    'editor ingest',
+  ];
+
   /// [f], with a throw counted as an ingest failure (null returned).
   T? _guarded<T>(String where, T Function() f) {
     try {
@@ -867,16 +917,6 @@ class SapSession {
       _noteIngestFailure(where, e);
       return null;
     }
-  }
-
-  /// The answered-call keys kept for de-duplication (a re-read turn): only
-  /// the recent ones can recur.
-  static const int _maxAnsweredKeys = 1024;
-
-  void _capAnswered() {
-    final s = _answeredFlushes;
-    if (s.length <= _maxAnsweredKeys) return;
-    s.removeAll(s.take(s.length - _maxAnsweredKeys).toList());
   }
 
   /// [_bootstrap] with [_bootstrapping] set: an end of conversation the
@@ -1099,16 +1139,17 @@ class SapSession {
       for (final (value, closingStep) in folded.calls) {
         // keyed with the closing step: the same queue on a later screen is
         // a new call and must be answered again (a skipped answer hangs it)
-        final key = Object.hash(closingStep, value.length, Object.hashAll(value));
-        if (_answeredFlushes.contains(key)) continue;
+        // (an exact key: a collision would skip an owed answer)
         if (!String.fromCharCodes(value).contains('OLE_FLUSH_CALL')) continue;
-        _answeredFlushes.add(key);
-        _capAnswered();
+        final key = AnsweredCalls.keyOf('flush', closingStep, value);
+        if (!_answeredFlushes.add(key)) continue;
         // ONE parse of the call feeds every side model and the answer
         // (audit #8: it was parsed once per model, ~8x, each parse
         // re-inflating every cell); the models read nothing the answer
         // dialect changes (the _RESULT types). A call that does not parse
-        // goes to the models unparsed, which fail on it as before.
+        // is NOT re-parsed by every model (each one's own parse failed on
+        // it again: 7 parses of a hostile call): each model's failure is
+        // counted as its failing fold counted it, in the same order.
         FlushCall? parsed;
         Object? parseError;
         try {
@@ -1116,12 +1157,19 @@ class SapSession {
         } catch (e) {
           parseError = e;
         }
-        _ingestGridCall(value, parsed);
-        _ingestChartCall(value, parsed);
-        _ingestNetPlanCall(value, parsed);
-        _ingestCanvasCall(value, parsed);
-        _ingestContextMenuCall(value, parsed);
-        _ingestEditorCall(value, parsed);
+        if (parsed == null) {
+          for (final where in _sideModelsFailingUnparsed) {
+            _noteIngestFailure(where, parseError!);
+          }
+        } else {
+          _ingestGridCall(value, parsed);
+          _ingestChartCall(value, parsed);
+          _ingestNetPlanCall(value, parsed);
+          _ingestCanvasCall(value, parsed);
+          _ingestContextMenuCall(value, parsed);
+          _ingestEditorCall(value, parsed);
+          _ingestPictureCall(parsed);
+        }
         // the call is OWED an answer (the kernel blocks in OLE_FLUSH_CALL):
         // a model fold that throws degrades the answer to the responder's
         // defaults for what that model would have supplied — never skips
@@ -1139,12 +1187,14 @@ class SapSession {
           _loadedSinks.addAll(loadedObjectSinksOf(call));
           _ea.noteDpBindings(call);
         });
+        _guarded('header names', () => _noteHeaderNames(call, value));
         // registry stamps run on the home clock (a relayed frame's
         // own step is another system's); the answer echoes closingStep
         final clock = _clockOf(f, closingStep);
         _guarded('layout fold', () => _foldLayoutCall(call, clock));
         _guarded('html fold', () => _foldHtmlCall(value, call, clock));
         _guarded('toolbar fold', () => _foldToolbarCall(value, call));
+        _guarded('cfw field fold', () => _foldCfwFieldCall(value, call));
         _guarded('value help fold', () => _foldValueHelpCall(call, value));
         final calendarAnswers =
             _guarded('calendar fold', () => _foldCalendarCall(call, value));
@@ -1155,6 +1205,9 @@ class SapSession {
         final propStore = {
           ...?_guarded('doi fold', () => doiObserveCall(_ea, _doi, call)),
           ...?_guarded('editor props', () => _editorPropAnswers(call)),
+          ...?_guarded('cfw field props', () => _cfwFieldPropAnswers(call)),
+          ...?_guarded(
+              'tree header props', () => _treeHeaderPropAnswers(call)),
           ...?adoption?.$2,
           ...?calendarAnswers,
         };
@@ -1412,6 +1465,25 @@ class SapSession {
   /// out; an unchanged size sends nothing.
   Future<bool> resizeWindow(int rows, int cols) => _resizeWindow(rows, cols);
 
+  /// The user dragged the edge of the left / right docking container
+  /// [dock] to [cols] window cells (the units of [regions]). The real
+  /// Windows GUI sends nothing at drag time; the drag surfaces as the
+  /// `%_GS 0 3` layout round answering the paint it disagrees with
+  /// (a recorded session KEY DECODE 1/2: ST04 gui[17]/gui[24], SE80
+  /// gui[37], PPOME gui[58] — each one right after the drag, before the
+  /// user's next action), carrying the realized area in 16/12/8 and the
+  /// dock's realized `300` in CONTROLS; the server then repaints the area
+  /// at cols = area px / cell (KEY DECODE 3). So the drag becomes the
+  /// session's sash ([dockFraction]: it is also the remembered sash of
+  /// later screens), the pane is ours to realize until the server's
+  /// repaint moves the painted delta (then that delta is trusted again,
+  /// [provisionalDockDelta]), and the round goes out now on an idle,
+  /// live main window — else it is owed to the next paint (an action
+  /// running, typed values staged, a popup up). Top / bottom docks (`120`)
+  /// are not modelled. Returns whether a round went out.
+  Future<bool> resizeDock(String dock, double cols) =>
+      _resizeDock(dock, cols);
+
   /// Run [body] as THE session action: actions never interleave on the
   /// inbox (two readers would race for frames and the single wake-up — the
   /// first one hung into its timeout). A call made while another runs —
@@ -1630,23 +1702,56 @@ class SapSession {
       if (doiDocumentPullVerdict(_doi, v) == null) continue; // refused
       var rfc = doiAnswerPullRfc(_ea, _doi, v) ??
           doiAnswerDocumentPullRfc(_doi, v);
+      final sink = rfc != null || url == null
+          ? null
+          : _propertySinks.remove(url);
+      // a column tree's HeaderNames read-back: the table the server
+      // assigned it (sap_session_tree.dart _noteHeaderNames) — an empty
+      // answer is the ALV tree's GET_FRONTEND_FIELDCATALOG FAILED dump
+      final header = sink != null && headerNamesProps.contains(sink.prop)
+          ? _headerNamesOf(sink.source)
+          : null;
+      if (rfc == null && header != null) {
+        rfc = headerNamesPullAnswer(
+          header,
+          windows: answerDialect == GuiDialect.windows,
+        );
+        _trace('client table pull answered ($url ${sink!.prop} of '
+            '${sink.source}, ${header.rows.length} rows, step $at)');
+      }
       if (rfc == null) {
-        final sink = url == null ? null : _propertySinks.remove(url);
         var keys = const <String>[];
-        if (sink != null && sink.prop == 'ExpandedKeys') {
+        // a tree's node-key read-back: the expansion / selection the user
+        // left on the client (sap_session_tree.dart noteTreeExpansion /
+        // noteTreeSelection)
+        final held = switch (sink?.prop) {
+          'ExpandedKeys' => _expandedKeys,
+          'SelectionKeys' => _w.selectionKeys,
+          _ => null,
+        };
+        if (sink != null && held != null) {
           final shell = _ea.shellAlias[sink.source] ?? sink.source;
-          keys = _expandedKeys[shell] ?? _expandedKeys[sink.source] ?? keys;
+          keys = held[shell] ?? held[sink.source] ?? keys;
+          // a node the tree no longer holds is neither open nor selected
+          final nodes = trees[shell]?.nodes;
+          if (nodes != null && nodes.isNotEmpty) {
+            keys = [for (final k in keys) if (nodes.containsKey(k)) k];
+          }
         }
         final loaded = sink == null && _loadedSinks.remove(url);
         // an HTML viewer's sapevent POST body (sap_session_html.dart)
         final post = loaded ? _takeHtmlPost() : null;
         rfc = post != null
-            ? htmlPostPullAnswer(post)
+            ? htmlPostPullAnswer(
+                post,
+                windows: answerDialect == GuiDialect.windows,
+              )
             : loaded
             ? loadedObjectPullAnswer(v)
             : nodeKeyTableAnswer(keys);
         _trace('client table pull answered ($url ${sink?.prop}, '
-            '${keys.length} rows, step $at${loaded ? ', loaded object' : ''})');
+            '${keys.length} rows, step $at${loaded ? ', loaded object' : ''}'
+            '${post != null ? ', html post ${post.length} B' : ''})');
       }
       out.add(
           clientFrame([stepItem(at), buildApplItem(8, 1, rfc), eomBytes]));
@@ -1659,6 +1764,17 @@ class SapSession {
   /// reports (`SAPGUI_PROGRESS_INDICATOR` TEXT / PERCENTAGE) and what the
   /// kernel asked of the front end.
   final List<FrontendCall> frontendRfcLog = [];
+
+  /// This host's name for the front-end RFC descriptor, read once per
+  /// process (it was a syscall per answered front-end RFC); '' when the
+  /// platform does not tell.
+  static final String _localHost = () {
+    try {
+      return Platform.localHostname;
+    } catch (_) {
+      return '';
+    }
+  }();
 
   /// The client frame answering the front-end RFC [value] (16/8/[sid] of a
   /// frame at step [at]), or null when none is owed: a sid-6 progress tick
@@ -1678,13 +1794,9 @@ class SapSession {
       _trace('$what "${call.params['TEXT'] ?? ''}": async, no reply');
       return null;
     }
-    final key =
-        Object.hash('frontend-rfc', at, value.length, Object.hashAll(value));
+    final key = AnsweredCalls.keyOf('frontend-rfc', at, value);
     if (!_answeredFlushes.add(key)) return null;
-    var host = '';
-    try {
-      host = Platform.localHostname;
-    } catch (_) {}
+    final host = _localHost;
     // the Windows GUI's descriptor names its host (the 0008 token after
     // the 0018 address) and its reply frame ends with two EOM items
     // (a recorded session gui[10] / [11], a recorded session
@@ -1700,7 +1812,7 @@ class SapSession {
 
   AutomationStream get _autoStream => _w.autoStream;
   StreamPaintAssembler get _streamPaints => _w.streamPaints;
-  Set<int> get _answeredFlushes => _w.answeredFlushes;
+  AnsweredCalls get _answeredFlushes => _w.answeredFlushes;
 
   /// The automation/DOI state the responder answers from (the XML metrics
   /// advertise THIS session's negotiated window, not the capture's).
@@ -1819,7 +1931,11 @@ class SapSession {
       final isNodes = t.columns.contains('RELATKEY');
       final isItems = t.columns.contains('ITEM_NAME');
       if (!isNodes && !isItems) continue;
-      if (isNodes && t.rows.any((r) => (r['RELATKEY'] ?? '').isEmpty)) {
+      // an update push (isTreeUpdateTable: RELATKEY blank on every row)
+      // changes nodes the tree holds — no new tree
+      if (isNodes &&
+          !isTreeUpdateTable(t) &&
+          t.rows.any((r) => (r['RELATKEY'] ?? '').isEmpty)) {
         // a new tree, not an extension: one of another imode is kept
         if (!_treeUnbound) {
           _keepOrRestoreTree(newTree: true);
@@ -2245,12 +2361,11 @@ class SapSession {
       throw StateError('no tree control on this screen to expand');
     }
     _ea.recordEvent(shell, {0: nodeKey});
-    (_expandedKeys[shell] ??= []).add(nodeKey);
+    noteTreeExpansion(shell, nodeKey, open: true);
+    // the connection's spelling (Windows: the OCX DATAMANAGER, sap_session_
+    // tree.dart)
     return _act(
-      treeEventItems(ctx,
-          shell: shell,
-          eventId: treeEventExpandNoChildren,
-          nodeKey: nodeKey),
+      _treeEventRound(shell, treeEventExpandNoChildren, nodeKey),
       controlEvent: true,
     );
   }

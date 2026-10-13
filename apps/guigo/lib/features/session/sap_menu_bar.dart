@@ -36,9 +36,9 @@ class SapMenuButton extends StatelessWidget {
     return a.length > 1 ? a : null;
   }
 
-  List<Widget> _entries(List<int> parent) {
+  List<Widget> _entries(MenuChildIndex index, List<int> parent) {
     final out = <Widget>[];
-    for (final e in menuChildren(tree, parent)) {
+    for (final e in index.children(parent)) {
       if (e.separator) {
         // no rule first, last, or doubled
         if (out.isNotEmpty && out.last is! Divider) {
@@ -46,9 +46,8 @@ class SapMenuButton extends StatelessWidget {
         }
         continue;
       }
-      final kids = menuChildren(tree, e.path, separators: false);
-      if (e.submenu || kids.isNotEmpty) {
-        final sub = _entries(e.path);
+      if (e.submenu || index.hasEntries(e.path)) {
+        final sub = _entries(index, e.path);
         out.add(
           SubmenuButton(
             menuChildren: sub,
@@ -80,10 +79,14 @@ class SapMenuButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final enabled = !busy && bar.isNotEmpty;
+    final index = MenuChildIndex.of(tree);
     return MenuAnchor(
       menuChildren: [
         for (final b in bar)
-          SubmenuButton(menuChildren: _entries(b.path), child: Text(b.text)),
+          SubmenuButton(
+            menuChildren: _entries(index, b.path),
+            child: Text(b.text),
+          ),
       ],
       builder: (context, controller, _) => IconButton(
         tooltip: 'Menu',
@@ -94,4 +97,55 @@ class SapMenuButton extends StatelessWidget {
       ),
     );
   }
+}
+
+/// The dropdown [tree]'s entries grouped by parent path in ONE pass —
+/// what [menuChildren] answers per call by a scan of the whole tree (a
+/// cascade asking it per entry is O(n²)). Built once per tree list
+/// ([of] memoizes by identity: the screen model's list is the same until
+/// the server paints a new one).
+class MenuChildIndex {
+  MenuChildIndex(List<MenuEntry> tree) {
+    for (final e in tree) {
+      final p = e.position;
+      int at(int i) => i < p.length ? p[i] : 0;
+      // the entry's depth: its last non-zero position; it sits under the
+      // positions before it (menuChildren: positions after it all zero)
+      var d = 4;
+      while (d > 0 && at(d - 1) == 0) {
+        d--;
+      }
+      if (d < 2) continue; // a bar header (or nothing) is no one's child
+      final key = _key([for (var i = 0; i < d - 1; i++) at(i)]);
+      if (e.separator) {
+        (_all[key] ??= []).add(e);
+      } else if (e.text.isNotEmpty) {
+        (_all[key] ??= []).add(e);
+        _withEntries.add(key);
+      }
+    }
+  }
+
+  static final _memo = Expando<MenuChildIndex>('MenuChildIndex');
+
+  /// The index of [tree], built on its first use.
+  static MenuChildIndex of(List<MenuEntry> tree) =>
+      _memo[tree] ??= MenuChildIndex(tree);
+
+  final _all = <String, List<MenuEntry>>{};
+  final _withEntries = <String>{};
+
+  static String _key(List<int> path) => path.join('.');
+
+  /// [menuChildren] (separators kept) of [parent], in paint order.
+  List<MenuEntry> children(List<int> parent) =>
+      parent.isEmpty || parent.length >= 4
+      ? const []
+      : _all[_key(parent)] ?? const [];
+
+  /// Whether [parent] has an entry that is not a separator.
+  bool hasEntries(List<int> parent) =>
+      parent.isNotEmpty &&
+      parent.length < 4 &&
+      _withEntries.contains(_key(parent));
 }

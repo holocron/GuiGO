@@ -191,9 +191,25 @@ class _WindowState {
   final Map<String, PropertySink> propertySinks = {};
   final Set<String> loadedSinks = {};
   final Map<String, List<String>> expandedKeys = {};
+
+  /// tree shell -> its selected node keys (SelectionKeys read-backs)
+  final Map<String, List<String>> selectionKeys = {};
+
+  /// tree token (shell / handle) -> the HeaderNames table the server
+  /// assigned it, the newest assignment of any tree, and the newest
+  /// ItemEx/Hidden(0) declaration list (sap_session_tree.dart
+  /// _noteHeaderNames)
+  final Map<String, HeaderNamesTable> headerNames = {};
+  HeaderNamesTable? lastHeaderNames;
+  List<String> declaredHeaders = const [];
+
+  /// header key -> the width in chars the server last declared for it
+  /// (`ABAPWidth(<chars>, 0)` after its `ItemEx` / `HierarchyHeader`) —
+  /// what a `WidthInChar` read answers (sap_session_tree.dart)
+  final Map<String, int> headerWidths = {};
   final AutomationStream autoStream = AutomationStream();
   final StreamPaintAssembler streamPaints = StreamPaintAssembler();
-  final Set<int> answeredFlushes = {};
+  final AnsweredCalls answeredFlushes = AnsweredCalls();
 
   SapTreeModel? tree;
   final List<DpTable> treeTables = [];
@@ -222,6 +238,9 @@ class _WindowState {
   String? chartBaseKey;
 
   final SapNetPlanTracker netPlans = SapNetPlanTracker();
+
+  /// the picture controls' urls, display modes and pushed pictures
+  final SapPictureTracker pictureTracker = SapPictureTracker();
 
   SapWindow snapshot({required bool active, bool closed = false}) => SapWindow(
     mode: mode,

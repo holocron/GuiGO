@@ -1,0 +1,21 @@
+# The app's rule set (apps/guigo: flutter_lints = package:lints' recommended
+# set) in its pure-Dart form; `lints` resolves through the pub workspace
+# (flutter_lints depends on it).
+include: package:lints/recommended.yaml
+
+analyzer:
+  exclude:
+    - test/a recorded session
+
+linter:
+  rules:
+    # doc comments quote the wire's own vocabulary: XML tags
+    # (`<DATAMANAGER>`, `<CONTROLS>`), SAP placeholders (`<shell>`)
+    unintended_html_in_doc_comment: false
+    # names spelled as the wire / the SAP structure spells them
+    camel_case_types: false
+    non_constant_identifier_names: false
+    # style-only rewrites of working code (no behaviour change to gain)
+    use_null_aware_elements: false
+    prefer_initializing_formals: false
+    library_private_types_in_public_api: false

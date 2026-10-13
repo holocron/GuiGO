@@ -152,8 +152,9 @@ String _unescape(String s) {
     if (e.startsWith('#x')) {
       return String.fromCharCode(int.parse(e.substring(2), radix: 16));
     }
-    if (e.startsWith('#'))
+    if (e.startsWith('#')) {
       return String.fromCharCode(int.parse(e.substring(1)));
+    }
     return switch (e) {
       'amp' => '&',
       'lt' => '<',

@@ -13,6 +13,7 @@ import 'field_routing.dart';
 import 'menu_entries.dart';
 import 'sap_netplan.dart';
 import 'table_controls.dart';
+import 'type_ahead.dart' show xmlpropArmsTypeAhead;
 
 export 'field_routing.dart' show FieldRouting;
 export 'menu_entries.dart';
@@ -118,6 +119,12 @@ class ScreenField {
   /// MATCHCODE bit (0x10), or the F4-button COMBOSTYLE bit (0x80) on a cell
   /// that is no listbox (etype 126) — reference client screen_atoms `f4`.
   bool hasF4 = false;
+
+  /// The field is armed for TYPE-AHEAD (server proposals while typing):
+  /// the etype-120 XMLPROP property bag of its cell carries
+  /// `<CustomProperty typeahead="X"/>` (screen/type_ahead.dart; reference client
+  /// screen_atoms._propertybag -> `typeahead`).
+  bool typeAhead = false;
 }
 
 /// One non-blank line of a classic ABAP list (a report, an F4 hit list in
@@ -500,6 +507,10 @@ class _WindowSegment {
   _WindowSegment(this.modalNo);
   final int? modalNo; // null = items before any SES (continuation)
   Uint8List? ses; // the latest SES value of this window
+
+  /// Whether one of the segment's SES announced a NEW screen (not a delta
+  /// paint — [sesIsDeltaPaint]): the segment then repaints the window.
+  bool newScreen = false;
   final List<DiagItem> items = [];
 
   /// Indexes into [items] where a new frame's items start: the container
@@ -537,14 +548,18 @@ WindowedFold foldWindows(
         final lvl = it.value[7];
         // a later frame at the SAME level repaints the same window —
         // merge (latest wins per cell); a level CHANGE opens a new one
+        final fresh = !sesIsDeltaPaint(it.value);
         if (segments.last.modalNo == lvl) {
-          segments.last.ses = it.value;
+          segments.last
+            ..ses = it.value
+            ..newScreen |= fresh;
           continue;
         }
         segments.add(
           _WindowSegment(lvl)
             ..frameStarts.add(0)
-            ..ses = it.value,
+            ..ses = it.value
+            ..newScreen = fresh,
         );
       } else {
         segments.last.items.add(it);
@@ -696,13 +711,25 @@ ScreenModel _foldSegment(
         break;
     }
   }
+  // a DELTA paint of the same dynpro (the SES screen flag's NEW-SCREEN bit
+  // clear — [sesIsDeltaPaint]) updates the window in place: what it does
+  // not repaint stays (an error message's paint resends only the inputs,
+  // the type-ahead answer's paint nothing at all)
+  final delta = previous != null &&
+      previous.modalLevel == modalLevel &&
+      ses != null &&
+      !seg.newScreen &&
+      m.program == previous.program &&
+      m.dynpro == previous.dynpro;
   // a turn that paints nothing of the dynpro — no DYNT atom / container
   // item, no program / dynpro name (a flush or receipt after the paint,
-  // ME21N's header-only end of turn) — keeps the window's painted fields
-  // (the reference client folds over the screen's frames, it never empties them)
+  // ME21N's header-only end of turn), or a delta paint without a body —
+  // keeps the window's painted fields (the reference client folds over the screen's
+  // frames, it never empties them)
   if (previous != null &&
       previous.modalLevel == modalLevel &&
-      !seg.items.any(_paintsDynpro)) {
+      (!seg.items.any(_paintsDynpro) ||
+          (delta && !seg.items.any(_paintsBody)))) {
     m.fields.addAll(previous.fields);
     m.frames.addAll(previous.frames);
     m.tableControls.addAll(previous.tableControls);
@@ -720,11 +747,79 @@ ScreenModel _foldSegment(
   _buildListLines(m, st);
   m.containers.addAll(st.path.declared);
   m.hostedDynpros.addAll(st.path.dynpros);
+  if (delta) _mergeDelta(m, previous);
   m.fields.sort((x, y) {
     final c = x.row.compareTo(y.row);
     return c != 0 ? c : x.col.compareTo(y.col);
   });
   return m;
+}
+
+/// Whether a server SES (16 bytes, pysap SAPDiagSES) announces a DELTA
+/// paint: its `screen_flag` (byte 6) has bit 0x01 — a new screen — clear.
+/// Across every recording (GuiGo testdata + the reference client's, ~4000 paints) a
+/// paint of ANOTHER screen always sets it (flag 0x01 / 0x11 / 0x21); a
+/// clear flag only repaints the screen already shown: the error message's
+/// paint resends the inputs alone (a recorded session srv[184] full
+/// SAPMSVMA/0100, 29 atoms + flag 01 -> srv[185] `E: La table/vue V_T000
+/// n'existe pas…`, 17 atoms + flag 00: the output, the frame box and the
+/// four pushbuttons are not resent and stay on the real GUI's screen), and
+/// the type-ahead answer's paint resends nothing (a recorded session
+/// pick raw srv[17] / [19]…, selection_options raw srv[16]: SES `…00 …`,
+/// the program / dynpro names, no atom).
+bool sesIsDeltaPaint(Uint8List? ses) =>
+    ses != null && ses.length >= 16 && ses[6] & 0x01 == 0;
+
+/// The dynpro BODY items of [_paintsDynpro] — everything but the program /
+/// dynpro names a delta paint repeats without repainting anything.
+bool _paintsBody(DiagItem it) =>
+    _paintsDynpro(it) &&
+    !(it.isAppl && it.id == applStR3Info && (it.sid == 13 || it.sid == 14));
+
+/// A delta paint ([sesIsDeltaPaint]) folded over the window's [previous]
+/// paint: the cells it repaints are its own, every other field, frame box,
+/// table control, container, list and graph stays as painted. A repainted
+/// input keeps its caption and type-ahead arming when the delta resent
+/// neither.
+void _mergeDelta(ScreenModel m, ScreenModel previous) {
+  (String?, int, int) cell(ScreenField f) => (f.container, f.row, f.col);
+  final prevAt = {for (final f in previous.fields) cell(f): f};
+  final painted = <(String?, int, int)>{};
+  for (final f in m.fields) {
+    painted.add(cell(f));
+    final was = prevAt[cell(f)];
+    if (was == null || was.kind != f.kind) continue;
+    if (f.label.isEmpty) f.label = was.label;
+    // a radio / checkbox resent for its state carries no caption (su53
+    // srv[271]: the four RS37A-FUN* radios, text empty)
+    if ((f.kind == FieldKind.radio || f.kind == FieldKind.checkbox) &&
+        f.text.trim().isEmpty) {
+      f.text = was.text;
+    }
+    if (f.name == null || f.name!.isEmpty) f.name = was.name;
+    f.typeAhead = f.typeAhead || was.typeAhead;
+  }
+  for (final f in previous.fields) {
+    if (!painted.contains(cell(f))) m.fields.add(f);
+  }
+  final boxes = {for (final b in m.frames) (b.row, b.col)};
+  for (final b in previous.frames) {
+    if (!boxes.contains((b.row, b.col))) m.frames.add(b);
+  }
+  if (m.tableControls.isEmpty) m.tableControls.addAll(previous.tableControls);
+  for (final e in previous.containers.entries) {
+    m.containers.putIfAbsent(e.key, () => e.value);
+  }
+  m.hostedDynpros.addAll(previous.hostedDynpros);
+  for (final e in previous.controlPaths.entries) {
+    m.controlPaths.putIfAbsent(e.key, () => e.value);
+  }
+  if (m.netPlans.isEmpty) m.netPlans.addAll(previous.netPlans);
+  if (m.listPaint.isEmpty) {
+    m.listLines.addAll(previous.listLines);
+    m.listPaint.addAll(previous.listPaint);
+    m.listWindow ??= previous.listWindow;
+  }
 }
 
 /// An icon (`@3R@`, `@3R\Q<quick info>@`) or a quick-info wrapper
@@ -865,7 +960,17 @@ bool framesPaintDynpro(Iterable<Uint8List> frames) {
   for (final f in frames) {
     final dec = decompressFrame(f);
     if (dec == null) continue;
-    if (dec.walk.items.any(_paintsDynpro)) return true;
+    final items = dec.walk.items;
+    if (items.any(_paintsBody)) return true;
+    // the program / dynpro names alone: a new screen's paint, unless the
+    // frame's SES marks it a delta of the screen shown (the type-ahead
+    // answer's body-less repaint — typed values staged meanwhile stay)
+    if (items.any(_paintsDynpro)) {
+      final ses = items
+          .where((it) => it.type == itemSes && it.value.length >= 16)
+          .lastOrNull;
+      if (!sesIsDeltaPaint(ses?.value)) return true;
+    }
   }
   return false;
 }
@@ -1385,9 +1490,13 @@ void _buildFields(ScreenModel m, List<_PlacedAtom> placed) {
   // value help per cell: MATCHCODE on any atom of the cell, or the F4
   // button (COMBOSTYLE) on a cell without a listbox (reference client screen_atoms)
   final cellMc = <_Cell>{}, cellCs = <_Cell>{}, cellCombo = <_Cell>{};
+  final cellTypeAhead = <_GroupCell>{};
   for (final p in placed) {
     final a = p.atom;
     final cell = p.cell;
+    if (a.etype == etypeXmlprop && xmlpropArmsTypeAhead(a.xmlpropText)) {
+      cellTypeAhead.add(p.groupCell);
+    }
     if (a.attr & 0x10 != 0) cellMc.add(cell);
     if (a.attr & 0x80 != 0) cellCs.add(cell);
     if (etypeCombo.contains(a.etype)) cellCombo.add(cell);
@@ -1568,6 +1677,8 @@ void _buildFields(ScreenModel m, List<_PlacedAtom> placed) {
       f.hasF4 = f.kind == FieldKind.input &&
           (cellMc.contains(cell) ||
               (cellCs.contains(cell) && !cellCombo.contains(cell)));
+      f.typeAhead =
+          f.kind == FieldKind.input && cellTypeAhead.contains(p.groupCell);
       m.fields.add(f);
     }
   }

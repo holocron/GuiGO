@@ -5,8 +5,13 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// A stored connection: everything except the password lives in plain
-/// preferences; the password sits in the platform secure store (Keychain /
-/// Keystore) and is only read after a biometric gate.
+/// preferences; the password sits in the platform secure store (iOS
+/// Keychain, device-only `unlocked_this_device`; Android
+/// `EncryptedSharedPreferences`). With biometrics enrolled it is read only
+/// after Face ID / Touch ID / fingerprint succeeds; without, it is used
+/// directly — then protected only by the store (on iOS readable only while
+/// this device is unlocked; on Android encrypted at rest, no unlock gate).
+/// See `releaseStoredPassword` (core/password_gate.dart).
 class ConnectionEntry {
   ConnectionEntry({
     required this.id,
@@ -132,8 +137,9 @@ class ConnectionStore {
   }
 
   /// Whether a password is stored for [id] — asked of the secure store
-  /// without reading the value (the value itself is only read behind the
-  /// biometric gate, [readPassword]).
+  /// without reading the value (the value itself is read by [readPassword]
+  /// only once `releaseStoredPassword` lets it out: after the biometric
+  /// prompt when biometrics are enrolled, directly when none are).
   Future<bool> hasPassword(String id) {
     return _secure.containsKey(
         key: 'guigo.pw.$id', aOptions: _androidOpts, iOptions: _iosOpts);

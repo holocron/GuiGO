@@ -55,15 +55,39 @@ const _entities = {
   'copy': '©', 'reg': '®', 'deg': '°', 'euro': '€', 'middot': '·', 'bull': '•',
 };
 
-String _decodeEntities(String s) => s.replaceAllMapped(
-      RegExp(r'&(#x[0-9a-fA-F]+|#\d+|[A-Za-z]+);'),
-      (m) {
+final _entityRx = RegExp(r'&(#x[0-9a-fA-F]+|#\d+|[A-Za-z]+);');
+
+/// The character of a numeric reference: U+FFFD for what is no Unicode
+/// scalar value (0, a surrogate, past U+10FFFF, digits that overflow) —
+/// as HTML's parser does — instead of a throw on a hostile page.
+String _charRef(String digits, int radix) {
+  final cp = digits.length > 8 ? null : int.tryParse(digits, radix: radix);
+  final ok = cp != null &&
+      cp > 0 &&
+      cp <= 0x10FFFF &&
+      (cp < 0xD800 || cp > 0xDFFF);
+  return String.fromCharCode(ok ? cp : 0xFFFD);
+}
+
+String _decodeEntities(String s) => !s.contains('&')
+    ? s
+    : s.replaceAllMapped(_entityRx, (m) {
         final e = m.group(1)!;
-        if (e.startsWith('#x')) return String.fromCharCode(int.parse(e.substring(2), radix: 16));
-        if (e.startsWith('#')) return String.fromCharCode(int.parse(e.substring(1)));
+        if (e.startsWith('#x')) return _charRef(e.substring(2), 16);
+        if (e.startsWith('#')) return _charRef(e.substring(1), 10);
         return _entities[e] ?? m.group(0)!;
-      },
-    );
+      });
+
+final _boolAttrRx = RegExp(r'(?:^|\s)(checked|selected|disabled)(?=\s|/|$)', caseSensitive: false);
+final _hrefSplitRx = RegExp(r'[/\\?:=&#]');
+final _sapeventRx = RegExp(r'''sapevent:[^'"\s)]+''', caseSensitive: false);
+final _commentRx = RegExp(r'<!--.*?-->', dotAll: true);
+final _droppedRx = RegExp(r'<(script|style|head|title|noscript)\b.*?</\1\s*>', caseSensitive: false, dotAll: true);
+final _declRx = RegExp(r'<![^>]*>|<\?[^>]*>');
+final _leadSpaceRx = RegExp(r'^[ \t\r\n\f]+');
+final _trailSpaceRx = RegExp(r'[ \t\r\n\f]+$');
+final _leadBlanksRx = RegExp(r'^ +');
+final _tagRx = RegExp(r'<(/?)([A-Za-z][A-Za-z0-9]*)([^>]*)>');
 
 final _attrRx = RegExp(r'''([A-Za-z_:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))''');
 
@@ -72,8 +96,7 @@ Map<String, String> _attrs(String raw) => {
       for (final a in _attrRx.allMatches(raw))
         a.group(1)!.toLowerCase(): _decodeEntities(a.group(2) ?? a.group(3) ?? a.group(4) ?? '').trim(),
       // a bare boolean attribute (`checked`, `selected`)
-      for (final b in RegExp(r'(?:^|\s)(checked|selected|disabled)(?=\s|/|$)', caseSensitive: false)
-          .allMatches(raw))
+      for (final b in _boolAttrRx.allMatches(raw))
         b.group(1)!.toLowerCase(): '',
     };
 
@@ -83,14 +106,14 @@ String? _nonEmpty(String? s) => s == null || s.isEmpty ? null : s;
 /// (`SAPEVENT:QUICKLINK?ID=USER_ACCESS` -> `USER_ACCESS`, `…/help.htm` ->
 /// `help.htm`).
 String hrefLabel(String href) {
-  final parts = href.split(RegExp(r'[/\\?:=&#]')).where((p) => p.trim().isNotEmpty).toList();
+  final parts = href.split(_hrefSplitRx).where((p) => p.trim().isNotEmpty).toList();
   return parts.isEmpty ? href : parts.last.trim();
 }
 
 /// The `sapevent:` url an inline handler navigates to (`onclick=
 /// "location.href='SAPEVENT:X'"`), or null.
 String? _sapeventIn(String? js) =>
-    js == null ? null : RegExp(r'''sapevent:[^'"\s)]+''', caseSensitive: false).firstMatch(js)?.group(0);
+    js == null ? null : _sapeventRx.firstMatch(js)?.group(0);
 
 /// The SAP control name of a dynamic document control id
 /// (`A1F2B3NAME:BT_SELECTDT` -> `BT_SELECTDT`).
@@ -110,10 +133,9 @@ String _controlName(String id) => id.substring(id.indexOf(':') + 1);
 /// document was not pushed) is a 'frame' block naming its src.
 List<HtmlBlock> htmlToBlocks(String html) {
   final s = html
-      .replaceAll(RegExp(r'<!--.*?-->', dotAll: true), '')
-      .replaceAll(
-          RegExp(r'<(script|style|head|title|noscript)\b.*?</\1\s*>', caseSensitive: false, dotAll: true), '')
-      .replaceAll(RegExp(r'<![^>]*>|<\?[^>]*>'), '');
+      .replaceAll(_commentRx, '')
+      .replaceAll(_droppedRx, '')
+      .replaceAll(_declRx, '');
   final blocks = <HtmlBlock>[];
   var runs = <HtmlRun>[];
   var kind = 'p';
@@ -143,9 +165,9 @@ List<HtmlBlock> htmlToBlocks(String html) {
       while (runs.last.text.trim().isEmpty && !runs.last.control) {
         runs.removeLast();
       }
-      runs[0] = runs[0].withText(runs[0].text.replaceFirst(RegExp(r'^[ \t\r\n\f]+'), ''));
+      runs[0] = runs[0].withText(runs[0].text.replaceFirst(_leadSpaceRx, ''));
       final l = runs.length - 1;
-      runs[l] = runs[l].withText(runs[l].text.replaceFirst(RegExp(r'[ \t\r\n\f]+$'), ''));
+      runs[l] = runs[l].withText(runs[l].text.replaceFirst(_trailSpaceRx, ''));
       blocks.add(HtmlBlock(kind, runs, level: level));
     }
     runs = <HtmlRun>[];
@@ -167,7 +189,7 @@ List<HtmlBlock> htmlToBlocks(String html) {
 
   void text(String t) {
     // collapsed whitespace after a control's own gap
-    if (pre == 0 && runs.isNotEmpty && runs.last.text.endsWith(' ')) t = t.replaceFirst(RegExp(r'^ +'), '');
+    if (pre == 0 && runs.isNotEmpty && runs.last.text.endsWith(' ')) t = t.replaceFirst(_leadBlanksRx, '');
     if (t.isEmpty) return;
     if (options != null) {
       if (inOption) optionText.write(t);
@@ -189,9 +211,8 @@ List<HtmlBlock> htmlToBlocks(String html) {
     optionText = StringBuffer();
   }
 
-  final tagRx = RegExp(r'<(/?)([A-Za-z][A-Za-z0-9]*)([^>]*)>');
   var at = 0;
-  for (final m in tagRx.allMatches(s)) {
+  for (final m in _tagRx.allMatches(s)) {
     if (m.start > at) {
       var t = _decodeEntities(s.substring(at, m.start));
       if (pre == 0) t = t.replaceAll(_htmlSpace, ' ');
@@ -252,7 +273,13 @@ List<HtmlBlock> htmlToBlocks(String html) {
           anchorLabel = null;
         } else {
           final a = _attrs(raw);
-          href = _nonEmpty(a['href']) ?? _sapeventIn(a['onclick']);
+          // a SAPEVENT href as it is; else the SAPEVENT a script navigates
+          // to (`href="#" onclick="location.href='SAPEVENT:X'"`, `href=
+          // "javascript:…'SAPEVENT:X'…"`) — what the browser ends up at
+          final h = _nonEmpty(a['href']);
+          href = h != null && h.toLowerCase().startsWith('sapevent:')
+              ? h
+              : _sapeventIn(a['onclick']) ?? _sapeventIn(h) ?? h;
           anchorAt = runs.length;
           anchorLabel = _nonEmpty(a['title']);
         }

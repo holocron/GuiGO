@@ -92,12 +92,15 @@ List<MenuEntry> menuChildren(
   if (depth == 0 || depth >= 4) return const [];
   bool under(MenuEntry e) {
     final p = e.position;
+    // a hand-built entry may carry fewer than the wire's four levels: the
+    // missing ones are 0 (never a RangeError)
+    int at(int i) => i < p.length ? p[i] : 0;
     for (var i = 0; i < depth; i++) {
-      if (p[i] != parent[i]) return false;
+      if (at(i) != parent[i]) return false;
     }
-    if (p[depth] == 0) return false;
+    if (at(depth) == 0) return false;
     for (var i = depth + 1; i < 4; i++) {
-      if (p[i] != 0) return false;
+      if (at(i) != 0) return false;
     }
     return true;
   }

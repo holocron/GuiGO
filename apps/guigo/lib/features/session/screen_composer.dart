@@ -9,6 +9,8 @@ class ComposedPane {
     required this.cells,
     required this.builder,
     this.main = false,
+    this.rigidRows = false,
+    this.dock,
   });
 
   /// left = col, top = row, width = cols, height = rows (window cells).
@@ -20,6 +22,27 @@ class ComposedPane {
 
   /// The window's own dynpro (drawn without a pane border).
   final bool main;
+
+  /// The pane keeps its height when a row divider moves (a control
+  /// toolbar's button row): a divider next to it moves it along instead,
+  /// and the pane beyond it gives the room — the real GUI's toolbar row of
+  /// a splitter cell (an absolute row the program sized, or the toolbar
+  /// sharing its container with the tree below it) never stretches.
+  final bool rigidRows;
+
+  /// The docking container (its shell) whose subtree the pane lies in, or
+  /// null: a column divider between such panes and the dynpro is the dock's
+  /// edge, whose drag the server is told ([ScreenComposer.onDockResize]).
+  final String? dock;
+
+  /// This pane in the subtree of docking container [dock].
+  ComposedPane withDock(String? dock) => ComposedPane(
+    cells: cells,
+    builder: builder,
+    main: main,
+    rigidRows: rigidRows,
+    dock: dock,
+  );
 }
 
 /// A SAP window composed of several panes — docking containers, splitter
@@ -38,6 +61,7 @@ class ScreenComposer extends StatefulWidget {
     this.resizable = true,
     this.fixedSashes = const [],
     this.fillHeight = false,
+    this.onDockResize,
   });
 
   final List<ComposedPane> panes;
@@ -47,15 +71,27 @@ class ScreenComposer extends StatefulWidget {
   /// the server paints into). The scale fits THIS, not the panes the
   /// current screen happens to carry: the window keeps its zoom while the
   /// user moves between screens (ST04's tree picks swap the detail panes).
+  /// A pane lying wholly beyond it does not widen it (it is clipped, as the
+  /// SAP window clips a custom-control area painted past its edge); a pane
+  /// starting inside it and reaching further does ([extentIn]).
   final Size? window;
 
   /// The dividers between panes can be dragged, like SAP GUI's splitter
-  /// sashes and docking-container edges. The sizes are the client's own
-  /// (nothing goes to the server: no capture shows what the real GUI
-  /// reports after a drag) and hold while [resizeKey] (the transaction)
-  /// stays the same.
+  /// sashes and docking-container edges. A splitter sash is the client's
+  /// own (the real GUI sends nothing for it: a recorded session) and
+  /// holds while [resizeKey] (the transaction) stays the same; a dock edge
+  /// is reported when the drag ends ([onDockResize]).
   final bool resizable;
   final Object? resizeKey;
+
+  /// A column divider between the panes of ONE docking container
+  /// ([ComposedPane.dock]) and the dynpro was dragged: [cols] = the dock's
+  /// new width in window cells, called when the finger lifts. The server
+  /// lays the dynpro area out again to the reported extent
+  /// (a recorded session KEY DECODE 1-3); once the panes come back
+  /// at the new geometry the divider's own offset is dropped — the server's
+  /// layout is trusted, not drawn shifted a second time.
+  final void Function(String dock, double cols)? onDockResize;
 
   /// The dividers the program fixed (SetRowSash / SetColumnSash movable or
   /// visible false), as zero-width lines in window cells: a divider on one
@@ -84,6 +120,27 @@ class ScreenComposer extends StatefulWidget {
     for (final p in panes) {
       cols = math.max(cols, p.cells.right);
       rows = math.max(rows, p.cells.bottom);
+    }
+    return Size(cols, rows);
+  }
+
+  /// The extent the composer draws for [panes] in [window]: the window,
+  /// grown only by the panes that START inside it (a pane wholly beyond
+  /// its right / bottom edge — a stale region of an earlier, wider layout,
+  /// a cell of a container painted past the area — is clipped, not given
+  /// room: it shrank every pane of the live iPad ST04 window to ~72 % of
+  /// the body).
+  static Size extentIn(Size? window, List<ComposedPane> panes) {
+    if (window == null || window.width <= 0 || window.height <= 0) {
+      return extentOf(panes);
+    }
+    var cols = window.width, rows = window.height;
+    for (final p in panes) {
+      final c = p.cells;
+      if (c.left < window.width - _eps && c.top < window.height - _eps) {
+        cols = math.max(cols, c.right);
+        rows = math.max(rows, c.bottom);
+      }
     }
     return Size(cols, rows);
   }
@@ -165,30 +222,97 @@ bool sashOnLine(PaneSash sh, Rect line) {
 /// The least a pane keeps when a divider squeezes it, in cells.
 const double _minPaneCells = 3;
 
+/// The panes a row divider [sh] moves, per side: those that RESIZE (the
+/// first non-rigid pane met walking away from the divider) and those that
+/// only TRANSLATE (the rigid rows between, [ComposedPane.rigidRows]). Null
+/// when a side runs out of panes before a resizable one (a toolbar row at
+/// the window's edge): that divider moves nothing — it is not a sash at
+/// all (PPOSE's search toolbar over its tree: one container, no splitter).
+({List<int> growB, List<int> moveB, List<int> moveA, List<int> shrinkA})?
+_rowSides(List<Rect> rects, PaneSash sh, List<bool> rigid) {
+  bool isRigid(int i) => i < rigid.length && rigid[i];
+  bool overlapsX(Rect a, Rect b) =>
+      math.min(a.right, b.right) - math.max(a.left, b.left) > _eps;
+  final growB = <int>[], moveB = <int>[], moveA = <int>[], shrinkA = <int>[];
+  // away from the divider: below it the panes after, above it the panes
+  // before; a rigid pane hands the walk to its far neighbours
+  bool walk(List<int> start, bool down, List<int> move, List<int> resize) {
+    final seen = <int>{};
+    final queue = [...start];
+    while (queue.isNotEmpty) {
+      final i = queue.removeLast();
+      if (!seen.add(i)) continue;
+      if (!isRigid(i)) {
+        resize.add(i);
+        continue;
+      }
+      move.add(i);
+      final r = rects[i];
+      final edge = down ? r.bottom : r.top;
+      final next = [
+        for (var j = 0; j < rects.length; j++)
+          if (j != i &&
+              ((down ? rects[j].top : rects[j].bottom) - edge).abs() < _eps &&
+              overlapsX(rects[j], r))
+            j,
+      ];
+      if (next.isEmpty) return false;
+      queue.addAll(next);
+    }
+    return true;
+  }
+
+  if (!walk(sh.after, true, moveA, shrinkA)) return null;
+  if (!walk(sh.before, false, moveB, growB)) return null;
+  return (growB: growB, moveB: moveB, moveA: moveA, shrinkA: shrinkA);
+}
+
+/// Whether divider [sh] can move at all: a column divider always, a row
+/// divider unless one side is only rigid rows up to the window's edge.
+bool sashMovable(List<Rect> rects, PaneSash sh, List<bool> rigid) =>
+    sh.vertical || _rowSides(rects, sh, rigid) != null;
+
 /// [rects] with each divider moved by its offset (cells), clamped so no
-/// pane on either side shrinks below [_minPaneCells].
+/// pane on either side shrinks below [_minPaneCells]. A row divider moves
+/// the [rigid] rows next to it along (a splitter cell's toolbar row keeps
+/// its height: PPOSE's structure toolbar under the search tree) and the
+/// first pane beyond them gives or takes the room.
 List<Rect> applySashes(
   List<Rect> rects,
   List<PaneSash> sashes,
-  Map<String, double> offsets,
-) {
+  Map<String, double> offsets, {
+  List<bool> rigid = const [],
+}) {
   final out = List.of(rects);
   for (final sh in sashes) {
     var d = offsets[sh.key] ?? 0;
     if (d == 0) continue;
     double size(Rect r) => sh.vertical ? r.width : r.height;
-    final room = [for (final b in sh.before) size(out[b]) - _minPaneCells]
+    var grow = sh.before, shrink = sh.after;
+    var moveB = const <int>[], moveA = const <int>[];
+    if (!sh.vertical) {
+      final sides = _rowSides(out, sh, rigid);
+      if (sides == null) continue;
+      grow = sides.growB;
+      shrink = sides.shrinkA;
+      moveB = sides.moveB;
+      moveA = sides.moveA;
+    }
+    final room = [for (final b in grow) size(out[b]) - _minPaneCells]
         .fold<double>(double.infinity, math.min);
-    final roomAfter = [for (final a in sh.after) size(out[a]) - _minPaneCells]
+    final roomAfter = [for (final a in shrink) size(out[a]) - _minPaneCells]
         .fold<double>(double.infinity, math.min);
     d = d.clamp(-math.max(0, room), math.max(0, roomAfter)).toDouble();
-    for (final b in sh.before) {
+    for (final b in grow) {
       final r = out[b];
       out[b] = sh.vertical
           ? Rect.fromLTWH(r.left, r.top, r.width + d, r.height)
           : Rect.fromLTWH(r.left, r.top, r.width, r.height + d);
     }
-    for (final a in sh.after) {
+    for (final m in [...moveB, ...moveA]) {
+      out[m] = out[m].translate(0, d);
+    }
+    for (final a in shrink) {
       final r = out[a];
       out[a] = sh.vertical
           ? Rect.fromLTWH(r.left + d, r.top, r.width - d, r.height)
@@ -202,6 +326,10 @@ class _ScreenComposerState extends State<ScreenComposer> {
   /// Divider offsets (cells) by [PaneSash.key], for the current resizeKey.
   final Map<String, double> _offsets = {};
   String? _dragging;
+
+  /// Dock-edge dividers reported through [ScreenComposer.onDockResize]:
+  /// their offsets go once the panes no longer have them.
+  final Set<String> _reported = {};
 
   /// The panes' built contents for [_builtFor] at [_builtCell]: a divider
   /// drag (a setState per pointer move) moves and resizes the panes but
@@ -219,9 +347,12 @@ class _ScreenComposerState extends State<ScreenComposer> {
   List<Widget> _paneContents(BuildContext context, Size cell) {
     final panes = widget.panes;
     final theme = Theme.of(context);
+    // the theme by value: Theme.of localizes the inherited theme through a
+    // small cache, so the same theme can come back as another object — a
+    // pointer down on a divider (in the session screen) rebuilt every pane
     if (!identical(panes, _builtFor) ||
         cell != _builtCell ||
-        !identical(theme, _builtTheme)) {
+        (!identical(theme, _builtTheme) && theme != _builtTheme)) {
       _builtFor = panes;
       _builtCell = cell;
       _builtTheme = theme;
@@ -234,7 +365,50 @@ class _ScreenComposerState extends State<ScreenComposer> {
   @override
   void didUpdateWidget(ScreenComposer old) {
     super.didUpdateWidget(old);
-    if (old.resizeKey != widget.resizeKey) _offsets.clear();
+    if (old.resizeKey != widget.resizeKey) {
+      _offsets.clear();
+      _reported.clear();
+    } else if (_reported.isNotEmpty && !identical(old.panes, widget.panes)) {
+      // the panes came back laid out to the reported dock: the divider
+      // moved there, its offset would shift it a second time
+      final now = {
+        for (final sh in paneSashes([for (final p in widget.panes) p.cells]))
+          sh.key,
+      };
+      _reported.removeWhere((k) {
+        if (now.contains(k)) return false;
+        _offsets.remove(k);
+        return true;
+      });
+    }
+  }
+
+  /// The drag of divider [sh] ended at [rects]: a dock edge (the panes of
+  /// one docking container on one side, the dynpro on the other) is
+  /// reported with the dock's width — the span of all its panes.
+  void _dragEnded(PaneSash sh, List<Rect> rects) {
+    final report = widget.onDockResize;
+    if (report == null || !sh.vertical) return;
+    final panes = widget.panes;
+    String? dockOf(List<int> side) {
+      final docks = {for (final i in side) panes[i].dock};
+      return docks.length == 1 ? docks.single : null;
+    }
+
+    bool hasMain(List<int> side) => side.any((i) => panes[i].main);
+    final dock = hasMain(sh.after)
+        ? dockOf(sh.before)
+        : (hasMain(sh.before) ? dockOf(sh.after) : null);
+    if (dock == null || (_offsets[sh.key] ?? 0) == 0) return;
+    var lo = double.infinity, hi = -double.infinity;
+    for (var i = 0; i < panes.length; i++) {
+      if (panes[i].dock != dock) continue;
+      lo = math.min(lo, rects[i].left);
+      hi = math.max(hi, rects[i].right);
+    }
+    if (hi <= lo) return;
+    _reported.add(sh.key);
+    report(dock, hi - lo);
   }
 
   @override
@@ -242,22 +416,18 @@ class _ScreenComposerState extends State<ScreenComposer> {
     final panes = widget.panes;
     if (panes.isEmpty) return const SizedBox.shrink();
     final minCellW = widget.minCellW;
-    final spanned = ScreenComposer.extentOf(panes);
-    final w = widget.window;
-    final extent = w == null || w.width <= 0 || w.height <= 0
-        ? spanned
-        : Size(
-            math.max(w.width, spanned.width),
-            math.max(w.height, spanned.height),
-          );
+    final extent = ScreenComposer.extentIn(widget.window, panes);
     final base = [for (final p in panes) p.cells];
+    final rigid = [for (final p in panes) p.rigidRows];
     final sashes = widget.resizable
         ? [
             for (final sh in paneSashes(base))
-              if (!widget.fixedSashes.any((l) => sashOnLine(sh, l))) sh,
+              if (!widget.fixedSashes.any((l) => sashOnLine(sh, l)) &&
+                  sashMovable(base, sh, rigid))
+                sh,
           ]
         : const <PaneSash>[];
-    final rects = applySashes(base, sashes, _offsets);
+    final rects = applySashes(base, sashes, _offsets, rigid: rigid);
     return LayoutBuilder(
       builder: (context, cons) {
         // the whole window on the screen, like SAP GUI's: the cell fits the
@@ -276,10 +446,15 @@ class _ScreenComposerState extends State<ScreenComposer> {
         final cw = math.max(fitted, minCellW);
         var ch = cw * ScreenComposer.cellAspect;
         if (widget.fillHeight &&
-            fitted >= minCellW &&
             cons.maxHeight.isFinite &&
             extent.height > 0) {
-          final tall = cons.maxHeight / extent.height;
+          // a window wider than the view at the minimum cell is drawn at
+          // that cell and opened scaled to the width (fitted / cw): its
+          // rows fill the view's height at that scale too — not a strip
+          // across the top half of the body (the live iPad ST04 window
+          // ended at ~55 % of the height, its header line tiny)
+          final scale = fitted >= minCellW ? 1.0 : fitted / cw;
+          final tall = cons.maxHeight / scale / extent.height;
           if (tall > ch) {
             ch = math.min(tall, ch * ScreenComposer.maxFillStretch);
           }
@@ -393,7 +568,10 @@ class _ScreenComposerState extends State<ScreenComposer> {
               _offsets[sh.key] = (_offsets[sh.key] ?? 0) + d;
             });
           },
-          onPointerUp: (_) => setState(() => _dragging = null),
+          onPointerUp: (_) {
+            if (_dragging == sh.key) _dragEnded(sh, rects);
+            setState(() => _dragging = null);
+          },
           onPointerCancel: (_) => setState(() => _dragging = null),
           child: Semantics(
             label: sh.vertical ? 'Column divider' : 'Row divider',

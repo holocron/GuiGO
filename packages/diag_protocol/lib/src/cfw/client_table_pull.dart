@@ -61,12 +61,18 @@ Map<String, PropertySink> propertySinksOf(FlushCall call) {
 bool isClientTablePull(Uint8List v) =>
     _indexOf(v, 'DP_GET_CLIENT_TABLE'.codeUnits) >= 0;
 
+/// How far past its `INURL` name a pull's url is looked for: the scalar's
+/// value token follows the name at once (`INURL 02 01 02 03 <len>
+/// SAPR3://…`); the whole rest of a multi-MB value was decoded to text.
+const int _inurlWindow = 4096;
+
 /// The INURL a pull names (`SAPR3://<hex>`), or null.
 String? clientTablePullUrl(Uint8List v) {
   final i = _indexOf(v, 'INURL'.codeUnits);
   if (i < 0) return null;
+  final end = i + _inurlWindow < v.length ? i + _inurlWindow : v.length;
   final m = RegExp('SAPR3://[0-9A-Za-z]+')
-      .firstMatch(latin1.decode(Uint8List.sublistView(v, i)));
+      .firstMatch(latin1.decode(Uint8List.sublistView(v, i, end)));
   return m?.group(0);
 }
 
@@ -142,7 +148,10 @@ int clientTablePullRowWidth(Uint8List v) {
   if (i < 0) return 0;
   final j = i + 4 + 7 + 2;
   if (j + 12 > v.length || v[j] != 0x03 || v[j + 1] != 0x02) return 0;
-  return ByteData.sublistView(v, j + 4, j + 12).getUint32(0);
+  final w = ByteData.sublistView(v, j + 4, j + 12).getUint32(0);
+  // a wire u32: a record wider than any decode could produce is hostile —
+  // the answer is laid out at the default width, never allocated to it
+  return w > csMaxDecodedLength ? 0 : w;
 }
 
 /// The FORMAT records of a pull request (its FORMAT column's `03 04`
@@ -211,10 +220,17 @@ Uint8List _hex(String h) => Uint8List.fromList([
 /// DATE / TIME, TOTALSIZE = the body's UTF-16 length + BOM, the
 /// SEND_DATA_AS_STRING flag, the body in a 255-wide DATABIN (one LZH
 /// cell, blank-padded rows), its FORMAT / PROPS, no 06 67 trailer (the
-/// reference client's ea_html.build_html_post_answer). [body] empty: a link's GET —
+/// reference client's ea_html.build_html_post_answer) — the JAVA bean's object.
+/// [windows]: the SAP GUI for Windows OCX's object instead
+/// ([htmlWindowsPostAnswer]); [body] empty: a link's GET —
 /// [htmlGetPullAnswer].
-Uint8List htmlPostPullAnswer(Uint8List body, {DateTime? now}) {
+Uint8List htmlPostPullAnswer(
+  Uint8List body, {
+  bool windows = false,
+  DateTime? now,
+}) {
   if (body.isEmpty) return htmlGetPullAnswer(now: now);
+  if (windows) return htmlWindowsPostAnswer(body, now: now);
   final n = (body.length + htmlPostRowWidth - 1) ~/ htmlPostRowWidth;
   final padded = Uint8List(htmlPostRowWidth * n)
     ..fillRange(0, htmlPostRowWidth * n, 0x20);
@@ -256,8 +272,35 @@ Uint8List htmlPostPullAnswer(Uint8List body, {DateTime? now}) {
 /// SUBTYPE `PostData`, the DATE / TIME stamp, blank DESCRIPTION, TOTALSIZE
 /// 0, blank PLATTFORM, a DATASTR scalar of ONE NUL, then FORMAT and PROPS
 /// as 80 x 0 columns — no DATABIN, no SEND_DATA_AS_STRING.
-Uint8List htmlGetPullAnswer({DateTime? now}) {
+Uint8List htmlGetPullAnswer({DateTime? now}) =>
+    htmlWindowsPostAnswer(Uint8List(0), now: now);
+
+/// The DATASTR quantum of the Windows POST object: the body goes up
+/// blank-padded to a whole number of 256-byte blocks, then one NUL (every
+/// form submit of a recorded session — raw gui[30] 65 B, gui[43]
+/// 133 B, gui[57] 131 B, gui[89] 144 B — is a 257-byte DATASTR; the GET's
+/// is the NUL alone, sacm gui[13]). A body past 256 bytes has no capture:
+/// the next whole block is the reading of that shape.
+const int htmlWindowsPostBlock = 256;
+
+/// The SAP GUI for Windows OCX's answer to the pull of a viewer's PostData
+/// object (a form submit's body, or none — [htmlGetPullAnswer]):
+/// a recorded session raw gui[30] — TYPE `SAPEVENT:` / SUBTYPE
+/// `PostData`, the DATE (MM/DD/YY) / TIME (7 chars) stamp, blank
+/// DESCRIPTION, TOTALSIZE = the body's byte length (little-endian u32),
+/// blank PLATTFORM, the body in the DATASTR scalar blank-padded to whole
+/// [htmlWindowsPostBlock]s + one NUL, FORMAT and PROPS as 80 x 0 columns,
+/// the 06 67 trailer. The Java bean's TEXT / HTML DATABIN object
+/// ([htmlPostPullAnswer]) is not what the Windows dialect's server reads:
+/// /AIF/IFMON's form buttons did nothing on it (live the test system 2026-10-12).
+Uint8List htmlWindowsPostAnswer(Uint8List body, {DateTime? now}) {
   final t = now ?? DateTime.now();
+  final blocks =
+      (body.length + htmlWindowsPostBlock - 1) ~/ htmlWindowsPostBlock;
+  final data = Uint8List(blocks * htmlWindowsPostBlock + 1)
+    ..fillRange(0, blocks * htmlWindowsPostBlock, 0x20)
+    ..setRange(0, body.length, body);
+  final n = body.length;
   String two(int v) => v.toString().padLeft(2, '0');
   final table = BytesBuilder(copy: false)
     ..add(_column('FORMAT', 80, const []))
@@ -273,10 +316,15 @@ Uint8List htmlGetPullAnswer({DateTime? now}) {
         7,
       ),
       'DESCRIPTION': '',
-      'TOTALSIZE': '\x00\x00\x00\x00',
+      'TOTALSIZE': String.fromCharCodes([
+        n & 0xff,
+        (n >> 8) & 0xff,
+        (n >> 16) & 0xff,
+        (n >> 24) & 0xff,
+      ]),
       'PLATTFORM': '',
     },
-    extraScalars: const [('DATASTR', '\x00')],
+    extraScalars: [('DATASTR', latin1.decode(data))],
     tableRegion: table.takeBytes(),
   );
 }

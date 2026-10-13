@@ -66,7 +66,8 @@ class DpCache {
   /// Urls by last write, oldest first: the eviction order.
   final LinkedHashSet<String> _recency = LinkedHashSet<String>();
 
-  /// Arrival sequence: [seq] counts new urls; [addedSince] reads them.
+  /// Arrival sequence: [seq] counts stored CONTENT — a new url, or a
+  /// re-push of a cached url with different bytes; [addedSince] reads them.
   int _seq = 0;
   final Map<String, int> _seqOf = {};
 
@@ -78,18 +79,21 @@ class DpCache {
   /// Bytes held over every cached segment.
   int get bytes => _bytes;
 
-  /// The arrival counter: one more per NEW url stored.
+  /// The arrival counter: one more per new url stored and per re-push of
+  /// a cached url whose bytes changed (a tree refreshed under its stable
+  /// DESURL); a byte-identical re-push (a re-read frame) is no arrival.
   int get seq => _seq;
 
-  /// The urls first stored after arrival counter [since] ([seq] read
-  /// earlier), in arrival order — still cached ones only.
+  /// The urls whose current content arrived after counter [since] ([seq]
+  /// read earlier) — new urls and changed re-pushes — in arrival order,
+  /// still cached ones only.
   List<String> addedSince(int since) {
-    final out = <String>[];
-    for (var i = order.length - 1; i >= 0; i--) {
-      if ((_seqOf[order[i]] ?? 0) <= since) break;
-      out.add(order[i]);
-    }
-    return out.reversed.toList();
+    final out = [
+      for (final u in order)
+        if ((_seqOf[u] ?? 0) > since) u,
+    ];
+    if (out.length > 1) out.sort((a, b) => _seqOf[a]!.compareTo(_seqOf[b]!));
+    return out;
   }
 
   /// Snoop the DP pushes of one received frame (ingest_frame port): every
@@ -137,6 +141,9 @@ class DpCache {
       _seqOf[url] = ++_seq;
     } else {
       _bytes -= old.length;
+      // a re-push keeps its place in [order] (first arrival) but is a new
+      // arrival when its content changed: the fold re-decodes it
+      if (!_sameBytes(old, seg)) _seqOf[url] = ++_seq;
     }
     byUrl[url] = seg;
     _bytes += seg.length;
@@ -220,6 +227,15 @@ class DpCache {
       _drop(drop);
     }
   }
+}
+
+bool _sameBytes(Uint8List a, Uint8List b) {
+  if (identical(a, b)) return true;
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
 }
 
 /// The (DESURL, segment) pushes an RFC value's RFC_QUEUE carries, in queue
@@ -339,6 +355,12 @@ DpContent? dpPutContent(Uint8List seg) {
       complete: joined.length == expected);
 }
 
+/// [w] x [n] table dims, or (0, 0) when their product passes the decode
+/// cap ([csMaxDecodedLength]) — hostile u32 dims a table of that size
+/// cannot have arrived with.
+(int, int) _boundedDims(int w, int n) =>
+    w > 0 && n > 0 && n > csMaxDecodedLength ~/ w ? (0, 0) : (w, n);
+
 Uint8List _concat(List<Uint8List> parts) {
   var n = 0;
   for (final p in parts) {
@@ -360,13 +382,21 @@ Uint8List? _scalarValue(Uint8List seg, String name) {
       final ln = seg.buffer
           .asByteData(seg.offsetInBytes, seg.lengthInBytes)
           .getUint16(i + 2);
+      // a wire length past the segment is not a name tag (a truncated or
+      // hostile push): skip it, as html_viewer's dpScalars does
+      if (i + 4 + ln > seg.length) {
+        i += 1;
+        continue;
+      }
       final nm = String.fromCharCodes(seg, i + 4, i + 4 + ln);
       final j = i + 4 + ln + 2;
       if (nm == name && j + 4 <= seg.length && seg[j] == 0x02 && seg[j + 1] == 0x03) {
         final vl = seg.buffer
             .asByteData(seg.offsetInBytes, seg.lengthInBytes)
             .getUint16(j + 2);
-        return Uint8List.sublistView(seg, j + 4, j + 4 + vl);
+        if (j + 4 + vl <= seg.length) {
+          return Uint8List.sublistView(seg, j + 4, j + 4 + vl);
+        }
       }
     }
     i += 1;
@@ -396,7 +426,12 @@ String? _scalarText(Uint8List seg, String name) {
   var dims = (0, 0);
   var j = ds;
   if (ds + 4 <= seg.length && seg[ds] == 0x03 && seg[ds + 1] == 0x02 && bd.getUint16(ds + 2) >= 8) {
-    dims = (bd.getUint32(ds + 4), bd.getUint32(ds + 8));
+    // the dims record cut short (a truncated push) carries no dims; wire
+    // u32 dims whose table no decode could produce (hostile) are dropped
+    // too — every consumer multiplies them out to slice / pad by
+    if (ds + 12 <= seg.length) {
+      dims = _boundedDims(bd.getUint32(ds + 4), bd.getUint32(ds + 8));
+    }
     j = ds + 4 + bd.getUint16(ds + 2);
   }
   // The column ends at the next column (`03 01 00`) or the table's close
@@ -411,7 +446,11 @@ String? _scalarText(Uint8List seg, String name) {
       break;
     }
     if (seg[j] == 0x03 && j + 1 < seg.length && seg[j + 1] == 0x04) {
+      // a row whose length runs past the segment ends the column (a
+      // truncated or hostile push): never a RangeError out of the fold
+      if (j + 4 > seg.length) break;
       final rl = bd.getUint16(j + 2);
+      if (j + 4 + rl > seg.length) break;
       cells.add(Uint8List.sublistView(seg, j + 4, j + 4 + rl));
       j += 6 + rl;
     } else if (seg[j] == 0x03 && j + 1 < seg.length && seg[j + 1] == 0x05) {
@@ -549,7 +588,7 @@ String decodeRsField(Uint8List raw, int ftype) {
   }
   if (ftype == 6 || ftype == 7) {
     final o = Uint8List(ftype == 6 ? 4 : 8);
-    o.setRange(0, raw.length, raw);
+    o.setRange(0, raw.length < o.length ? raw.length : o.length, raw);
     final f = ftype == 6
         ? ByteData.view(o.buffer).getFloat32(0)
         : ByteData.view(o.buffer).getFloat64(0);

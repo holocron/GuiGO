@@ -778,8 +778,7 @@ String? _metaTableId(CanvasPushTable? t) {
   String cell(int i) => header != null && i < header.length ? header[i] : '';
   final caption = cell(12).isNotEmpty ? cell(12) : cell(13);
   double? num(int i) {
-    final v = int.tryParse(cell(i));
-    return v == null ? null : v.toDouble();
+    return int.tryParse(cell(i))?.toDouble();
   }
 
   final geo = [num(7), num(8), num(9), num(10)];

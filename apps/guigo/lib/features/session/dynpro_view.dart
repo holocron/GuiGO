@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import '../../core/sap_icons.dart';
 import 'dynpro_grid.dart';
 import 'sap_list_view.dart';
+import 'type_ahead.dart';
 
 /// The grid renderer's character cell bounds (points): below the minimum
 /// the screen reflows by rows instead; above the maximum it stops growing.
@@ -112,6 +113,7 @@ class DynproView extends StatefulWidget {
     this.onRadioTap,
     this.compact = false,
     this.controls = const {},
+    this.overlays = const [],
     this.cell,
     this.onEdit,
     this.onValueHelp,
@@ -141,6 +143,13 @@ class DynproView extends StatefulWidget {
   /// by container name: drawn at the container's cells on the grid, or
   /// below the screen when the paint does not place that container.
   final Map<String, Widget> controls;
+
+  /// The regions of a composed window that lie on this dynpro (its custom-
+  /// control areas' bars, charts, grids in their splitter cells), at their
+  /// own cells: part of the dynpro's canvas, so a sash drag, a resize or a
+  /// scroll moves them with the text around them. Drawn only on the SAP
+  /// grid of a fixed [cell].
+  final List<DynproOverlay> overlays;
 
   /// A fixed character cell (points per column x per row) — set when the
   /// dynpro is one pane of a composed window, so its grid lines up with
@@ -182,6 +191,18 @@ class DynproView extends StatefulWidget {
 
   @override
   State<DynproView> createState() => _DynproViewState();
+}
+
+/// A control drawn on the dynpro's canvas at [cells] — dynpro cells: left
+/// = column, top = row, width = columns, height = rows (from the dynpro's
+/// origin, the composed window's AREASIZE area corner).
+class DynproOverlay {
+  const DynproOverlay(this.cells, this.child, {this.id});
+  final Rect cells;
+  final Widget child;
+
+  /// Keys the overlay's box on the canvas (`ValueKey('overlay-$id')`).
+  final String? id;
 }
 
 // ---------------------------------------------------------------------------
@@ -329,6 +350,109 @@ class _DynproViewState extends State<DynproView> {
 
   String? _focused; // the cursor field (keeps it when the keyboard goes)
 
+  // --- type-ahead (type_ahead.dart): the focused input's dropdown -------
+
+  /// The focused input's type-ahead (null: no [TypeAheadScope] above, or
+  /// no input has the keyboard focus) and its input's key.
+  TypeAheadController? _ta;
+  String? _taKey;
+
+  /// Inputs the user typed into since their value was last kept in the
+  /// input history (kept on Enter / leaving the field, as SAP GUI does).
+  final Set<String> _typedSinceKept = {};
+
+  /// The type-ahead of input [key] when it is the focused one.
+  TypeAheadController? _typeAheadOf(String key) => _taKey == key ? _ta : null;
+
+  void _typeAheadFocus(String key, ScreenField f, bool has,
+      TextEditingController ctrl) {
+    if (!has) {
+      if (_taKey != key) return;
+      _keepTyped();
+      _dropTypeAhead();
+      return;
+    }
+    final cfg = TypeAheadScope.read(context);
+    if (cfg == null || _taKey == key) return;
+    // the next field may take the focus before the last one hears it lost
+    _keepTyped();
+    _dropTypeAhead();
+    setState(() {
+      _ta = TypeAheadController(cfg, widget.model, f);
+      _taKey = key;
+    });
+  }
+
+  /// SAP GUI keeps a typed value on leaving the field: the focused
+  /// input's, when the user typed into it since it was last kept.
+  void _keepTyped() {
+    final ta = _ta, key = _taKey;
+    if (ta == null || key == null || !_typedSinceKept.remove(key)) return;
+    final text = _controllers[key]?.text;
+    if (text != null) ta.recordHistory(text);
+  }
+
+  void _typeAheadEdited(String key, TextEditingController ctrl) {
+    _typedSinceKept.add(key);
+    _typeAheadOf(key)?.userEdited(ctrl.value);
+  }
+
+  void _typeAheadSubmitted(String key, String value) {
+    final ta = _typeAheadOf(key);
+    if (ta == null) return;
+    ta.close();
+    if (_typedSinceKept.remove(key)) ta.recordHistory(value);
+  }
+
+  /// A proposal picked: written into the field the way typing writes it
+  /// (the staged value rides the next round — the real GUI sends nothing
+  /// for a pick, a recorded session).
+  void _typeAheadPick(String key, ScreenField f, TextEditingController ctrl,
+      TypeAheadProposal p) {
+    var v = p.value;
+    if (f.maxnrchars > 0 && v.length > f.maxnrchars) {
+      v = v.substring(0, f.maxnrchars);
+    }
+    ctrl.value = TextEditingValue(
+      text: v,
+      selection: TextSelection.collapsed(offset: v.length),
+    );
+    _edited.add(key);
+    _typedSinceKept.add(key);
+    widget.onEdit?.call(f, v);
+    _typeAheadOf(key)?.close();
+  }
+
+  void _dropTypeAhead({bool rebuild = true}) {
+    final ta = _ta;
+    if (ta == null) return;
+    ta.focusLost();
+    _ta = null;
+    _taKey = null;
+    if (rebuild && mounted) setState(() {});
+    // the anchor lets go of it in this frame
+    WidgetsBinding.instance.addPostFrameCallback((_) => ta.dispose());
+  }
+
+  /// [field] (input [key]) under its type-ahead dropdown when a
+  /// [TypeAheadScope] is above; the plain field otherwise.
+  Widget _typeAheadAnchor(String key, ScreenField f,
+      TextEditingController ctrl, Widget field) {
+    if (TypeAheadScope.maybeOf(context) == null) return field;
+    final ta = _typeAheadOf(key);
+    ta?.rebind(widget.model, f);
+    return TypeAheadAnchor(
+      controller: ta,
+      onPick: (p) => _typeAheadPick(key, f, ctrl, p),
+      child: field,
+    );
+  }
+
+  KeyEventResult _typeAheadKey(String key, ScreenField f,
+          TextEditingController ctrl, KeyEvent e) =>
+      TypeAheadAnchor.handleKey(
+          _typeAheadOf(key), e, (p) => _typeAheadPick(key, f, ctrl, p));
+
   /// The list checkboxes ticked since the paint, by line (identity) and
   /// column — the paint's own value until the server repaints the list.
   final Map<ListLine, Map<int, bool>> _listTicks = Map.identity();
@@ -358,6 +482,14 @@ class _DynproViewState extends State<DynproView> {
         old.model.dynpro != widget.model.dynpro) {
       _pruneInputs();
     }
+    // another screen (or window level): the dropdown was the old field's
+    if (_ta != null &&
+        (old.model.program != widget.model.program ||
+            old.model.dynpro != widget.model.dynpro ||
+            old.model.modalLevel != widget.model.modalLevel)) {
+      _typedSinceKept.clear();
+      _dropTypeAhead(rebuild: false); // the build follows
+    }
   }
 
   void _pruneInputs() {
@@ -384,6 +516,8 @@ class _DynproViewState extends State<DynproView> {
 
   @override
   void dispose() {
+    _ta?.dispose();
+    _ta = null;
     for (final c in _controllers.values) {
       c.dispose();
     }
@@ -724,7 +858,10 @@ class _DynproViewState extends State<DynproView> {
     final font = rowHeight != null
         ? math.min(cw * 1.4, rowHeight * 0.78)
         : (cw * 1.35).clamp(11.0, 15.0);
-    final top = grid.firstRow;
+    // a composed window's pane starts at the dynpro's row 0 — the window
+    // cell its neighbours and its overlays are placed by; a free-standing
+    // grid skips the blank rows above its first painted one
+    final top = rowHeight != null ? 0 : grid.firstRow;
     double y(int row) => (row - top) * ch;
 
     final children = <Widget>[];
@@ -989,6 +1126,27 @@ class _DynproViewState extends State<DynproView> {
       canvasW = math.max(canvasW, left + w);
       canvasH = math.max(canvasH, y(c.row) + h);
     }
+    // a composed window's regions on this dynpro, exactly at their cells
+    // (a one-row bar stays one row: no legibility minimum)
+    if (rowHeight != null) {
+      for (final o in widget.overlays) {
+        final r = o.cells;
+        if (r.width <= 0 || r.height <= 0) continue;
+        final left = r.left * cw, t = (r.top - top) * ch;
+        children.add(
+          Positioned(
+            key: o.id == null ? null : ValueKey('overlay-${o.id}'),
+            left: left,
+            top: t,
+            width: r.width * cw,
+            height: r.height * ch,
+            child: o.child,
+          ),
+        );
+        canvasW = math.max(canvasW, left + r.width * cw);
+        canvasH = math.max(canvasH, t + r.height * ch);
+      }
+    }
     final canvas = SizedBox(
       width: canvasW,
       height: canvasH,
@@ -1056,7 +1214,9 @@ class _DynproViewState extends State<DynproView> {
     final f4 =
         f.hasF4 && enabled && widget.onValueHelp != null && _focused == key;
     return Focus(
+      onKeyEvent: (_, e) => _typeAheadKey(key, f, ctrl, e),
       onFocusChange: (has) {
+        _typeAheadFocus(key, f, has, ctrl);
         // SAP GUI's cursor field: it stays the current field when the
         // keyboard is put away (F1 / F4 still act on it) until another
         // field takes the focus or the screen changes — a focus loss, or
@@ -1065,7 +1225,7 @@ class _DynproViewState extends State<DynproView> {
         widget.onFocusField?.call(f);
         if (_focused != key) setState(() => _focused = key);
       },
-      child: TextField(
+      child: _typeAheadAnchor(key, f, ctrl, TextField(
         controller: ctrl,
         enabled: enabled,
         obscureText: f.invisible,
@@ -1083,19 +1243,21 @@ class _DynproViewState extends State<DynproView> {
         onChanged: (value) {
           _edited.add(key);
           widget.onEdit?.call(f, value);
+          _typeAheadEdited(key, ctrl);
         },
         contextMenuBuilder: widget.onContextMenu == null
             ? null
             : (context, state) => _fieldTextMenu(context, state, f),
         onSubmitted: (value) async {
           _edited.remove(key);
+          _typeAheadSubmitted(key, value);
           await widget.onFill(f, value);
         },
         decoration: InputDecoration(
           // SAP GUI's F4 button at the right edge of the focused field
           suffixIcon: f4
               ? IconButton(
-                  tooltip: 'Aide à la saisie (F4)',
+                  tooltip: 'Value help (F4)',
                   padding: EdgeInsets.zero,
                   visualDensity: VisualDensity.compact,
                   iconSize: font + 2,
@@ -1134,7 +1296,7 @@ class _DynproViewState extends State<DynproView> {
                 : BorderSide(color: scheme.outlineVariant),
           ),
         ),
-      ),
+      )),
     );
   }
 
@@ -1624,9 +1786,7 @@ class _DynproViewState extends State<DynproView> {
       64.0,
       maxWidth.clamp(64.0, 440.0),
     );
-    return ConstrainedBox(
-      constraints: BoxConstraints(minWidth: 48, maxWidth: width),
-      child: TextField(
+    final field = TextField(
         controller: ctrl,
         enabled: !widget.busy && !f.isProtected,
         obscureText: f.invisible,
@@ -1634,12 +1794,14 @@ class _DynproViewState extends State<DynproView> {
         onChanged: (value) {
           _edited.add(key);
           widget.onEdit?.call(f, value);
+          _typeAheadEdited(key, ctrl);
         },
         contextMenuBuilder: widget.onContextMenu == null
             ? null
             : (context, state) => _fieldTextMenu(context, state, f),
         onSubmitted: (value) async {
           _edited.remove(key);
+          _typeAheadSubmitted(key, value);
           await widget.onFill(f, value);
         },
         decoration: InputDecoration(
@@ -1652,7 +1814,16 @@ class _DynproViewState extends State<DynproView> {
           hintText: !captioned && (f.name ?? '').isNotEmpty ? f.name : null,
           hintStyle: TextStyle(color: Colors.blueGrey.shade400, fontSize: 12),
         ),
-      ),
+      );
+    return ConstrainedBox(
+      constraints: BoxConstraints(minWidth: 48, maxWidth: width),
+      child: TypeAheadScope.maybeOf(context) == null
+          ? field
+          : Focus(
+              onKeyEvent: (_, e) => _typeAheadKey(key, f, ctrl, e),
+              onFocusChange: (has) => _typeAheadFocus(key, f, has, ctrl),
+              child: _typeAheadAnchor(key, f, ctrl, field),
+            ),
     );
   }
 }

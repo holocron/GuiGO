@@ -84,9 +84,27 @@ class SapTextEditor {
   /// last flushed), null when unknown.
   int? cursorCol;
 
+  /// The far end of the user's selection (1-based line, column AFTER the
+  /// last selected character — the editor's `SelPosEndLine` /
+  /// `SelPosEndCol`; [cursorLine] / [cursorCol] are its start), as the app
+  /// reports it (SapSession.setEditorClientState); null = no selection,
+  /// the span collapsed on the cursor (every recorded flush:
+  /// a recorded session gui[19] SelPosEnd* = SelPosStart*).
+  int? selEndLine;
+  int? selEndCol;
+
   /// The first line the editor shows (the server's `FirstVisibleLine(=n)`
   /// put), null when it set none.
   int? firstVisibleLine;
+
+  /// How many `FirstVisibleLine(=n)` puts the server sent: each one
+  /// scrolls the control (a navigation), even one repeating the last
+  /// line after the user scrolled away. A view follows a CHANGE of this
+  /// count, never the stale [firstVisibleLine] alone — a breakpoint toggle
+  /// answers only `SetSelectionPosInLine` + `SetMarker` (a recorded session
+  /// abap_debugger s[32]/s[33], a recorded session
+  /// live step 34) and the control keeps the user's scroll.
+  int firstVisibleLinePuts = 0;
 
   /// The first / last line the user's view of the control actually shows
   /// (1-based), as the app reports it (SapSession.setEditorClientState);
@@ -349,6 +367,8 @@ class SapTextEditorTracker {
           e.lines = [];
           e.cursorLine = null;
           e.cursorCol = null;
+          e.selEndLine = null;
+          e.selEndCol = null;
           e.viewFirstLine = null;
           e.viewLastLine = null;
           e.breakpoints.clear();
@@ -369,6 +389,9 @@ class SapTextEditorTracker {
         case 'SetSelectionPosInLine':
           e.cursorLine = int.tryParse(arg('#1').trim());
           e.cursorCol = int.tryParse((named['#2'] ?? '').trim());
+          // the server's caret collapses the user's selection
+          e.selEndLine = null;
+          e.selEndCol = null;
           text = false;
         case 'FirstVisibleLine':
           // a put carries the line (`FirstVisibleLine(=295)`); a getter
@@ -380,6 +403,7 @@ class SapTextEditorTracker {
           final n = v.isEmpty ? null : int.tryParse(v.first.trim());
           if (n == null) continue;
           e.firstVisibleLine = n;
+          e.firstVisibleLinePuts++;
           // the server scrolled the control: the reported view is stale
           e.viewFirstLine = null;
           e.viewLastLine = null;

@@ -39,6 +39,7 @@ class SapControlToolbarView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final children = <Widget>[];
+    final codes = <String>{};
     for (var i = 0; i < buttons.length; i++) {
       final b = buttons[i];
       if (b.separator) {
@@ -49,7 +50,14 @@ class SapControlToolbarView extends StatelessWidget {
       } else {
         children.add(
           _ToolbarButton(
-            key: ValueKey('ctb-${b.code}'),
+            // unique among the row: the code alone while it is (stable
+            // across a re-push that inserts a button), index + code for
+            // an empty or repeated code
+            key: ValueKey(
+              b.code.isNotEmpty && codes.add(b.code)
+                  ? 'ctb-${b.code}'
+                  : 'ctb-$i-${b.code}',
+            ),
             button: b,
             icons: icons,
             busy: busy,

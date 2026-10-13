@@ -78,7 +78,7 @@ class _SapValueHelpViewState extends State<SapValueHelpView> {
     final m = _inputs.putIfAbsent(page.id, () => {});
     return m.putIfAbsent(item.id, () {
       // a pre-filled input shows its pushed default
-      final pre = item.type == '4' ? item.text : '';
+      final pre = item.isPrefilledInput ? item.text : '';
       return TextEditingController(text: pre);
     });
   }

@@ -51,9 +51,17 @@ iOS needs Xcode; Android needs the Android SDK.
 - System definitions (host, port, client, user) are stored in the app's
   preferences; they contain no secrets.
 - Passwords are optional. When stored, they live in the platform secure store
-  (iOS Keychain, device-only; Android encrypted preferences) and are released
-  after Face ID / Touch ID / fingerprint when the device has biometrics
-  enrolled.
+  (iOS Keychain, device-only class `unlocked_this_device`; Android
+  `EncryptedSharedPreferences`).
+  - With biometrics enrolled, the stored password is read only after Face ID /
+    Touch ID / fingerprint succeeds (the system prompt may offer the device
+    passcode instead); a failed or cancelled prompt falls back to manual entry.
+  - Without biometrics enrolled, the stored password is used directly, with no
+    prompt. It is then protected only by the store itself: on iOS the
+    Keychain releases it only while this device is unlocked (never synced or
+    backed up); on Android `EncryptedSharedPreferences` encrypts it at rest but
+    has no unlock gate.
+  - To be asked every time, switch "Store password" off for that system.
 - **The connection is not encrypted.** DIAG traffic, including the logon,
   travels compressed but in clear text. Connect through a VPN or a secured
   network path.

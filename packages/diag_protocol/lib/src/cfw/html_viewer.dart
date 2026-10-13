@@ -91,9 +91,14 @@ class SapHtmlDocument {
       ? html
       : inlineHtmlFrames(html, url, parts);
 
+  // title / text / links / forms are derived once per document like
+  // [content] (a document never changes; every UI rebuild read them anew)
+
   /// The `<title>` of the page (else of the first frame document it shows
   /// that has one), or null.
-  String? get title {
+  late final String? title = _title();
+
+  String? _title() {
     String? titleOf(String h) {
       final m = RegExp(
         r'<title[^>]*>(.*?)</title>',
@@ -116,14 +121,17 @@ class SapHtmlDocument {
   }
 
   /// The readable text of the page, frames inlined (see [htmlToText]).
-  String get text => htmlToText(content);
+  late final String text = htmlToText(content);
 
-  /// Every `SAPEVENT:` link of the page, frames inlined, in document order.
-  List<SapHtmlLink> get links => sapEventLinks(content);
+  /// Every `SAPEVENT:` link of the page, frames inlined, in document order
+  /// (read-only: shared by every reader).
+  late final List<SapHtmlLink> links =
+      List.unmodifiable(sapEventLinks(content));
 
   /// Every `SAPEVENT:` form of the page, frames inlined (see
-  /// [sapEventForms]).
-  List<SapHtmlForm> get forms => sapEventForms(content);
+  /// [sapEventForms]; read-only: shared by every reader).
+  late final List<SapHtmlForm> forms =
+      List.unmodifiable(sapEventForms(content));
 
   @override
   String toString() =>
@@ -165,9 +173,18 @@ class SapHtmlForm {
     required this.inputs,
     required this.buttons,
     this.buttonLabels = const {},
+    this.frame = '',
   });
 
   final String name;
+
+  /// The frame the browser navigates for a submit: the form's own
+  /// `target=`, else the name of the frameset frame its page is shown in
+  /// (HTML000002's `<frame name=Frame0 src="HTML000001.htm">`), as the page
+  /// spells it; '' for a form of an unframed page. The Windows OCX reports
+  /// it as the sapevent's FrameName, PID0 (a recorded session raw
+  /// gui[27]: `Frame0` for /AIF/IFMON's A1F1).
+  final String frame;
 
   /// The action as the page spells it (`SAPEVENT:A1F2`).
   final String action;
@@ -186,6 +203,13 @@ class SapHtmlForm {
 
   /// The sapevent target after the scheme (`A1F2`).
   String get event => action.substring(action.indexOf(':') + 1);
+
+  /// The url the Windows browser reports for a submit: the action with the
+  /// scheme lower-cased — the page's `action="SAPEVENT:A1F1"` goes up as
+  /// `sapevent:A1F1` (a recorded session raw gui[27] / [40] / [54] /
+  /// [86]; a LINK's href goes up as the page spells it, a recorded session
+  /// sacm_quicklinks raw gui[10]).
+  String get windowsUrl => 'sapevent:$event';
 
   /// Whether [wanted] names button [id]: its full DOM id or the SAP control
   /// name after `NAME:` (reference client screen_html.control_matches),
@@ -577,8 +601,9 @@ String _unescape(String s) =>
       if (e.startsWith('#x')) {
         return String.fromCharCode(int.parse(e.substring(2), radix: 16));
       }
-      if (e.startsWith('#'))
+      if (e.startsWith('#')) {
         return String.fromCharCode(int.parse(e.substring(1)));
+      }
       return _entities[e] ?? m.group(0)!;
     });
 
@@ -614,8 +639,16 @@ String htmlToText(String html) {
       .replaceAllMapped(RegExp(r' ([.,;:)])'), (m) => m.group(1)!);
 }
 
-/// Every `SAPEVENT:` link of [html] (`<a href>` / `<area href>`), in
-/// document order (reference client screen_html.sapevent_links).
+/// A `sapevent:` url inside a script (an onclick, a `javascript:` href).
+final RegExp _scriptSapEvent = RegExp(
+  r'''sapevent:[^'"\s)]+''',
+  caseSensitive: false,
+);
+
+/// Every `SAPEVENT:` link of [html] (`<a href>` / `<area href>`, or the
+/// SAPEVENT its onclick / `javascript:` href navigates to), in document
+/// order, its href entity-decoded as the browser navigates to it (reference client
+/// screen_html.sapevent_links).
 List<SapHtmlLink> sapEventLinks(String html) {
   final out = <SapHtmlLink>[];
   final rx = RegExp(
@@ -623,14 +656,20 @@ List<SapHtmlLink> sapEventLinks(String html) {
     caseSensitive: false,
     dotAll: true,
   );
-  final attr = RegExp(r'''([A-Za-z_:.-]+)\s*=\s*("([^"]*)"|'([^']*)')''');
   for (final m in rx.allMatches(html)) {
-    final attrs = <String, String>{
-      for (final a in attr.allMatches(m.group(2)!))
-        a.group(1)!.toLowerCase(): a.group(3) ?? a.group(4) ?? '',
-    };
-    final href = attrs['href'] ?? '';
-    if (!href.toLowerCase().startsWith('sapevent:')) continue;
+    // quoted or bare values, entities decoded — the url the browser
+    // navigates to (and the app's link run carries)
+    final attrs = htmlAttributes(m.group(2)!);
+    var href = (attrs['href'] ?? '').trim();
+    if (!href.toLowerCase().startsWith('sapevent:')) {
+      // a script's navigation: `href="#" onclick="location.href=
+      // 'SAPEVENT:X'"`, `href="javascript:…'SAPEVENT:X'…"`
+      final js = _scriptSapEvent.firstMatch(
+        '${attrs['onclick'] ?? ''} ${href.toLowerCase().startsWith('javascript:') ? href : ''}',
+      );
+      if (js == null) continue;
+      href = js.group(0)!;
+    }
     final label = m.group(1)!.toLowerCase() == 'a'
         ? htmlToText(m.group(3) ?? '').replaceAll('\n', ' ').trim()
         : '';
@@ -668,7 +707,8 @@ Map<String, String> htmlAttributes(String raw) => {
 /// order, with its posted fields, input ids and buttons (reference client
 /// screen_html.sapevent_forms: a `<button>` or an input of type button /
 /// submit / reset / image is a button when it has an id; every other named
-/// input / select / textarea is a field).
+/// input / select / textarea is a field) and the frame a submit names
+/// ([SapHtmlForm.frame]: its `target=`, else the inlined frame it sits in).
 List<SapHtmlForm> sapEventForms(String html) {
   final out = <SapHtmlForm>[];
   final formRx = RegExp(
@@ -740,6 +780,7 @@ List<SapHtmlForm> sapEventForms(String html) {
       fields.add((name, value));
       if (a['id'] case final id? when id.isNotEmpty) inputs[name] = id;
     }
+    final target = (fa['target'] ?? '').trim();
     out.add(
       SapHtmlForm(
         name: fa['name'] ?? '',
@@ -748,6 +789,7 @@ List<SapHtmlForm> sapEventForms(String html) {
         inputs: inputs,
         buttons: buttons,
         buttonLabels: labels,
+        frame: target.isNotEmpty ? target : _frameAt(html, m.start),
       ),
     );
   }
@@ -809,7 +851,11 @@ String inlineHtmlFrames(
     for (final f in frameRx.allMatches(block)) {
       final b = bodyOf(srcOf(f.group(1)!));
       resolved |= b != null;
-      bodies.add(b == null ? f.group(0)! : '<div>$b</div>');
+      bodies.add(
+        b == null
+            ? f.group(0)!
+            : '<div>${_frameMark(f.group(1)!)}$b$_frameEnd</div>',
+      );
     }
     if (resolved) {
       s =
@@ -826,10 +872,36 @@ String inlineHtmlFrames(
     ),
     (m) {
       final b = bodyOf(srcOf(m.group(1)!));
-      return b == null ? m.group(0)! : '<div>$b</div>';
+      return b == null
+          ? m.group(0)!
+          : '<div>${_frameMark(m.group(1)!)}$b$_frameEnd</div>';
     },
   );
   return s;
+}
+
+/// The comments [inlineHtmlFrames] brackets an inlined frame's body with:
+/// `<!--sapframe:Frame0-->` … `<!--/sapframe-->` (the frame's `name=`) —
+/// what [sapEventForms] reads a form's frame from; a reader of the text
+/// drops comments.
+String _frameMark(String frameAttrs) =>
+    '<!--sapframe:${(htmlAttributes(frameAttrs)['name'] ?? '').trim()}-->';
+const String _frameEnd = '<!--/sapframe-->';
+final RegExp _frameMarkRx = RegExp(r'<!--(/?)sapframe:?([^>]*?)-->');
+
+/// The name of the inlined frame open at [offset] of [html] (see
+/// [_frameMark]), '' outside every frame.
+String _frameAt(String html, int offset) {
+  final open = <String>[];
+  for (final m in _frameMarkRx.allMatches(html)) {
+    if (m.start >= offset) break;
+    if (m.group(1) == '/') {
+      if (open.isNotEmpty) open.removeLast();
+    } else {
+      open.add(m.group(2)!);
+    }
+  }
+  return open.isEmpty ? '' : open.last;
 }
 
 /// The pushed part a frame's [src] names, relative to the page [base].

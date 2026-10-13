@@ -121,7 +121,17 @@ const Map<String, String> ladderRungs = {
   // GuiGo's own rung: the date-picker control (sap_calendar.dart) drawn as
   // a month grid in its region — the reference client draws it as a generic control
   'R11': 'calendar month grid',
+  // GuiGo's own rung: a CFW combo box / input field (CL_GUI_COMBOBOX,
+  // CL_GUI_INPUT_FIELD) drawn as its widget in its box
+  'CF': 'CFW combo box / input field',
 };
+
+/// The CFW field controls drawn by the 'CF' rung (SAPGUI.SAPComboBoxCtrl.1,
+/// SAPGUI.SAPInputField.1 — the session's SapSessionCfwFields classes).
+final RegExp _cfwFieldClass = RegExp(
+  'combobox|inputfield',
+  caseSensitive: false,
+);
 
 const Set<String> _structuralKinds = {'container', 'toolbar'};
 const List<String> _drivableKinds = [
@@ -238,6 +248,13 @@ class ControlRegistry {
   /// round); a later different delta is the server's re-layout
   final Map<String, int> reportedDelta = {};
 
+  /// dock shell -> the painted window-minus-area delta (cells) when the
+  /// USER dragged its edge (SapSession.resizeDock): while the server still
+  /// paints that delta the pane is ours to realize (the dragged
+  /// [LayoutInputs.dockFraction]); once it re-lays out to our report the
+  /// painted delta is trusted again (a recorded session KEY DECODE 3)
+  final Map<String, int> draggedDelta = {};
+
   /// shell -> the cached props its RegisterCachedProp verbs registered,
   /// in registration order (the CONTROLS report's order)
   final Map<String, List<String>> cachedProps = {};
@@ -254,6 +271,11 @@ class ControlRegistry {
   /// toolbar shell -> fcodes its AddButton verbs gave it
   final Map<String, List<String>> toolbarButtons = {};
 
+  /// shell -> the text its latest SetToolTip verb gave it (CL_GUI_PICTURE
+  /// set_tooltip: the DB50 overview's bar pictures carry their value —
+  /// "130,53 GB /250,00 GB", the CPU bar's "7 %")
+  final Map<String, String> toolTips = {};
+
   /// Drop every per-shell fact of [shells] — controls the frontend tore
   /// down with their internal mode (imode_scope.dart, `delIMode`): a later
   /// control minted on the same kernel shell id starts with none of them
@@ -266,10 +288,12 @@ class ControlRegistry {
       props,
       requested,
       reportedDelta,
+      draggedDelta,
       cachedProps,
       controlLinks,
       splitters,
       toolbarButtons,
+      toolTips,
     ]) {
       shells.forEach(m.remove);
     }
@@ -369,6 +393,10 @@ class ControlRegistry {
           (props[sh] ??= {})[p] = val;
           ((requested[sh] ??= {})[p] ??= []).add(val);
         }
+      } else if (v.verb == 'SetToolTip') {
+        final sh = shellOf(v);
+        final t = (a['#1'] ?? '').trim();
+        if (sh != null && t.isNotEmpty) toolTips[sh] = t;
       } else if (v.verb == 'LinkContainer') {
         final sh = (a['#1'] ?? '').trim();
         final nm = (a['#2'] ?? '').trim().toUpperCase();
@@ -601,6 +629,7 @@ class LayoutInputs {
     this.editorLines = const {},
     this.htmlShells = const {},
     this.calendarShells = const {},
+    this.pictureShells = const {},
     this.isLive,
     this.sinceStep,
     this.dockFraction,
@@ -629,6 +658,10 @@ class LayoutInputs {
   /// Calendar shells whose control is up (sap_calendar.dart): drawn as a
   /// month grid in their region (R11)
   final Set<String> calendarShells;
+
+  /// Image control shells whose picture arrived (sap_picture.dart): drawn
+  /// in their region (R3 'picture from the download store')
+  final Set<String> pictureShells;
   final bool Function(String shell)? isLive;
 
   /// the step the current screen generation began at (_prog_since_step)
@@ -1077,7 +1110,10 @@ Map<String, _Box> _dockedBoxes(
     final provisional = provisionalDockDelta(delta, [
       for (final v in asks) cellsOf(v),
     ], reportedDelta: fx.reg.reportedDelta[h]);
-    if (!provisional) {
+    // a pane the user dragged is ours until the server lays the area out
+    // to it (a repaint at another delta)
+    final dragged = fx.reg.draggedDelta[h] == delta;
+    if (!provisional && !dragged) {
       b.width = delta;
     } else {
       // the extent we realize ourselves: a remembered sash share of the
@@ -1176,13 +1212,53 @@ Map<String, _Box> _dockedBoxes(
   return (inp.screen.windowRows, inp.screen.windowCols);
 }
 
-/// splitter_layout._empty_cell_collapse
+/// A bar the server builds from two pictures: a 1 x 2 splitter in the
+/// hosted subtree [hs] whose cells both hold an image and whose column 1
+/// width (relative mode, percent) it set — (splitter, percent, the
+/// pictures' tooltip or "<percent> %").
+(String, double, String)? _splitterGauge(_Facts fx, Set<String> hs) {
+  final ch = fx.children();
+  bool hostsImage(String sh) =>
+      fx.subtree(sh).any((k) => fx.kinds[k] == 'image');
+  for (final sp in hs) {
+    final f = fx.reg.splitters[sp];
+    if (f == null || f.cols != 2 || f.rows > 1 || f.colMode != 1) continue;
+    final pct = f.colPct[1];
+    final a = f.cells[(1, 1)], b = f.cells[(1, 2)];
+    if (pct == null || pct < 0 || a == null || b == null) continue;
+    if (!hostsImage(a) || !hostsImage(b)) continue;
+    String? tip;
+    for (final c in [a, b]) {
+      for (final k in [c, ...?ch[c]]) {
+        tip ??= fx.reg.toolTips[k];
+      }
+    }
+    return (sp, pct, tip ?? '${_g(pct)} %');
+  }
+  return null;
+}
+
+/// The control kinds that make a splitter cell hold content: the reference client's
+/// drivable ones plus the controls drawn from what the server pushes — a
+/// chart (`SAPGraphics.Chart.1`), a network graph, the date picker. The
+/// reference client's _DRIVABLE_KINDS alone read a chart's cell as EMPTY and
+/// collapsed it to 0 rows: the grids of the other cells took the whole
+/// area and the chart, its cell gone, was drawn over all of them (the DBA
+/// cockpit's load history; chart_splitter_cell_test.dart).
+/// splitter_layout._empty_cell_collapse: a row / column collapses only when
+/// NO control is under any of its cells — any control kind holds its cell,
+/// only layout containers (container / splitter / docking: 'container')
+/// do not (reference client 6c9ed12; the jar's GuiSplitterLayout never inspects cell
+/// content). SE80's object-list row (a recorded session srv[10]:
+/// splitter 140, the combo box 149 and the name field 153 in column 1 =
+/// 225 px) lost column 1 and row 2 to the drivable-kinds rule.
 Map<String, (Set<int>, Set<int>)> _emptyCellCollapse(_Facts fx) {
   if (fx.kinds.isEmpty) return {};
   final ch = fx.children();
   bool hasContent(String sh, Set<String> seen) {
     if (!seen.add(sh)) return false;
-    if (_drivableKinds.contains(fx.kinds[sh])) return true;
+    final k = fx.kinds[sh];
+    if (k != null && k.isNotEmpty && k != 'container') return true;
     return (ch[sh] ?? const []).any((k) => hasContent(k, seen));
   }
 
@@ -1457,8 +1533,9 @@ _Carve _carveWindow(
   Map<String, _Box> boxes,
   int cols0,
   int rows0,
-  (int, int)? area,
-) {
+  (int, int)? area, {
+  Map<String, int> created = const {},
+}) {
   final win = inp.window;
   final docks = {
     for (final e in boxes.entries)
@@ -1487,35 +1564,80 @@ _Carve _carveWindow(
     for (final b in docks.values) {
       uniq.putIfAbsent((b.side, b.rect), () => b);
     }
-    var originRow = 0, originCol = 0;
-    for (final b in uniq.values) {
-      if (b.side == 'top') originRow += b.height;
-      if (b.side == 'left') originCol += b.width;
+    // The docks in ATTACH order, the way the frontend lays its working pane
+    // out (platinr3S.jar GuiWorkingPaneLayout.doGuiLayout: the main
+    // window's components in order, each GuiDockShell taking the FULL
+    // length of its side within the rectangle still free at its turn —
+    // West (left, top, w, free height), South (left, bottom - h, free
+    // width, h), … — the user area the rest). So the pane docked first
+    // spans its whole side and a later one only what is left beside it:
+    // the DBA cockpit's message strip (created before the navigation dock)
+    // runs under the tree across the window, the tree ends above it; two
+    // panes never overlap and their sashes never cross. The extent on an
+    // axis is capped so the free rectangle keeps the painted AREA (the
+    // 16/12/7 pair is what the server laid the dynpro out for): a dock
+    // grown to its content rows (_contentSizedDocks) must not cover the
+    // area's last rows and run through the side panes.
+    final order = <_Box, int>{
+      for (final e in docks.entries) e.value: created[e.key] ?? 0,
+    };
+    final attach = uniq.values.toList()
+      ..sort((a, b) => (order[a] ?? 0).compareTo(order[b] ?? 0));
+    var fTop = 0, fLeft = 0, fBottom = wr, fRight = wc;
+    // (no room at all: the pair does not account for the pane — the Java
+    // dialect paints area = window, a recorded session — and
+    // the pane keeps its extent, as before the attach walk)
+    int capped(int ext, int room) => room <= 0 || ext <= room ? ext : room;
+    final placed = <_Box, (int, int, int, int)>{}; // window cells
+    for (final b in attach) {
+      switch (b.side) {
+        case 'left':
+          final w = capped(b.width, fRight - fLeft - ac);
+          placed[b] = (fTop, fLeft, fBottom - fTop, w);
+          fLeft += w;
+        case 'right':
+          final w = capped(b.width, fRight - fLeft - ac);
+          placed[b] = (fTop, fRight - w, fBottom - fTop, w);
+          fRight -= w;
+        case 'top':
+          final h = capped(b.height, fBottom - fTop - ar);
+          placed[b] = (fTop, fLeft, h, fRight - fLeft);
+          fTop += h;
+        case 'bottom':
+          final h = capped(b.height, fBottom - fTop - ar);
+          placed[b] = (fBottom - h, fLeft, h, fRight - fLeft);
+          fBottom -= h;
+      }
     }
+    final originRow = fTop, originCol = fLeft;
     final carved = <String, _Box>{};
     docks.forEach((k2, b2) {
       if (!identical(uniq[(b2.side, b2.rect)], b2)) return;
+      final p = placed[b2];
+      if (p == null) return;
       final old = b2.rect;
-      final nb = b2.copy();
-      switch (b2.side) {
-        case 'top' || 'bottom':
-          nb
-            ..left = -originCol
-            ..width = wc
-            ..top = (b2.side == 'top' ? 0 : wr - old.$3) - originRow;
-        case 'left':
-          nb
-            ..top = originRow
-            ..height = ar;
-        case 'right':
-          nb
-            ..top = originRow
-            ..height = ar
-            ..left = ac - old.$4;
-        default:
-          return;
-      }
+      final nb = b2.copy()
+        ..top = p.$1 - originRow
+        ..left = p.$2 - originCol
+        ..height = p.$3
+        ..width = p.$4;
       carved[k2] = nb;
+      final (dTop, dLeft) = (nb.top - old.$1, nb.left - old.$2);
+      // a box of the pane's own subtree (its parent chain reaches the
+      // dock): only those fill the carved pane. A dynpro AREA's control
+      // that merely shares the band of a full-height left dock — SE80's
+      // welcome HTML 157 in container 156 LinkContainer'd to IMAGE (rows
+      // 0..37, the dock 118's rows too; a recorded session srv[12])
+      // — was carved INTO the dock, over the Repository Browser.
+      bool inPane(_Box b) {
+        var p = b.parent;
+        for (var i = 0; p != null && i < 64; i++) {
+          if (p == k2) return true;
+          p = boxes[p]?.parent;
+        }
+        return false;
+      }
+
       boxes.forEach((sh2, cb2) {
         if (carved.containsKey(sh2) ||
             (cb2.kind != 'cell' && cb2.kind != 'control')) {
@@ -1524,15 +1646,26 @@ _Carve _carveWindow(
         final cr = cb2.rect;
         final vertical = b2.side == 'top' || b2.side == 'bottom';
         final same =
-            cr == old ||
-            (vertical && (cr.$2, cr.$3, cr.$4) == (old.$2, old.$3, old.$4)) ||
-            (!vertical && (cr.$1, cr.$3) == (old.$1, old.$3));
+            inPane(cb2) &&
+            (cr == old ||
+                (vertical &&
+                    (cr.$2, cr.$3, cr.$4) == (old.$2, old.$3, old.$4)) ||
+                (!vertical && (cr.$1, cr.$3) == (old.$1, old.$3)));
         if (same) {
           carved[sh2] = cb2.copy()
             ..width = nb.width
             ..left = nb.left
             ..top = nb.top
             ..height = nb.height;
+        } else if ((dTop != 0 || dLeft != 0) &&
+            cr.$1 >= old.$1 &&
+            cr.$2 >= old.$2 &&
+            cr.$1 + cr.$3 <= old.$1 + old.$3 &&
+            cr.$2 + cr.$4 <= old.$2 + old.$4) {
+          // a cell inside the pane moves with it
+          carved[sh2] = cb2.copy()
+            ..top = cr.$1 + dTop
+            ..left = cr.$2 + dLeft;
         }
       });
     });
@@ -1634,7 +1767,7 @@ String _kindOfShell(String? k) => switch (k) {
 };
 
 String _reason(String rung, String? shell, String note) {
-  final b = StringBuffer('${ladderRungs[rung] ?? rung}');
+  final b = StringBuffer(ladderRungs[rung] ?? rung);
   if (shell != null && shell.isNotEmpty) b.write(' (shell $shell)');
   if (note.isNotEmpty) b.write(' — $note');
   return b.toString();
@@ -1673,7 +1806,14 @@ List<ScreenRegion> composeScreen(ControlRegistry reg, LayoutInputs inputs) {
     areaBottom = area.$1;
   }
   final (cols0, rows0) = _contentExtent(m, areaBottom);
-  final carve = _carveWindow(inputs, boxes, cols0, rows0, area);
+  final carve = _carveWindow(
+    inputs,
+    boxes,
+    cols0,
+    rows0,
+    area,
+    created: fx.order,
+  );
   final oRow = carve.originRow, oCol = carve.originCol;
   CellRect at(int top, int left, int h, int w) => CellRect(
     (top + oRow).toDouble(),
@@ -1799,6 +1939,27 @@ List<ScreenRegion> composeScreen(ControlRegistry reg, LayoutInputs inputs) {
     );
   });
 
+  // GuiGo's own: a CFW combo box / input field drawn in its box (SE80's
+  // object-list type and object name, splitter 140's cells 143 / 145 —
+  // a recorded session srv[10..11]; session/sap_session_cfw_fields.dart
+  // holds their state). the reference client's renderer draws neither, so no rung
+  // took them: their row of the dock stayed empty and the controls were
+  // never on the screen.
+  fx.classes.forEach((sh, cls) {
+    if (!_cfwFieldClass.hasMatch(cls)) return;
+    final b = boxOf(sh);
+    if (b == null || !fx.shellLive(sh) || fx.hidden(sh)) return;
+    regions.add(
+      ScreenRegion(
+        kind: 'control',
+        shell: sh,
+        rect: at(b.top, b.left, b.height, b.width),
+        rung: 'CF',
+        reason: _reason('CF', sh, 'drawn in its box'),
+      ),
+    );
+  });
+
   // the dynpro's control regions through the ladder (draw_regions)
   final links = fx.currentAreaLinks();
   final fieldBoxes = _fieldBoxes(m);
@@ -1810,6 +1971,7 @@ List<ScreenRegion> composeScreen(ControlRegistry reg, LayoutInputs inputs) {
     ...inputs.graphShells,
     ...inputs.calendarShells,
   };
+  final tableShells = {for (final t in inputs.tables) t.shell};
   for (final c in m.containers.values) {
     if (c.kind != 10) continue;
     final name = c.name;
@@ -1938,17 +2100,68 @@ List<ScreenRegion> composeScreen(ControlRegistry reg, LayoutInputs inputs) {
         graphSh == null &&
         calSh == null &&
         !hostsCells;
+    // render_ladder R3: the picture the server pushed for the control
+    // (STMS SAPLTMSU/0100: GN_DYN102_IMAGE -> container 117 -> picture
+    // 118, a recorded session srv[12..14]). An area that also hosts a
+    // tree / grid (the Easy Access IMAGE_CONTAINER: menu tree 105 beside
+    // the SESS_IMAGE picture 106) keeps its table reading, and a picture
+    // the server builds a bar from (the DB50 overview: a picture beside its
+    // value field, a 1 x 2 splitter of two) stays the schematic gauge.
+    final picSh =
+        hs.any(tableShells.contains) ||
+            _gaugePair(name, m.fields) != null ||
+            _splitterGauge(fx, hs) != null
+        ? null
+        : hsSorted
+              .where(
+                (sh) =>
+                    inputs.pictureShells.contains(sh) &&
+                    fx.shellLive(sh) &&
+                    shown(sh),
+              )
+              .firstOrNull;
     // _dispatch
     if (chartSh != null || graphSh != null) {
-      final sh = chartSh ?? graphSh!;
-      regions.add(
-        region(
-          chartSh != null ? 'R5' : 'R6',
-          chartSh != null ? 'chart drawn in its region' : 'graph drawn',
-          shell: sh,
-          kind: chartSh != null ? 'chart' : 'netplan',
-        ),
-      );
+      // a chart / graph in a SPLITTER CELL of the area is drawn in its own
+      // cell, as the editor / HTML viewer below are — over the whole area
+      // it covered the grids in the cells beside it (DBACOCKPIT's load
+      // history: the hosts and KPI grids in the upper cells, the time
+      // series chart in its own cell, all in one custom-control area).
+      // Every charted cell is its own region; a chart without a cell of
+      // its own (DB50/0219: directly in CONTAINER_DB_SIZE_MEM_CHART) takes
+      // the area. the reference client draws the first chart over the whole area
+      // (render_regions._rung_chart_graph).
+      bool inCell(String sh) {
+        final c = ownCell(sh);
+        return c != null &&
+            c != rect &&
+            c.row >= rect.row &&
+            c.col >= rect.col &&
+            c.row + c.rows <= rect.row + rect.rows &&
+            c.col + c.cols <= rect.col + rect.cols;
+      }
+
+      final drawn = [
+        for (final sh in hsSorted)
+          if ((inputs.chartShells.contains(sh) ||
+                  inputs.graphShells.contains(sh)) &&
+              !fx.hidden(sh) &&
+              shown(sh))
+            sh,
+      ];
+      final own = drawn.any(inCell);
+      for (final sh in own ? drawn.where(inCell) : [chartSh ?? graphSh!]) {
+        final chart = inputs.chartShells.contains(sh);
+        regions.add(
+          region(
+            chart ? 'R5' : 'R6',
+            chart ? 'chart drawn in its region' : 'graph drawn',
+            shell: sh,
+            kind: chart ? 'chart' : 'netplan',
+            at: own ? ownCell(sh) : null,
+          ),
+        );
+      }
     } else if (calSh != null) {
       // the date picker the server hosts for a DATS F4 (a recorded session
       // controls srv[1]: container 115 LinkContainer'd into the popup's
@@ -1980,6 +2193,16 @@ List<ScreenRegion> composeScreen(ControlRegistry reg, LayoutInputs inputs) {
           shell: htmlSh,
           kind: 'html',
           at: ownCell(htmlSh),
+        ),
+      );
+    } else if (picSh != null) {
+      regions.add(
+        region(
+          'R3',
+          'picture drawn in its region',
+          shell: picSh,
+          kind: 'image',
+          at: ownCell(picSh),
         ),
       );
     } else if (composited) {
@@ -2065,6 +2288,31 @@ List<ScreenRegion> composeScreen(ControlRegistry reg, LayoutInputs inputs) {
               gaugeText: f.text.trim(),
             ),
           );
+        } else if (_splitterGauge(fx, hs) case (
+          final sp,
+          final pct,
+          final text,
+        )) {
+          // no paired field (the overview's CPU bar: GRAPH_DB_CPU, its
+          // value only in the pictures' tooltip "7 %"): the bar as the
+          // server built it — a 1 x 2 splitter of two pictures (a grey
+          // fill, a white rest) whose column 1 is the value in percent
+          // (a recorded session srv[21]: splitter 254
+          // SetColumnWidth(1, 7), images 258 DB6_BG_GRAY / 257
+          // DB6_BG_WHITE). The pictures are MIME repository backgrounds
+          // (loadImageFromURLAsync SAPR3://WebRepository/…): nothing
+          // more is ever pushed for them — the reference client's R7 "no content
+          // channel yet" waited for content that never comes.
+          regions.add(
+            region(
+              'R5',
+              'schematic gauge (image-display host $imgSh in splitter '
+                  '$sp) — ${_g(pct)}% from its column 1 width',
+              kind: 'image',
+              gauge: (pct / 100).clamp(0.0, 1.0),
+              gaugeText: text,
+            ),
+          );
         } else {
           regions.add(
             region(
@@ -2136,7 +2384,49 @@ List<ScreenRegion> composeScreen(ControlRegistry reg, LayoutInputs inputs) {
       );
     }
   });
-  return regions;
+  return _clipToArea(regions);
+}
+
+/// Every region that starts inside the dynpro area ends at its edges: the
+/// window shows a custom-control area — and the splitter cells in it — only
+/// as far as the area reaches (SAP GUI clips the dynpro there; the reference client
+/// clips its drawing to the area's bottom, render_regions.draw_regions, and
+/// to its canvas). Unclipped, a container painted past the area's bottom
+/// lay over the bottom docked pane (the DBA cockpit's message list), and
+/// one past its right edge widened the composed window — every pane of it
+/// drawn smaller. A region starting outside the area (a docked pane, an R1
+/// region beyond the area) keeps its rect.
+List<ScreenRegion> _clipToArea(List<ScreenRegion> regions) {
+  final dyn = regions.where((r) => r.kind == 'dynpro').firstOrNull?.rect;
+  if (dyn == null) return regions;
+  final bottom = dyn.row + dyn.rows, right = dyn.col + dyn.cols;
+  return [
+    for (final r in regions)
+      if (r.kind == 'dynpro' ||
+          r.rect.row < dyn.row ||
+          r.rect.col < dyn.col ||
+          r.rect.row >= bottom ||
+          r.rect.col >= right ||
+          (r.rect.row + r.rect.rows <= bottom &&
+              r.rect.col + r.rect.cols <= right))
+        r
+      else
+        ScreenRegion(
+          kind: r.kind,
+          shell: r.shell,
+          container: r.container,
+          rect: CellRect(
+            r.rect.row,
+            r.rect.col,
+            math.min(r.rect.rows, bottom - r.rect.row),
+            math.min(r.rect.cols, right - r.rect.col),
+          ),
+          rung: r.rung,
+          reason: r.reason,
+          gauge: r.gauge,
+          gaugeText: r.gaugeText,
+        ),
+  ];
 }
 
 /// render_regions.gauge_pair: GRAPH_<X> <-> the field whose name's last

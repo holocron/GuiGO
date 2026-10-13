@@ -50,13 +50,13 @@ extension _SapSessionRequestStream on SapSession {
             'request stream: no 16/8/5 receipt for chunk ${k + 1}/$n');
       }
       if (_isNiPing(payload)) {
-        _sock?.add(niFrame(Uint8List.fromList(niPong)));
+        _sock?.add(niPongFrame);
         continue;
       }
       var frame = payload;
       if (_sncCtx != null) {
-        final plain = _sncCtx!.unwrapFrame(payload);
-        if (plain == null) continue; // failed integrity / non-data frame
+        final plain = _sncUnwrap(_sncCtx!, payload);
+        if (plain == null) continue; // a non-data frame
         frame = plain;
       }
       final ackAt = chunkAckStep(frame);

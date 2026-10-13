@@ -129,6 +129,37 @@ class _ScrollingButtonRowState extends State<ScrollingButtonRow> {
   final _c = ScrollController();
   bool _left = false, _right = false;
 
+  /// The edge-fade mask and what it was made for: one callback per
+  /// (left, right, background) — a stable one keeps the ShaderMask from
+  /// repainting on every rebuild — and one shader per rect it paints.
+  ShaderCallback? _mask;
+  (bool, bool, Color)? _maskFor;
+
+  ShaderCallback _maskOf(Color bg) {
+    final key = (_left, _right, bg);
+    final cached = _mask;
+    if (cached != null && key == _maskFor) return cached;
+    final gradient = LinearGradient(
+      colors: [
+        _left ? bg.withValues(alpha: 0) : Colors.white,
+        Colors.white,
+        Colors.white,
+        _right ? bg.withValues(alpha: 0) : Colors.white,
+      ],
+      stops: const [0, 0.04, 0.96, 1],
+    );
+    Rect? at;
+    Shader? shader;
+    _maskFor = key;
+    return _mask = (r) {
+      if (shader == null || r != at) {
+        at = r;
+        shader = gradient.createShader(r);
+      }
+      return shader!;
+    };
+  }
+
   @override
   void initState() {
     super.initState();
@@ -212,15 +243,7 @@ class _ScrollingButtonRowState extends State<ScrollingButtonRow> {
         Expanded(
           child: ShaderMask(
             blendMode: BlendMode.dstIn,
-            shaderCallback: (r) => LinearGradient(
-              colors: [
-                _left ? bg.withValues(alpha: 0) : Colors.white,
-                Colors.white,
-                Colors.white,
-                _right ? bg.withValues(alpha: 0) : Colors.white,
-              ],
-              stops: const [0, 0.04, 0.96, 1],
-            ).createShader(r),
+            shaderCallback: _maskOf(bg),
             child: row,
           ),
         ),

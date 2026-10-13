@@ -347,7 +347,18 @@ FlushCall parseFlushCall(Uint8List rfc, {GuiDialect? dialect}) {
     } else if (name == 'GetProperty') {
       final vals = [for (final s in slotsByVerb[i] ?? const []) val(s)];
       final nums = vals.where((v) => v != null && _isDigits(v)).toList();
-      final strs = vals.where((v) => v != null && !_isDigits(v)).toList();
+      // an EMPTY value is no property name (the reference client's `if v and …`):
+      // the read-ahead of a numeric GetProperty(135, 300) — the DBA
+      // cockpit's dock-width read after a nav-tree item double-click,
+      // a recorded session srv[39] — yields ['300', ''],
+      // and taking '' as the name echoed a phantom `<CONTROL SHELLID="300">
+      // <PROPERTY VALUE="" NAME=""/>` the server's CL_GUI_DATAMANAGER
+      // rejects: CNDP 008 "balise act.: PROPERTY" (live 2026-10-12 after
+      // `%_GC 148 22`). The real GUI echoes no PROPERTY for it (gui[31]):
+      // the value rides the _RESULT var.
+      final strs = vals
+          .where((v) => v != null && v.isNotEmpty && !_isDigits(v))
+          .toList();
       final shell = nums.isNotEmpty ? nums.last : call.verbCalls[i - 1];
       for (final prop in strs) {
         if (!_isDigits(shell) || (prop ?? '').startsWith(RegExp(r'[012]-'))) {
@@ -368,6 +379,13 @@ FlushCall parseFlushCall(Uint8List rfc, {GuiDialect? dialect}) {
       final a1 = argv['#1'], a2 = argv['#2'];
       if (_isDigits(a1 ?? '') && _isDigits(a2 ?? '')) {
         call.registeredEvents.add((a1!, int.parse(a2!)));
+      } else if (_isDigits(a1 ?? '') && _sapNegativeRe.hasMatch(a2 ?? '')) {
+        // a negative id in ABAP's trailing-minus spelling: the CFW input
+        // field's / combo box's `RegisterOcxEvent(153, '600-')` = -600
+        // (a recorded session srv[11])
+        final n = a2!.trim();
+        final id = int.tryParse(n.substring(0, n.length - 1));
+        if (id != null) call.registeredEvents.add((a1!, -id));
       } else if (_isDigits(a1 ?? '')) {
         final tgt = call.verbCalls[i - 1];
         if (_isDigits(tgt)) {
@@ -388,6 +406,8 @@ String _name(Rec v, int start, int end) =>
 final RegExp _digitsRe = RegExp(r'^\d+$');
 
 bool _isDigits(String? s) => s != null && _digitsRe.hasMatch(s);
+
+final RegExp _sapNegativeRe = RegExp(r'^\s*\d+-\s*$');
 
 /// The PARAMS rows per verb (the objid column, trimmed), built once per
 /// parsed PARAMS table. [verbArgs] / [verbNamedArgs] are asked once per

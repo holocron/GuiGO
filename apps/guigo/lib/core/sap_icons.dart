@@ -16,24 +16,41 @@ class SapIconAtlas {
   static Future<SapIconAtlas> load() async {
     if (_instance != null) return _instance!;
     final raw = await rootBundle.loadString('assets/fonts/font_codemap.json');
-    final j = jsonDecode(raw) as Map<String, dynamic>;
+    return _instance = SapIconAtlas.parse(raw);
+  }
+
+  /// The atlas of a font codemap (`{"0S": {"cp": …, "name": …}, …}`), its
+  /// codes normalised to upper case once here — wire codes are upper case,
+  /// so a lookup needs no case folding.
+  factory SapIconAtlas.parse(String codemap) {
+    final j = jsonDecode(codemap) as Map<String, dynamic>;
     final codes = <String, int>{};
     final names = <String, String>{};
     j.forEach((code, meta) {
       final cp = (meta as Map<String, dynamic>)['cp'] as int?;
       final name = meta['name'] as String?;
       if (cp != null) {
-        codes[code] = cp;
-        if (name != null) names[code] = name;
+        final c = code.toUpperCase();
+        codes[c] = cp;
+        if (name != null) names[c] = name;
       }
     });
-    return _instance = SapIconAtlas._(codes, names);
+    return SapIconAtlas._(codes, names);
   }
 
   /// The codepoint for a wire code (without the @ delimiters), or null.
-  int? codepoint(String code) => _codes[code.toUpperCase()];
+  /// Folded to upper case only when the code is not found as given.
+  int? codepoint(String code) => _codes[code] ?? _codes[_upper(code)];
 
-  String? iconName(String code) => _names[code.toUpperCase()];
+  String? iconName(String code) => _names[code] ?? _names[_upper(code)];
+
+  static String _upper(String code) {
+    for (var i = 0; i < code.length; i++) {
+      final u = code.codeUnitAt(i);
+      if (u >= 0x61 && u <= 0x7A) return code.toUpperCase();
+    }
+    return ''; // already upper case: its miss stands
+  }
 
   /// An icon token `@<code>[\Q<quick info>]@`; a text cut off by its
   /// field length (the debugger's `@UM\QMaximiser horiz…`) ends the token

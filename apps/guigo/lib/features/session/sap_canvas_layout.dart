@@ -10,7 +10,8 @@ import 'sap_graph_view.dart';
 /// their own nodes — the rows are what links join and what a drop lands
 /// on. A table the server placed (non-zero geometry) keeps its place;
 /// the rest go left to right. Row boxes come after their table so they
-/// paint, and hit-test, on top.
+/// paint, and hit-test, on top; each names its table as its parent, so a
+/// table moved on the view takes its rows (and their links) along.
 (List<GraphNode>, List<GraphEdge>) canvasGraph(SapCanvasModel c,
     {Color? tableFill}) {
   const tableW = 250.0, header = 34.0, rowH = 28.0, gap = 60.0;
@@ -48,6 +49,7 @@ import 'sap_graph_view.dart';
         y: y + header + i * rowH,
         w: w - 8,
         h: rowH - 3,
+        parent: t.id, // a row moves with its table
       ));
     }
   }

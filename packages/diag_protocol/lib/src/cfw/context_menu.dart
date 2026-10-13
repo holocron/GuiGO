@@ -271,8 +271,9 @@ SapMenuEntry? _record(Uint8List rec) {
 /// preceding level-(N-1) 'C' header. [] unless EVERY record passes the
 /// record shape, or when it holds no function at all.
 List<SapMenuEntry> decodeContextMenuRecords(Uint8List data) {
-  if (data.isEmpty || data.length % contextMenuRecordWidth != 0)
+  if (data.isEmpty || data.length % contextMenuRecordWidth != 0) {
     return const [];
+  }
   final out = <SapMenuEntry>[];
   for (var k = 0; k < data.length ~/ contextMenuRecordWidth; k++) {
     final e = _record(

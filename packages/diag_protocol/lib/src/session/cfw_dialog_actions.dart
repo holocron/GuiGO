@@ -13,11 +13,12 @@
 /// * the dialog's X button: `%_GC <dialog> 8` with no PARAM (the reference client's
 /// raw_dialogs.dialog_close: GuiDialogShell DIALOG_CLOSE = 8, the event
 /// the dialog's RegisterEvent(…, 8) asks for) in the same frame;
-/// * a `SAPEVENT:` link in the viewer: `%_GC <viewer> 1` with PARAMs
-/// 0 = the target frame, 1 = the POST length ('0': a link is a GET),
-/// 2 = the url as the href spells it, 3..9 empty — the real GUI's form
-/// submit, a recorded session gui[38] (frame0, 65,
-/// SAPEVENT:A1F1, seven empty PIDs; the reference client's html_link GET form);
+/// * a `SAPEVENT:` link in the viewer: `%_GC <viewer> 1` with the
+/// non-empty PARAMs of 0 = the anchor's target frame, 1 = '0' (a GET),
+/// 2 = the url as the href spells it (a recorded session
+/// raw gui[10], [htmlLinkItems]); a FORM submit: 0 = the form's frame,
+/// 1 = the POST length, 2 = `sapevent:<form>` (a recorded session
+/// raw gui[27], [htmlFormSubmitItems]);
 /// * F1 on a field: the key round with the HELP UI_EVENT_SOURCE — event
 /// type 2 on a FIELD at the field's cell — and the cursor on that cell
 /// (a recorded session gui[113], raw 116: F1 on FB03's document
@@ -38,7 +39,8 @@ import 'grid_edit_actions.dart' show uiEventControlAt;
 const int cfwDialogCloseEvent = 8;
 
 /// The HTML viewer's SAPEVENT navigation event and the target frame the
-/// real GUI names (a recorded session gui[38]).
+/// real JAVA GUI names (a recorded session gui[38]; the Windows
+/// OCX names the form's own frame, [htmlFormSubmitItems]).
 const int htmlSapEvent = 1;
 const String htmlTargetFrame = 'frame0';
 
@@ -255,6 +257,35 @@ List<Uint8List> htmlLinkItems(
   shell: viewerShell,
   eventId: htmlSapEvent,
   params: [frame, '0', url],
+  sourcePath: sourcePath,
+  focusShell: viewerShell,
+  omitEmptyParams: true,
+);
+
+/// A `SAPEVENT:` form submitted in the HTML viewer [viewerShell] (a
+/// dynamic document's button — the page's ButtonClick script submits the
+/// form): the Windows OCX's DoSAPEVENT(FrameName, PostDataLen, ppURL1) —
+/// PID0 [frame] (the frame the form's page is shown in, absent when '' as
+/// a link's), PID1 the POST body's byte length [postLength], PID2 [url]
+/// (the action, scheme lower-cased: [SapHtmlForm.windowsUrl]), no PID3..9;
+/// the source 16/15/1 at the viewer's custom-control area, the focus IN
+/// the viewer (16/9/18). Real SAP GUI for Windows, a recorded session
+/// raw gui[27]: `<PARAM PID ="0" VALUE ="Frame0"/> <PARAM PID ="1"
+/// VALUE ="65"/> <PARAM PID ="2" VALUE ="sapevent:A1F1"/>` for
+/// /AIF/IFMON's BT_SELECTDT. The body goes up on the server's PostData
+/// pull ([htmlWindowsPostAnswer]).
+List<Uint8List> htmlFormSubmitItems(
+  ActionContext ctx, {
+  required String viewerShell,
+  required String url,
+  required int postLength,
+  String frame = '',
+  List<int>? sourcePath,
+}) => cfwEventItems(
+  ctx,
+  shell: viewerShell,
+  eventId: htmlSapEvent,
+  params: [frame, '$postLength', url],
   sourcePath: sourcePath,
   focusShell: viewerShell,
   omitEmptyParams: true,

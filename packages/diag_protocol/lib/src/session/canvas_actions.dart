@@ -13,8 +13,11 @@
 /// gui[11]);
 /// * the DOUBLE CLICK on a table or row — `%_GC <shell> 32`
 /// (OnLeftButtonDblClk, a recorded session gui[51] / [52]; see
-/// [canvasDoubleClickEvent]); a single click sends nothing on every
-/// recorded canvas ([canvasObjectSelectedEvent]).
+/// [canvasDoubleClickEvent]);
+/// * the SELECT (a single click, or the mouse-down of a table drag) —
+/// `%_GC <shell> 134217728` (OnObjectSelected) where the canvas
+/// announced it, wire-silent elsewhere ([canvasObjectSelectedEvent]); a
+/// table MOVE sends nothing of its own.
 ///
 /// The drop and the link draw are the real GUI's control-event round
 /// (a recorded session' `%_GC` frame, [windowsActionItems] with
@@ -204,9 +207,11 @@ List<Uint8List> canvasConnectItems(
 // typelib order (ICDataFlow.ocx string table: OnObjectDblClk,
 // ContextMenuSelected, OnLeftButtonDown, …, OnObjectSelected, OnObjectMoved)
 // the same bits make 2048 = OnLinkLeftButtonDblClk and 134217728 =
-// OnObjectSelected — registered by RSNPG_TEST_NETPLAN1's shell 122
-// (a recorded session srv[8]) but by none of the SQVI / SQ02
-// canvases, and on no recorded wire.
+// OnObjectSelected — announced on RSNPG_TEST_NETPLAN1's shell 122
+// (a recorded session srv[8]: 2048 by a RegisterOcxEvent,
+// 134217728 by the `EnabledEvents` property put) but by none of the SQVI /
+// SQ02 canvases; a recorded session fires both (bit 27 confirmed
+// by the `(ObjectId, ObjectType)` shape).
 
 /// OnLeftButtonDblClk — a double click on a table (its header) or on one of
 /// its rows. PARAMs `(table id, row id, column, area, x, y)`:
@@ -233,11 +238,74 @@ const String canvasHitCell = '3';
 /// fired nothing on a canvas that did not register it.
 const int canvasLinkDoubleClickEvent = 2048;
 
-/// OnObjectSelected (mask 134217728, `ObjectId, ObjectType`): registered by
-/// the net-plan canvas, on no capture. The SQVI / SQ02 canvases register no
-/// selection event: a single click there is wire-silent (every left click
-/// of a recorded session / a recorded session sends nothing).
+/// OnObjectSelected (mask 134217728, `ObjectId, ObjectType`): announced
+/// by the net-plan canvas (RSNPG_TEST_NETPLAN1's ICDataFlow 122). Every
+/// left mouse-down on it fires one (a recorded session, real SAP
+/// GUI for Windows): a ROW or a table HEADER reports the TABLE —
+/// `(tableId, 0)`, the row id never goes out (gui[8] / gui[11] `12, 0` on
+/// table 12's DTP_LOAD row and header); a LINK `(linkId, 1)` (gui[13] `23,
+/// 1`); the EMPTY canvas `(-1, -1)` (gui[10] / gui[14]); the mouse-down of
+/// a table DRAG `(tableId, 0)` (gui[24] `1, 0`) — the move itself is
+/// wire-silent (OnObjectMoved is not announced: no frame until the next
+/// key, the program never learns the new place). The program answers a
+/// table select with `HighlightSink` + `HighlightSource(<row>, 10006)` on
+/// the canvas (srv[12] / srv[15] / srv[32]), a link / empty select with a
+/// plain repaint. The SQVI / SQ02 canvases announce no selection event: a
+/// single click there is wire-silent (every left click of
+/// a recorded session / a recorded session sends nothing).
 const int canvasObjectSelectedEvent = 134217728;
+
+/// The `ObjectType` PARAM of [canvasObjectSelectedEvent]: a table (its
+/// header or one of its rows), a link; the empty canvas is `(-1, -1)`.
+const String canvasSelectTable = '0';
+const String canvasSelectLink = '1';
+
+/// The PARAMs of a select: `(tableId, 0)` for a table or one of its rows
+/// (the caller passes the TABLE id), `(linkId, 1)` with [link], `(-1, -1)`
+/// with [objectId] null (the empty canvas).
+List<String> canvasSelectParams(String? objectId, {bool link = false}) =>
+    objectId == null
+    ? const ['-1', '-1']
+    : [objectId, link ? canvasSelectLink : canvasSelectTable];
+
+/// The DATAMANAGER XML of a select on the ICDataFlow [shell] with
+/// [params] ([canvasSelectParams]) — byte for byte
+/// a recorded session gui[11] / gui[13].
+Uint8List canvasSelectXml(String shell, List<String> params) =>
+    Uint8List.fromList(
+      utf8.encode(
+        '$_xmlDecl<DATAMANAGER> <EVENTS>  <EVENT SHELLID ="${_attr(shell)}" '
+        'EVENTID ="$canvasObjectSelectedEvent">'
+        '${[for (final (i, p) in params.indexed) _paramXml(i, p)].join()}'
+        '</EVENT></EVENTS></DATAMANAGER>',
+      ),
+    );
+
+String _paramXml(int pid, String value) =>
+    '   <PARAM PID ="$pid" VALUE ="${_attr(value)}"/>';
+
+/// The select round on the ICDataFlow [shell]: `%_GC <shell> 134217728`
+/// with [params]. The focus item is `9/18 <shell>` when [focused] (the
+/// canvas holds the focus: a link / empty-canvas click lands on the OCX
+/// window itself, or the last paint focused the canvas), else the empty
+/// `9/10` — a table mouse-down does not move the focus (gui[8] / [10] /
+/// [11] `9/10` after a `9/10` paint; gui[13] / [14] `9/18 122` for the
+/// link and the empty canvas; gui[24], the drag, `9/18 122` after a
+/// `9/18 122` paint). The 16/15/1 names the hosting container
+/// ([sourcePath]).
+List<Uint8List> canvasSelectItems(
+  ActionContext ctx, {
+  required String shell,
+  required List<String> params,
+  required bool focused,
+  List<int>? sourcePath,
+}) => canvasEventItems(
+  ctx,
+  okcode: '%_GC $shell $canvasObjectSelectedEvent',
+  xml: canvasSelectXml(shell, params),
+  focusShell: focused ? shell : null,
+  sourcePath: sourcePath,
+);
 
 /// The PARAMs of a double click on table [tableId]'s header ([rowId] null)
 /// or on its row [rowId] in [column], at pointer ([x], [y]).

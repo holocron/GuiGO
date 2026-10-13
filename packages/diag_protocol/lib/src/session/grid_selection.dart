@@ -295,10 +295,36 @@ int gridRowIdNumeric(SapGridModel g, int line) =>
   );
 }
 
+final RegExp _controlBlock = RegExp(
+  r'\s*<CONTROL SHELLID\s*="([^"]*)">.*?</CONTROL>',
+  dotAll: true,
+);
+
+/// The CONTROL blocks of [existing] and [incoming] (two CONTROLS section
+/// bodies) as ONE body: one block per shell — [incoming]'s replaces
+/// [existing]'s of the same shell — in ascending shell order, the OCX's
+/// (a recorded session gui[19]: 118, 147, 180). The real
+/// GUI never names a shell twice in one CONTROLS (4219 sections of the
+/// corpus); text outside the blocks is dropped.
+String mergeControlBlocks(String existing, String incoming) {
+  final blocks = <String, String>{};
+  for (final src in [existing, incoming]) {
+    for (final m in _controlBlock.allMatches(src)) {
+      blocks[m[1]!] = m[0]!;
+    }
+  }
+  final shells = blocks.keys.toList()
+    ..sort((a, b) => (int.tryParse(a) ?? 0).compareTo(int.tryParse(b) ?? 0));
+  return [for (final s in shells) blocks[s]!].join();
+}
+
 /// [items] (one client frame's items, Windows spelling) with the staged
-/// grid state merged into its DATAMANAGER XML: the DATACHANGES right after
-/// the `<DATAMANAGER>` tag, the CONTROL blocks into its CONTROLS (or a new
-/// CONTROLS section before `</DATAMANAGER>`). A frame without an XML item
+/// grid state merged into its DATAMANAGER XML: the DATACHANGES into its
+/// TABLES (or a new TABLES section right after the `<DATAMANAGER>` tag),
+/// the CONTROL blocks into its CONTROLS ([mergeControlBlocks]: one block
+/// per shell; or a new CONTROLS section before BLOBS / COPY /
+/// `</DATAMANAGER>`) — ONE well-formed document (cfw/datamanager_
+/// grammar.dart). A frame without an XML item
 /// (an okcode round) gets one, last before EOM — a recorded session
 /// gui[36].
 List<Uint8List> withGridStateXml(
@@ -317,17 +343,41 @@ List<Uint8List> withGridStateXml(
       var x = wireDecode(Uint8List.fromList(walk.items.single.value));
       const open = '<DATAMANAGER>';
       final at = x.indexOf(open);
-      if (at >= 0) {
+      // a document without its close is none to splice into (the CONTROLS
+      // splice keys on `</DATAMANAGER>`: a RangeError out of the round) —
+      // the state then rides a document of its own, below
+      if (at >= 0 && x.lastIndexOf('</DATAMANAGER>') > at) {
         if (tables.isNotEmpty) {
-          final p = at + open.length;
-          x = '${x.substring(0, p)} <TABLES>$tables</TABLES>${x.substring(p)}';
+          final t = x.indexOf('</TABLES>');
+          if (t >= 0) {
+            // ONE TABLES section: the frame's own already leads
+            x = '${x.substring(0, t)}$tables${x.substring(t)}';
+          } else {
+            final p = at + open.length;
+            x = '${x.substring(0, p)} <TABLES>$tables</TABLES>'
+                '${x.substring(p)}';
+          }
         }
         if (controls.isNotEmpty) {
+          final o = x.indexOf('<CONTROLS>');
           final c = x.lastIndexOf('</CONTROLS>');
-          if (c >= 0) {
-            x = '${x.substring(0, c)}$controls${x.substring(c)}';
+          if (o >= 0 && c > o) {
+            // ONE CONTROLS section, one block per shell: a staged block
+            // replaces the frame's own block of that shell (a sibling
+            // grid's GENERIC the event already carried), ascending shells
+            final inner = x.substring(o + '<CONTROLS>'.length, c);
+            x =
+                '${x.substring(0, o)}<CONTROLS>'
+                '${mergeControlBlocks(inner, controls)}${x.substring(c)}';
           } else {
-            final e = x.lastIndexOf('</DATAMANAGER>');
+            // a new section where the OCX writes it: after TABLES / EVENTS,
+            // before BLOBS / COPY (the METRICS tail of a key round — the
+            // corpus' Windows `CONTROLS,COPY` / `TABLES,CONTROLS,COPY`)
+            var e = x.lastIndexOf('</DATAMANAGER>');
+            for (final tail in const ['<BLOBS', '<COPY']) {
+              final b = x.indexOf(tail);
+              if (b >= 0 && b < e) e = b;
+            }
             x =
                 '${x.substring(0, e)} <CONTROLS>$controls</CONTROLS>'
                 '${x.substring(e)}';

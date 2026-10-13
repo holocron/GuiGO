@@ -368,13 +368,13 @@ class _SapGridViewState extends State<SapGridView> {
       items: const [
         PopupMenuItem(
           value: 'sortAsc',
-          child: Text('Trier par ordre croissant'),
+          child: Text('Sort ascending'),
         ),
         PopupMenuItem(
           value: 'sortDesc',
-          child: Text('Trier par ordre décroissant'),
+          child: Text('Sort descending'),
         ),
-        PopupMenuItem(value: 'filter', child: Text('Filtrer')),
+        PopupMenuItem(value: 'filter', child: Text('Filter')),
       ],
     );
     if (action == null) return;

@@ -512,14 +512,19 @@ extension SapSessionContextMenu on SapSession {
   /// The selection change a right-click on ([key], [item]) flushes: the
   /// props of the selection the tree REGISTERED (an unregistered PROPERTY
   /// dumps CNDP 008) whose value the server does not hold already — none
-  /// when the tree keeps its selection (DisableSelChngOnCxtMenuReq).
+  /// when the tree keeps its selection (DisableSelChngOnCxtMenuReq) on a
+  /// right-click; an [activation] (the double-click: it always selects —
+  /// sap_session_tree.dart) ignores that flag.
   List<(String, String)> _ctxSelectionDelta(
     String shell,
     String key,
-    String? item,
-  ) {
+    String? item, {
+    bool activation = false,
+  }) {
     final st = _ctxMenu;
-    if (st.tracker.selectionKept.contains(shell)) return const [];
+    if (!activation && st.tracker.selectionKept.contains(shell)) {
+      return const [];
+    }
     final cached = _canvasState.tracker.cachedProps[shell];
     if (cached == null) return const [];
     // an ITEM request on a tree that registered BOTH selection channels:

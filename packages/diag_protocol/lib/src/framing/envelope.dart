@@ -131,12 +131,13 @@ ItemWalk walkItems(Uint8List body) {
 
 /// `<type u8><id u8><sid u8><len u16 BE><value>` (APPL item). Throws
 /// [ArgumentError] for a value over 65535 bytes (the u16 length would wrap
-/// and desync the server's item walk — such a value needs APPL4) or an
-/// id/sid outside 0..255.
+/// and desync the server's item walk — such a value needs an APPL4 item,
+/// frames.dart [buildAppl4Item]) or an id/sid outside 0..255.
 Uint8List buildApplItem(int id, int sid, Uint8List value) {
   if (value.length > 0xffff) {
     throw ArgumentError.value(value.length, 'value.length',
-        'APPL $id/$sid value exceeds the u16 length (use APPL4)');
+        'APPL $id/$sid value exceeds the u16 length '
+        '(an APPL4 item carries it: buildAppl4Item)');
   }
   RangeError.checkValueInInterval(id, 0, 0xff, 'id');
   RangeError.checkValueInInterval(sid, 0, 0xff, 'sid');

@@ -242,7 +242,7 @@ class KrbClient {
         });
       });
     final body = w.bytes();
-    return Uint8List.fromList([0x6e, ..._len(body.length), ...body]);
+    return Uint8List.fromList([0x6e, ...derLength(body.length), ...body]);
   }
 
   /// The RFC 4121 init-token body the SNC INIT_REQ carries: the raw AP-REQ
@@ -292,7 +292,7 @@ class KrbClient {
     final r = DerReader(c);
     while (!r.atEnd) {
       final (t, body) = r.next();
-      if (t == 0x61) return Uint8List.fromList([0x61, ..._len(body.length), ...body]);
+      if (t == 0x61) return Uint8List.fromList([0x61, ...derLength(body.length), ...body]);
     }
     return null;
   }
@@ -343,10 +343,4 @@ class KrbClient {
     return '${t.year}${p2(t.month)}${p2(t.day)}'
         '${p2(t.hour)}${p2(t.minute)}${p2(t.second)}Z';
   }
-}
-
-List<int> _len(int n) {
-  if (n < 0x80) return [n];
-  if (n < 0x100) return [0x81, n];
-  return [0x82, n >> 8, n & 0xff];
 }

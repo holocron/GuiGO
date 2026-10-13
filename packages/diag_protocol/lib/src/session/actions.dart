@@ -5,6 +5,7 @@ library;
 
 import 'dart:typed_data';
 
+import '../cfw/datamanager_grammar.dart';
 import '../codepages.dart';
 import '../framing/envelope.dart';
 import '../items/dynt_atom.dart';
@@ -419,19 +420,27 @@ Uint8List _sesItem(ActionContext ctx, {int vkey = 0, bool withKey = true}) {
   return Uint8List.fromList([itemSes, ...v]);
 }
 
-Uint8List _xml17() {
+/// [xml17BlobHex] decoded ONCE (it was re-parsed from hex on every
+/// keypress round); [xmlBlobItem] copies it into each item, so the shared
+/// bytes are never handed out.
+final Uint8List _xml17 = () {
   final out = Uint8List(xml17BlobHex.length ~/ 2);
   for (var i = 0; i < out.length; i++) {
     out[i] = int.parse(xml17BlobHex.substring(i * 2, i * 2 + 2), radix: 16);
   }
   return out;
-}
+}();
 
 /// The item bytes of a type-17 item (len u32 BE prefix).
-Uint8List xml17Item() => xmlBlobItem(_xml17());
+Uint8List xml17Item() => xmlBlobItem(_xml17);
 
-/// A type-17 (DATAMANAGER XML) item carrying [value].
+/// A type-17 (DATAMANAGER XML) item carrying [value]. The ONE builder of
+/// every item 17 a round sends: in debug and tests it holds [value] to the
+/// server's DATAMANAGER grammar (cfw/datamanager_grammar.dart) — a malformed
+/// document dumps CNDP 008 at CL_GUI_DATAMANAGER, so a builder or a merge
+/// that produces one fails here, not on a live system.
 Uint8List xmlBlobItem(Uint8List value) {
+  assert(debugCheckDatamanager(value));
   final out = Uint8List(5 + value.length);
   out[0] = itemXmlBlob;
   out.buffer.asByteData().setUint32(1, value.length);

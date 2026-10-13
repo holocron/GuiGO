@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 
 import '../../core/connections.dart';
+import '../../core/input_history.dart';
 import '../../core/password_dialog.dart';
 import '../session/session_screen.dart';
+import '../session/type_ahead.dart';
 
 class ConnectionListScreen extends StatefulWidget {
   const ConnectionListScreen({super.key});
@@ -15,6 +17,10 @@ class _ConnectionListScreenState extends State<ConnectionListScreen> {
   ConnectionStore? _store;
   List<ConnectionEntry> _entries = [];
 
+  /// The store is still opening: no list and no empty state yet (showing
+  /// "No systems yet" before the saved list arrives would flicker).
+  bool get _loading => _store == null;
+
   @override
   void initState() {
     super.initState();
@@ -23,6 +29,7 @@ class _ConnectionListScreenState extends State<ConnectionListScreen> {
 
   Future<void> _init() async {
     final store = await ConnectionStore.create();
+    if (!mounted) return;
     setState(() {
       _store = store;
       _entries = store.list();
@@ -61,6 +68,41 @@ class _ConnectionListScreenState extends State<ConnectionListScreen> {
       entries.add(saved);
     }
     await store.saveAll(entries);
+    if (!mounted) return;
+    setState(() => _entries = entries);
+  }
+
+  Future<void> _delete(ConnectionEntry e) async {
+    final store = _store;
+    if (store == null) return;
+    final label = e.name.isEmpty ? '${e.host}:${e.port}' : e.name;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Delete system?'),
+        content: Text(
+          'Delete "$label"? Its stored password is deleted too.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final entries = [
+      for (final x in _entries)
+        if (x.id != e.id) x,
+    ];
+    await store.deletePassword(e.id);
+    await store.saveAll(entries);
+    if (!mounted) return;
     setState(() => _entries = entries);
   }
 
@@ -79,12 +121,20 @@ class _ConnectionListScreenState extends State<ConnectionListScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('GuiGo — systems')),
+      appBar: AppBar(
+        title: const Text('GuiGo — systems'),
+        actions: [
+          if (TypeAheadScope.maybeOf(context)?.history case final h?)
+            InputHistoryMenu(history: h),
+        ],
+      ),
       floatingActionButton: FloatingActionButton(
         onPressed: _edit,
         child: const Icon(Icons.add),
       ),
-      body: _entries.isEmpty
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _entries.isEmpty
           ? Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -125,12 +175,7 @@ class _ConnectionListScreenState extends State<ConnectionListScreen> {
                       onSelected: (v) async {
                         if (v == 'edit') return _edit(e);
                         if (v == 'clone') return _edit(e, true);
-                        if (v == 'delete') {
-                          final entries = [..._entries]..removeAt(i);
-                          await _store?.deletePassword(e.id);
-                          await _store?.saveAll(entries);
-                          setState(() => _entries = entries);
-                        }
+                        if (v == 'delete') return _delete(e);
                       },
                       itemBuilder: (c) => const [
                         PopupMenuItem(value: 'edit', child: Text('Edit')),
@@ -177,6 +222,7 @@ class _ConnectionFormState extends State<_ConnectionForm> {
   final _router = TextEditingController();
   bool _storePw = true;
   bool _keepOthers = false;
+  String? _portError;
 
   @override
   void initState() {
@@ -194,8 +240,43 @@ class _ConnectionFormState extends State<_ConnectionForm> {
   }
 
   @override
+  void dispose() {
+    for (final c in [_name, _host, _port, _client, _user, _lang, _router]) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  void _save() {
+    final port = parsePort(_port.text);
+    if (port == null) {
+      setState(() => _portError = 'A port number from 1 to 65535');
+      return;
+    }
+    Navigator.pop(
+      context,
+      ConnectionEntry(
+        id:
+            (widget.clone ? null : widget.existing?.id) ??
+            DateTime.now().microsecondsSinceEpoch.toRadixString(36),
+        name: _name.text.trim(),
+        host: _host.text.trim(),
+        port: port,
+        routerString: _router.text.trim(),
+        client: _client.text.trim(),
+        user: _user.text.trim().toUpperCase(),
+        language: _lang.text.trim().toUpperCase(),
+        storePassword: _storePw,
+        keepOtherSessions: _keepOthers,
+      ),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return Padding(
+    // scrolls when the sheet is shorter than the form (landscape phone,
+    // keyboard up)
+    return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -226,9 +307,16 @@ class _ConnectionFormState extends State<_ConnectionForm> {
             children: [
               Expanded(
                 child: TextField(
+                  key: const ValueKey('connection-port'),
                   controller: _port,
                   keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(labelText: 'Port'),
+                  onChanged: (_) {
+                    if (_portError != null) setState(() => _portError = null);
+                  },
+                  decoration: InputDecoration(
+                    labelText: 'Port',
+                    errorText: _portError,
+                  ),
                 ),
               ),
               const SizedBox(width: 8),
@@ -263,7 +351,12 @@ class _ConnectionFormState extends State<_ConnectionForm> {
           SwitchListTile(
             value: _storePw,
             onChanged: (v) => setState(() => _storePw = v),
-            title: const Text('Store password (behind Face ID / Touch ID when enrolled)'),
+            title: const Text('Store password'),
+            subtitle: const Text(
+              'Released after Face ID / Touch ID / fingerprint. On a device '
+              'without biometrics it is used directly, protected only by '
+              'the secure store',
+            ),
             dense: true,
           ),
           SwitchListTile(
@@ -277,27 +370,58 @@ class _ConnectionFormState extends State<_ConnectionForm> {
           ),
           const SizedBox(height: 8),
           FilledButton(
-            onPressed: () {
-              final port = int.tryParse(_port.text.trim()) ?? 3200;
-              Navigator.pop(
-                context,
-                ConnectionEntry(
-                  id:
-                      (widget.clone ? null : widget.existing?.id) ??
-                      DateTime.now().microsecondsSinceEpoch.toRadixString(36),
-                  name: _name.text.trim(),
-                  host: _host.text.trim(),
-                  port: port,
-                  routerString: _router.text.trim(),
-                  client: _client.text.trim(),
-                  user: _user.text.trim().toUpperCase(),
-                  language: _lang.text.trim().toUpperCase(),
-                  storePassword: _storePw,
-                  keepOtherSessions: _keepOthers,
-                ),
-              );
-            },
+            onPressed: _save,
             child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The TCP port typed in the connection editor, or null when it is not a
+/// number in 1..65535 (the editor then shows an error instead of guessing).
+int? parsePort(String text) {
+  final p = int.tryParse(text.trim());
+  return (p == null || p < 1 || p > 65535) ? null : p;
+}
+
+/// SAP GUI's "Local Data > History" options for every connection: input
+/// history On / Off (on by default) and "Clear History" (all systems).
+class InputHistoryMenu extends StatelessWidget {
+  const InputHistoryMenu({super.key, required this.history});
+
+  final InputHistoryStore history;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: history,
+      builder: (context, _) => PopupMenuButton<String>(
+        tooltip: 'Input history',
+        icon: const Icon(Icons.history),
+        onSelected: (v) async {
+          if (v == 'toggle') {
+            await history.setEnabled(!history.enabled);
+          } else if (v == 'clear') {
+            await history.clear();
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Input history cleared')),
+              );
+            }
+          }
+        },
+        itemBuilder: (context) => [
+          CheckedPopupMenuItem(
+            value: 'toggle',
+            checked: history.enabled,
+            child: const Text('Input history'),
+          ),
+          PopupMenuItem(
+            value: 'clear',
+            enabled: !history.isEmpty,
+            child: const Text('Clear input history'),
           ),
         ],
       ),

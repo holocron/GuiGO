@@ -250,8 +250,10 @@ class LzhInflater {
   bool get eof => _inf?.finished ?? false;
   bool get cleanTruncation => !failed && !eof;
 
-  /// The bytes decoded so far.
-  Uint8List partial() => _out.toBytes();
+  /// The bytes decoded so far — a COPY: decoding goes on into the same
+  /// buffer, whose bytes [result] hands out, so a view of it would let a
+  /// caller's write show up in the final result.
+  Uint8List partial() => Uint8List.fromList(_out.toBytes());
 
   void feed(Uint8List chunk) => _feed(chunk);
 
@@ -396,8 +398,10 @@ class _ByteBuf {
 
   int operator [](int i) => _buf[i];
 
-  /// The bytes so far: a view of the private buffer, or an exact copy when
-  /// growth left much slack (a view would pin it).
+  /// The bytes so far: a view of the private buffer (or the buffer
+  /// itself), or an exact copy when growth left much slack (a view would
+  /// pin it). Only for the FINAL bytes — a mid-stream reader copies
+  /// ([LzhInflater.partial]): the buffer is shared with what follows.
   Uint8List toBytes() {
     if (length == _buf.length) return _buf;
     if (_buf.length - length > (length >> 3) + 4096) {

@@ -111,13 +111,39 @@ String _ascii(Uint8List b, int start, int end) =>
 // Tree model
 // ---------------------------------------------------------------------------
 
-/// CL_TREE_CONTROL_BASE relationship constants (the RELATSHIP column).
-const int relatFirstSibling = 1;
-const int relatLastSibling = 2;
+/// The RELATSHIP codes ON THE WIRE — the frontend's node relations
+/// (sapTreeS.jar ABAPINodeRelations; NodeFactory.insertNode's tableswitch,
+/// the reference client's ea_treeorder / raw_tree), not the ABAP class constants
+/// (CL_TREE_CONTROL_BASE relat_first_sibling = 1 … relat_last_child = 6,
+/// which the ABAP layer maps): 0 and 6 append the node to its RELATKEY's
+/// children, 4 inserts it as their first; 1 / 2 / 3 / 5 place it beside
+/// RELATKEY (last / next / previous / first sibling). Real SAP GUI for
+/// Windows wire, SE80's object list (a recorded session srv[14],
+/// a recorded session srv raw[107] / raw[117]): the object `1` with
+/// RELATKEY blank, its first category `2` (RELATKEY 1, RELATSHIP 4 — its
+/// first CHILD), the next categories RELATKEY 2 / 3 / 4 … RELATSHIP 2
+/// (each the NEXT sibling of the one before), the expanded "Dynpros" `9`'s
+/// screen `14` (RELATKEY 9, RELATSHIP 4). Read with the ABAP constants
+/// (4 = next sibling, 5 = first child) SE80's tree was flat: every node a
+/// root.
+const int relatNone = 0;
+const int relatLastSibling = 1;
+const int relatNextSibling = 2;
 const int relatPrevSibling = 3;
-const int relatNextSibling = 4;
-const int relatFirstChild = 5;
+const int relatFirstChild = 4;
+const int relatFirstSibling = 5;
 const int relatLastChild = 6;
+
+/// Whether [t] is a tree UPDATE push — `UpdateR3Table` / `UpdateItemTable`
+/// (TREEV_UNOD / TREEV_UITM: the node / item columns plus their `U_*`
+/// change flags): a change MASK over nodes the tree already holds, never
+/// a rowset of its own (the reference client's gridread_ingest skips it). Its rows
+/// carry no relation (RELATKEY blank, RELATSHIP 0): read as a node table
+/// it looked like a NEW tree (a recorded session srv raw[117], the
+/// expansion of SE80's "Dynpros" `9`: `UpdateR3Table` 9 with U_ALL = X,
+/// then `AddR3Table` its screen `14`) — the object list was dropped and
+/// `9` left alone, with no text (the live iPad's lone " 9").
+bool isTreeUpdateTable(DpTable t) => t.columns.any((c) => c.startsWith('U_'));
 
 class SapTreeNode {
   SapTreeNode(this.key);
@@ -153,8 +179,14 @@ class SapTreeModel {
 
   /// Fold one decoded DP table in: node tables (a NODE_KEY + RELATKEY
   /// pair) add or update nodes; item tables (NODE_KEY + ITEM_NAME + TEXT)
-  /// set texts. Unknown tables are ignored. Returns whether it applied.
+  /// set texts; an update push ([isTreeUpdateTable]) changes the flagged
+  /// fields of nodes already held. Unknown tables are ignored. Returns
+  /// whether it applied.
   bool apply(DpTable t) {
+    if (isTreeUpdateTable(t) && t.columns.contains('NODE_KEY')) {
+      _applyUpdate(t);
+      return true;
+    }
     if (t.columns.contains('RELATKEY') && t.columns.contains('NODE_KEY')) {
       for (final r in t.rows) {
         _addNode(r);
@@ -173,6 +205,34 @@ class SapTreeModel {
       return true;
     }
     return false;
+  }
+
+  /// An `UpdateR3Table` / `UpdateItemTable` row changes what its `U_*`
+  /// flags name (`U_ALL`: every field) of a node the tree holds; a row of
+  /// an unknown node is dropped (the control has nothing to update).
+  void _applyUpdate(DpTable t) {
+    final items = t.columns.contains('ITEM_NAME');
+    for (final r in t.rows) {
+      final n = nodes[r['NODE_KEY'] ?? ''];
+      if (n == null) continue;
+      final all = r['U_ALL'] == 'X';
+      bool changes(String flag) => all || r[flag] == 'X';
+      if (items) {
+        if (!changes('U_TEXT') || !t.columns.contains('TEXT')) continue;
+        final item = r['ITEM_NAME'] ?? '';
+        final text = r['TEXT'] ?? '';
+        final was = n.items[item];
+        n.items[item] = text;
+        // the node's label is its first item's text (item '1', a column
+        // tree's hierarchy column): follow it when it is that item
+        if (item == '1' || n.text.isEmpty || n.text == was) n.text = text;
+        continue;
+      }
+      if (changes('U_HIDDEN')) n.hidden = r['HIDDEN'] == 'X';
+      if (changes('U_DISABLED')) n.disabled = r['DISABLED'] == 'X';
+      if (changes('U_ISFOLDER')) n.isFolder = r['ISFOLDER'] == 'X';
+      if (changes('U_EXPANDER')) n.expander = r['EXPANDER'] == 'X';
+    }
   }
 
   void _addNode(Map<String, String> r) {
@@ -200,7 +260,7 @@ class SapTreeModel {
         n.parentKey = relNode.key;
         relNode.children.insert(0, n);
         relNode.expander = false;
-      case relatLastChild:
+      case relatLastChild || relatNone:
         n.parentKey = relNode.key;
         relNode.children.add(n);
         relNode.expander = false;

@@ -159,3 +159,8 @@ List<Uint8List> niSplit(Uint8List raw) {
 /// NI-layer keepalive payloads.
 const List<int> niPing = [0x4e, 0x49, 0x5f, 0x50, 0x49, 0x4e, 0x47, 0x00]; // "NI_PING\0"
 const List<int> niPong = [0x4e, 0x49, 0x5f, 0x50, 0x4f, 0x4e, 0x47, 0x00]; // "NI_PONG\0"
+
+/// The NI_PONG answer as its NI frame, built once (read-only): every
+/// NI_PING is answered with these same 12 bytes.
+final Uint8List niPongFrame =
+    niFrame(Uint8List.fromList(niPong)).asUnmodifiableView();

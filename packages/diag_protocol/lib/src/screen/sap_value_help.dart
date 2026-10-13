@@ -124,6 +124,11 @@ class SapValueHelpItem {
 
   bool get isInput => type != 'B' && type != 'T' && type != 'E';
 
+  /// A PRE-FILLED input (type `4`): it shows its pushed default [text]
+  /// (prefilled 1801 `FR`) — a plain input (`X`) starts empty. Not
+  /// [isInput], which holds for both.
+  bool get isPrefilledInput => type == '4';
+
   @override
   String toString() =>
       'SapValueHelpItem($type $id "$text"'
@@ -683,11 +688,17 @@ Uint8List _join(List<Uint8List> parts) {
   return b.toBytes();
 }
 
-/// A verb argument as the wire carries it (UTF-8 bytes read one per
-/// code unit) decoded to text.
+/// A verb argument decoded to text: the flush parse reads it in the
+/// session codepage already (svars.dart [Rec.valueText]); one still read
+/// one byte per code unit is re-read as UTF-8 when it is valid UTF-8, and
+/// kept as it is otherwise (the reference client's ea_flushcall.arg_text).
 String _text(String s) {
   if (s.codeUnits.any((c) => c > 0xff)) return s;
-  return utf8.decode(latin1.encode(s), allowMalformed: true);
+  try {
+    return utf8.decode(latin1.encode(s));
+  } on FormatException {
+    return s;
+  }
 }
 
 /// The pick's key column (see [SapValueHelpDialog.keyField]).

@@ -7,13 +7,14 @@ part of 'sap_session.dart';
 ///
 /// Clicks: a DOUBLE click on a table or row is ICDataFlow's
 /// OnLeftButtonDblClk `%_GC <shell> 32` ([canvasDoubleClick]); a SINGLE
-/// click is wire-silent on every recorded canvas ([canvasClick]).
+/// click is OnObjectSelected `%_GC <shell> 134217728` where the canvas
+/// announced it, wire-silent elsewhere ([canvasClick]).
 ///
-/// Node MOVE: no real-GUI capture records one. ICDataFlow.ocx's event
-/// table names `OnObjectMoved` (a recorded session DECODE §4) and
-/// the control registers events 2, 32, 2048, 16384, 32768, 262144, 4194304,
-/// 16777216 and 134217728 besides the link commit, but which of them a move
-/// fires and with which PARAMs is not on any wire — so no moveCanvasNode.
+/// Table MOVE: wire-silent apart from its mouse-down select
+/// (a recorded session gesture 7: gui[24] `134217728 (1, 0)`,
+/// then nothing until the F3 — OnObjectMoved is not announced, the program
+/// never learns the new place). A client moves a table locally and sends
+/// [canvasClick] for the mouse-down; there is no moveCanvasNode.
 extension SapSessionCanvas on SapSession {
   _CanvasState get _canvasState => _canvasStates[_w] ??= _CanvasState();
 
@@ -280,32 +281,52 @@ extension SapSessionCanvas on SapSession {
     );
   }
 
-  /// Single-click object [objectId] of canvas [c] (select it). On every
-  /// recorded canvas this is wire-silent: the SQVI / SQ02 canvases
-  /// register no selection event and none of their left clicks sends
-  /// anything (a recorded session, a recorded session) — the
-  /// returned list is then empty and nothing went out. A canvas whose
-  /// shell registered OnObjectSelected ([canvasObjectSelectedEvent]:
-  /// RSNPG_TEST_NETPLAN1's 122) would be told by the real GUI, with
-  /// PARAMs no capture shows — refused with an UnsupportedError, nothing
-  /// sent (the selection stays the client's).
-  Future<List<Uint8List>> canvasClick(SapCanvasModel c, String objectId) {
-    final id = objectId.trim();
-    if (c.node(id) == null && !c.links.any((l) => l.id.trim() == id)) {
+  /// Single-click object [objectId] of canvas [c] (select it) — a table,
+  /// one of its rows, a link — or, with [objectId] null, the empty canvas;
+  /// also the mouse-down that starts a table drag (the drag itself is
+  /// wire-silent). Where a shell of the canvas announced OnObjectSelected
+  /// ([canvasObjectSelectedEvent]: RSNPG_TEST_NETPLAN1's 122) this is the
+  /// real SAP GUI for Windows' round (a recorded session):
+  /// `%_GC <shell> 134217728` with `(tableId, 0)` for a table or a row
+  /// (the row's TABLE: the row id never goes out), `(linkId, 1)` for a
+  /// link, `(-1, -1)` for the empty canvas; the server answers a table
+  /// select with its Highlight verbs. Everywhere else (the SQVI / SQ02
+  /// canvases announce no selection event — a recorded session,
+  /// a recorded session) a click is wire-silent: the returned list
+  /// is empty and nothing went out. An id that is none of the canvas's is
+  /// refused (ArgumentError), nothing sent.
+  Future<List<Uint8List>> canvasClick(SapCanvasModel c, String? objectId) {
+    final id = objectId?.trim();
+    final n = id == null ? null : c.node(id);
+    final isLink =
+        n == null && id != null && c.links.any((l) => l.id.trim() == id);
+    if (id != null && n == null && !isLink) {
       throw ArgumentError(
         '"$objectId" is no object id of canvas ${c.shell} — refused, '
         'nothing sent',
       );
     }
     final shell = _canvasShellFor(c, canvasObjectSelectedEvent);
-    if (shell != null) {
-      throw UnsupportedError(
-        'shell $shell registered OnObjectSelected '
-        '($canvasObjectSelectedEvent) — its PARAMs are on no capture, '
-        'nothing sent',
-      );
+    if (shell == null || answerDialect != GuiDialect.windows) {
+      return Future.value(const <Uint8List>[]);
     }
-    return Future.value(const <Uint8List>[]);
+    final target = n == null
+        ? id
+        : (n.type != 'table' && n.parent != null ? n.parent! : n.id);
+    final params = canvasSelectParams(target, link: isLink);
+    _ea.recordEvent(shell, {for (final (i, p) in params.indexed) i: p});
+    return _act(
+      canvasSelectItems(
+        ctx,
+        shell: shell,
+        params: params,
+        // a table mouse-down keeps the focus where the last paint put it;
+        // a link / the empty canvas is a click on the OCX window itself
+        focused: n == null || ctx.paintedControlFocus == shell,
+        sourcePath: _hostedSourcePath(shell),
+      ),
+      dialectReady: true,
+    );
   }
 
   /// The shell of canvas [c] (its ICDataFlow sibling first) that
