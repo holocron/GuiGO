@@ -897,15 +897,33 @@ class SapSession {
       if (out.isEmpty) rethrow;
       // the part that arrived is folded (never dropped) — and the caller
       // is TOLD the turn is incomplete, with the frames
+      _rememberTurn(out);
       _foldTurn(out);
       _emitTurn(out);
       partialTurnTimeouts++;
       _trace('turn timed out after ${out.length} frame(s): folded partial');
       throw PartialTurnTimeout(out, e.duration);
     }
+    _rememberTurn(out);
     _foldTurn(out);
     _emitTurn(out);
     return out;
+  }
+
+  /// The frames of the most recent completed turn, raw as received
+  /// (materialized stream paints included) — the wire log a diagnostic
+  /// reads when a live flow diverges from every capture (the SFP Layout
+  /// tab's XDP push on some kernels). Bounded: the newest
+  /// [maxTurnWireFrames] frames of the last turn only.
+  List<Uint8List> lastTurnFrames = const [];
+
+  /// How many frames of a turn [lastTurnFrames] keeps at most.
+  static const int maxTurnWireFrames = 512;
+
+  void _rememberTurn(List<Uint8List> frames) {
+    lastTurnFrames = frames.length <= maxTurnWireFrames
+        ? List.unmodifiable(frames)
+        : List.unmodifiable(frames.sublist(frames.length - maxTurnWireFrames));
   }
 
   void _emitTurn(List<Uint8List> frames) {
@@ -1377,7 +1395,13 @@ class SapSession {
       // an opaque 16/8/4 / 16/8/6 value of the RAW carrier, which already
       // got its receipt); its nested step is the paint's, 3 behind the
       // carrier's (reference client 727e286: me21n_collapsed srv[10] 38 -> 35)
-      if (isStreamCarrier(f)) continue;
+      if (isStreamCarrier(f)) {
+        // the glued stream can still be a completed DP push (a push the
+        // assembler joined across its chunk frames): the cache takes what
+        // it recognizes
+        _ea.dpCache.ingestFrame(f);
+        continue;
+      }
       _ea.dpCache.ingestFrame(f);
       recordControlFactsFromFrame(_ea, f);
       final folded = foldAutomationFrame(f, _autoStream, step);
@@ -1389,6 +1413,12 @@ class SapSession {
         sent++;
       }
       for (final (k, (value, closingStep)) in folded.calls.indexed) {
+        // a call JOINED across chunk frames (a flush, a DP push streamed
+        // on its own) hides pushes its per-frame parts could not decode —
+        // they were partial RFCs — so the completed value is cached whole
+        if (folded.joinedCalls.contains(k)) {
+          _ea.dpCache.ingestJoined(value);
+        }
         // keyed with the closing step: the same queue on a later screen is
         // a new call and must be answered again (a skipped answer hangs it)
         // (an exact key: a collision would skip an owed answer)
@@ -1418,6 +1448,10 @@ class SapSession {
             _noteIngestFailure(where, parseError!);
           }
         } else {
+          // a destroyed / re-created shell's old content goes first
+          // (sap_session_liveness.dart _forgetPriorInstances)
+          final p = parsed;
+          _guarded('shell reuse', () => _forgetPriorInstances(p));
           _ingestGridCall(value, parsed);
           _ingestChartCall(value, parsed);
           _ingestNetPlanCall(value, parsed);

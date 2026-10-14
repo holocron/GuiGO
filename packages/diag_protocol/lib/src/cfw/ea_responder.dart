@@ -366,6 +366,19 @@ AutomationFrame foldAutomationFrame(
         } else if (stream.hasPending) {
           stream._append(v);
           chunkFrame = true; // raw continuation slice
+        } else if (!ole &&
+            isRfcHead(v) &&
+            containsBytes(v, 'DP_PUT_CLIENT_TABLE') &&
+            !dpPushDecodes(v)) {
+          // the HEAD of a DataProvider PUSH streamed on its own (no
+          // OLE_FLUSH_CALL wrapper): the SFP Layout tab's XDP arrives so
+          // on some kernels — a form layout too big for one frame,
+          // chunked like a call, closed by its sid-0 companion. Joined
+          // (and receipted per chunk) like one; the completed value's
+          // pushes are cached by the drive loop. A COMPLETE one-frame
+          // push stays a plain data push (its DESURL already decodes).
+          stream._start(v);
+          chunkFrame = true;
         }
         // else: a data push / DP_GET fetch — not a call part, no receipt
       } else if (it.sid == 0 || it.sid == 1) {

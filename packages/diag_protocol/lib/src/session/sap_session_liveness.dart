@@ -313,4 +313,97 @@ extension _SapSessionShellPrune on SapSession {
     w.headerNames.removeWhere((k, _) => mine(k));
     _treeTopNodes[w]?.removeWhere((k, _) => mine(k));
   }
+
+  /// Before [call]'s models fold it: every control instance it ENDS
+  /// (DestroyWindow) or REPLACES (a CreateControl of a shell id the kernel
+  /// handed out before) takes its content with it. A kernel shell id is
+  /// reused for whatever control comes next — of any class, in any
+  /// transaction — and the content models are keyed by shell, so the old
+  /// instance's state resurfaced on the new one once the id was live
+  /// again. a recorded session (one real SAP GUI for Windows logon):
+  /// SM59's connection-test grid 146 ("Action | Résultat", srv[57]) is
+  /// DestroyWindow'd at srv[66]; SE80 (srv[144]) re-creates 146 as the
+  /// container of its object-name field — and the dock drew the dead grid
+  /// over the name field and the tree toolbar (the live iPad's
+  /// "Propriété | Valeur" header in SE80's dock, 2026-10-13). Likewise a
+  /// sash the user dragged in an earlier splitter of that id re-laid the
+  /// new splitter's cells, and an old column tree's headings stayed on
+  /// the shell.
+  void _forgetPriorInstances(FlushCall call) {
+    Set<String>? urls;
+    for (var i = 1; i <= call.verbs.length; i++) {
+      final verb = call.verbs[i - 1];
+      final create = verb.startsWith('CreateControl');
+      if (!create && verb != 'DestroyWindow') continue;
+      final a = verbNamedArgs(call, i);
+      final sh = (a['#1'] ?? '').trim();
+      if (!_digitsOnlyRx.hasMatch(sh)) continue;
+      // the pushes this call binds (a DP url may be reused for the new
+      // instance's content, decoded before the call folds)
+      urls ??= {
+        for (var j = 1; j <= call.verbs.length; j++)
+          if (call.verbs[j - 1] == 'SetDataFromUrl')
+            (verbNamedArgs(call, j)['#3'] ?? '').trim(),
+      };
+      _purgeShellContent(
+        sh,
+        cls: create ? (a['#2'] ?? '').trim() : null,
+        keepUrls: urls,
+      );
+    }
+  }
+
+  /// Drop the content control [sh]'s previous instance left: [cls] is the
+  /// class of the control now created on it (null: the shell ended). A
+  /// model of the new control's own kind is left to that model's fold (a
+  /// re-created grid / tree / editor / picture re-binds its new pushes,
+  /// each fold's "a reused shell id is a new control" rule); every other
+  /// kind's goes. Always dropped: the tree columns and HeaderNames-derived
+  /// layout (re-declared by the new tree's own call, folded after this),
+  /// the splitter sashes the user held, and a splitter record of a shell
+  /// that is no splitter any more.
+  void _purgeShellContent(
+    String sh, {
+    String? cls,
+    Set<String> keepUrls = const {},
+  }) {
+    final kind = cls == null ? null : controlKind(cls);
+    final st = _layoutState;
+    final w = _w;
+    bool mine(String k) => k == sh || _ea.shellAlias[k] == sh;
+    _treeColumnsOf[w]?.removeWhere((k, _) => mine(k));
+    // the user's drag was over the OLD splitter's cells
+    st.sashHeld.removeWhere((k, _) => k.$1 == sh);
+    st.sashDragged.remove(sh);
+    if (cls == null || !cls.contains('Splitter')) {
+      st.registry.splitters.remove(sh);
+    }
+    if (kind != 'grid') {
+      _gridAsm.remove(sh);
+      if (kind == null) {
+        for (final g in _grids) {
+          if (g.shell == sh) g.model = null;
+        }
+      } else {
+        _grids.removeWhere((g) => g.shell == sh);
+        _gridsPending.remove(sh);
+      }
+    }
+    if (kind != 'tree') {
+      final urls = [
+        for (final e in st.treeUrlShell.entries)
+          if (e.value == sh && !keepUrls.contains(e.key)) e.key,
+      ];
+      if (urls.isNotEmpty) {
+        st.treeTables.removeWhere((t) => urls.contains(t.$1));
+        urls
+          ..forEach(st.treeUrlShell.remove)
+          ..forEach(st.treeUrlIMode.remove);
+      }
+      st.treeModels.remove(sh);
+    }
+    if (kind != 'html') _htmlState.shown.remove(sh);
+    if (kind != 'editor') _editorTracker.loaded.remove(sh);
+    if (kind != 'image') _pictureTracker.urlOf.remove(sh);
+  }
 }

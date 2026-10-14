@@ -783,6 +783,17 @@ Map<int, Uint8List> doiObserveCall(EaSession session, DoiState st, FlushCall cal
         _saveDocument(st, doc, url);
         doc.savedUrls.add(url);
         st.capDocs();
+        // a refused save is the Office's failed save, error_nr 33: with
+        // officeintegration/saveerrorcheck declared (frontend_features
+        // .dart) SAVE_DOCUMENT_TO_TABLE then skips its DP_GET_STREAM pull
+        // and the program gets an error retcode — the pull's exception
+        // reply was the CNDP 002 MESSAGE_TYPE_X dump (SAPRDEMOWORD97
+        // INTEGRATION OPEN, live 2026-10-14; OFFICEINTEGRATIONDOCPROXYIMP
+        // save_document_to_table, C_OI_CONTAINER_CONTROL_PROXY
+        // SAVE_DOCUMENT_TO_URL: RESULT = error_nr)
+        if (res.isNotEmpty && st.docErrors.containsKey(url)) {
+          _putResult(out, res, Uint8List.fromList('33'.codeUnits));
+        }
       }
     } else if (verb == 'CloseDocument') {
       final shell = _shellOfObject(session, call, m, containers);

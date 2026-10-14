@@ -124,6 +124,24 @@ class DpCache {
     return n;
   }
 
+  /// [ingestValue] for a value the fold COMPLETED (a call joined across
+  /// chunk frames — its per-frame parts were partial RFCs the frame ingest
+  /// could not read): stores what it carries, without claiming
+  /// [lastIngested] — the frame-level ingest's fresh set stays the
+  /// binding pass's.
+  int ingestJoined(Uint8List rfc) {
+    final fresh = <String>{};
+    final n = _ingest(rfc, fresh);
+    _sweep(fresh);
+    return n;
+  }
+
+  /// Whether [rfc] is one COMPLETE DP push (a DESURL decodes from it) —
+  /// as opposed to the head chunk of a push the server streams across
+  /// frames, whose queue may name a url its content columns have not
+  /// reached yet ([foldAutomationFrame]'s head rule).
+  bool isCompletePush(Uint8List rfc) => _pushesOf(rfc).isNotEmpty;
+
   int _ingest(Uint8List rfc, Set<String> fresh) {
     var n = 0;
     for (final (url, seg) in _pushesOf(rfc)) {
@@ -696,3 +714,9 @@ List<int> _utf8DecodeLenient(Uint8List bytes) {
 // Patterns hoisted out of their call sites: a RegExp built per call is
 // compiled per call (audit #7 / zcode P-12).
 final RegExp _digitsOnlyRx = RegExp(r'^\d+$');
+
+/// Whether [rfc] already decodes as one complete DP push (a DESURL with
+/// its content columns fits in the value) — the head rule of a chunked
+/// push stream ([foldAutomationFrame]): a head chunk names no complete
+/// push yet, a one-frame push does.
+bool dpPushDecodes(Uint8List rfc) => _pushesOf(rfc).isNotEmpty;

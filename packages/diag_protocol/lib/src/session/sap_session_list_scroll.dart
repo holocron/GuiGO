@@ -22,6 +22,10 @@ final Expando<(int, int)> _listRoundAt = Expando('list round step');
 /// _scroll g60 with it, g61 / g62 without).
 final Expando<bool> _listResized = Expando('list resize sent');
 
+/// The keys a popup list round sends without its cursor: Back F3, Cancel
+/// F12, Exit F15 (a recorded session gui[20] `50 0c`).
+const Set<int> _popupCursorlessVkeys = {3, 12, 15};
+
 extension _SapSessionListScroll on SapSession {
   /// The resize round of a window showing a classic list — null when the
   /// active window paints none (the dynpro resize round then).
@@ -100,6 +104,28 @@ extension _SapSessionListScroll on SapSession {
     _noteModeCommand(vkey: vkey); // Ctrl+N opens a window
     final run = _listRoundRun();
     final c = ctx;
+    // a line key on a POPUP list (Sélectionner = F2 on the SAPMSSY0 popup
+    // of SAPRDEMOWORD97INTEGRATION OPEN): the pick round with the list
+    // cursor, as a double-click sends it (pickValue; reference client raw_listpick,
+    // a recorded session step 53) — the cursorless
+    // popup envelope below left the server no line to act on, it painted
+    // the same popup again (live 2026-10-14). Back / Cancel / Exit and the
+    // paging keys keep the recorded cursorless shape (a recorded session
+    // gui[20], a recorded session gui[70..74]).
+    final at = listCursor;
+    if (c.modalNo != 0 &&
+        at != null &&
+        !_popupCursorlessVkeys.contains(vkey) &&
+        !listScrollVkeys.contains(vkey)) {
+      return _act(
+        listPickItems(c, at.$1, at.$2,
+            vkey: vkey,
+            windowPx: windowsEventWindowPx(c),
+            xml: liveMetricsXml(c.screenRows, c.screenCols),
+            writes: _takeListCellWrites().$1),
+        dialectReady: true,
+      );
+    }
     return _act(
       windowsListKeyItems(c, vkey,
           windowPx: windowsEventWindowPx(c), windowRect: !run && c.modalNo != 0),

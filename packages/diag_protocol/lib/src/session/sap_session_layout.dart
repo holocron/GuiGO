@@ -361,6 +361,8 @@ extension SapSessionLayout on SapSession {
       for (final sh in dead) {
         _ea.destroyedControls.add(sh);
         _forgetShellState(sh);
+        // its tree columns, held sashes and splitter record too
+        _purgeShellContent(sh);
         if (_ea.shellAlias[sh] case final a? when a != sh) {
           _ea.destroyedControls.add(a);
         }

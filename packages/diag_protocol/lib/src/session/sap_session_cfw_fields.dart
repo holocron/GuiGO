@@ -208,9 +208,12 @@ extension SapSessionCfwFields on SapSession {
   Map<String, SapComboBox> get comboBoxes {
     final st = _cfState;
     final out = <String, SapComboBox>{};
+    // a shell's CURRENT control: the kernel reuses an id for any class
+    final latest = _layoutState.registry.classes();
     for (final c in _layoutState.registry.created) {
       final sh = c.shell;
       if (!_comboClassRx.hasMatch(c.cls) || out.containsKey(sh)) continue;
+      if (latest[sh] != c.cls) continue;
       if (!_onScreen(sh) || !_shellVisible(sh)) continue;
       final m = st.combos[sh];
       out[sh] = SapComboBox(
@@ -230,9 +233,12 @@ extension SapSessionCfwFields on SapSession {
     final st = _cfState;
     final cached = _layoutState.registry.cachedProps;
     final out = <String, SapInputFieldControl>{};
+    // a shell's CURRENT control: the kernel reuses an id for any class
+    final latest = _layoutState.registry.classes();
     for (final c in _layoutState.registry.created) {
       final sh = c.shell;
       if (!_inputFieldClassRx.hasMatch(c.cls) || out.containsKey(sh)) continue;
+      if (latest[sh] != c.cls) continue;
       if (!_onScreen(sh) || !_shellVisible(sh)) continue;
       final m = st.inputs[sh];
       out[sh] = SapInputFieldControl(
