@@ -43,6 +43,14 @@ const String typeAheadOkcodeCommand = '%_SEARCH_OKCODE';
 /// The command field's "show all results" row (`%_SEARCH_OCDIALOG <text>`).
 const String typeAheadOkcodeAllResults = '%_SEARCH_OCDIALOG';
 
+/// Whether the typed okcode [okcode] is a type-ahead REQUEST
+/// (`%_SEARCH <text>` / `%_SEARCH_OKCODE <text>`): the rounds answered by
+/// one `TypeAheadExport` flush and a no-op repaint. `%_SEARCH_OCDIALOG`
+/// opens the 4242 dialog — an ordinary dialog step, not a request.
+bool isTypeAheadRequestOkcode(String okcode) =>
+    okcode.startsWith('$typeAheadOkcode ') ||
+    okcode.startsWith('$typeAheadOkcodeCommand ');
+
 /// The connect support bit that arms the command-field type-ahead.
 const int supportBitOkcodeTypeAheadAllResults = 222;
 

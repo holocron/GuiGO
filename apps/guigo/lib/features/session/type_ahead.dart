@@ -34,7 +34,7 @@ import '../../core/input_history.dart';
 /// Runs an action [delay] after the LAST [run] call: each call cancels the
 /// pending one (the debounce of SAP GUI's type-ahead timer).
 class Debouncer {
-  Debouncer({this.delay = const Duration(milliseconds: 300)});
+  Debouncer({this.delay = const Duration(milliseconds: 400)});
 
   final Duration delay;
   Timer? _timer;
@@ -155,7 +155,9 @@ class TypeAheadConfig {
   const TypeAheadConfig({
     this.history,
     this.server,
-    this.debounce = const Duration(milliseconds: 300),
+    // SAP GUI for Windows: CMyCombo::TypeAhead_WM_KEYUP sets its timer to
+    // 400 ms after the last key — a quick `se80`+Enter fires no request
+    this.debounce = const Duration(milliseconds: 400),
   });
 
   final InputHistoryStore? history;

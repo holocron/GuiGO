@@ -47,6 +47,12 @@ const Set<String> rangeRoles = {'RangeDef', 'Ranges', 'Content2', 'Content'};
 /// text node 146 — that GUI went idle into `/nex` without it — and the SFP
 /// Designer 173): the user's activation of the in-place document, not an
 /// automatic follow-up of the open ([SapSession.officeDocumentActivated]).
+/// The ABAP names it ON_CLOSE_DOCUMENT (C_OI_CONTAINER_CONTROL_PROXY
+/// EVENTID_ONCLOSE = 2: PARAM 0 the document cookie, PARAM 1 has_changed;
+/// the server's answer FreeObjects the document's proxies, SO10 srv[50]):
+/// the real GUI also raises it when the user closes Office's window
+/// (a recorded session gui[118]), and the has_changed it
+/// carries is what CloseDocument answers next ([doiNoteCloseEvent]).
 const int officeActivationEvent = 2;
 
 /// The SAPscript Word template's own macros the recorded Office 16 GUI ran
@@ -95,17 +101,16 @@ const Map<String, int> doiMethodTypes = {
   'AddStringItem2': 3, 'ExecuteMacro': 3, 'LastErrorString': 8, 'AddMenuBar': 3, 'AddMenu': 3,
   'AddMenuItem': 3, 'HideRows': 3, 'ShowRows': 3, 'InsertRange': 3, 'DeleteRange': 3, 'SetSelection': 3,
   'ProtectDocument': 3, 'AddSchema2': 3, 'CheckRegisteredProgIDs': 3,
-  // the proxy's "did the document change?" (SFP's pai_layout reads it):
-  // answered the blank BSTR — the Windows GUI's false on this wire — never
-  // a '0' value: it reached SFP's abap_bool AS '0', NOT INITIAL read as
-  // CHANGED, and FPUIFB 051 (the 'Impossible de sauvegarder modifications
-  // de mise en forme en mode affich.!' Information modal) popped every
-  // time the user worked in the read-only Designer (live the test system 2026-10-15;
-  // the earlier VT_BOOL '0' typing had the same failure — the row's text
-  // lands in the abap_bool verbatim). Blank is initial under any
-  // conversion, and "never changed" is true here: the model's document
-  // bytes never change.
-  'HasDocumentChanged': 8,
+  // the proxy's "did the document change?" — CL_FP_FB_TEMPLATE_DESIGNER
+  // ->has_changed (read on the test system) pulls ret_value into `DATA return_value
+  // TYPE i VALUE 1` and tests `return_value = 0`: the answer must be a
+  // NUMERIC ZERO (VT_I4 '0', like every sibling DOI method) or — retcode
+  // apart — SFP's pai_layout reads CHANGED and pops FPUIFB 051 (the
+  // 'Impossible de sauvegarder modifications de mise en forme en mode
+  // affich.!' Information modal) when the user works in the read-only
+  // Designer. The typed-11 '0' and the blank-BSTR attempt both failed
+  // live (the test system/the test system): the i keeps its 1 default unless the row converts.
+  'HasDocumentChanged': 3,
   // a recorded session: the chart / spreadsheet / Word 97 / pivot demos
   'StartLinkServer': 3, 'AddTableItem': 3, 'AddBinaryItem': 3, 'InsertRange2': 3,
   'InsertRangeDim2': 3, 'InsertOneTable': 3, 'SetFieldtype': 3, 'SetSelection2': 3,
@@ -399,14 +404,25 @@ class Document {
     return (bottom > 0 ? bottom + 2 : 1, 1);
   }
 
-  /// Whether the document changed since the frontend last saved it — what
-  /// CloseDocument(n, save) answers, whatever its save flag: the created
-  /// chart closed unsaved with save 1 -> '1' (a recorded session gui[25])
-  /// and with save 0 -> '1' (a recorded session srv[77] ->
-  /// gui[64], after the user's "Non"), the Word 97 document
-  /// SaveDocumentToURL'd before its CloseDocument(1, 1) -> '0' (gui[159]),
-  /// the opened BDS sheet's CloseDocument(1, 0) -> '0' (gui[94]).
-  bool get changedSinceSave => created && savedUrls.isEmpty;
+  /// The has_changed the container's close event reported for this
+  /// document (`%_GC <shell> 2`, PARAM 0 the document cookie, PARAM 1
+  /// has_changed: C_OI_CONTAINER_CONTROL_PROXY EVENTID_ONCLOSE 2, DISPATCH
+  /// -> ON_CLOSE_DOCUMENT), cleared by a later SaveDocumentToURL — what
+  /// CloseDocument(n, save) answers (its RESULT is has_changed, whatever
+  /// the save flag: CLOSE_DOCUMENT of that class). It fits all eleven
+  /// recorded closes: 1 after an event (1, 1, 1) with no save since
+  /// (a recorded session srv[32] the chart, gui[19]; a recorded session
+  /// excel_word_demos srv[77] the chart, gui[58]; a recorded session
+  /// macros_disabled srv[144] the Word demo saved BEFORE the event,
+  /// gui[118]); 0 after (1, 0, 0) (xxl_excel_word_demos srv[107], gui[90]),
+  /// after an event then a save (a recorded session srv[28]: gui[15],
+  /// save srv[23]) and with no event at all (a recorded session srv[103] /
+  /// [170], word_demo_links srv[43], bds_cold_cache srv[48] / [66],
+  /// macros_disabled srv[45] — an OPENED sheet the server wrote ranges
+  /// into, so no Office dirty flag of a still-open document is reported).
+  /// The former "created and never saved" rule missed macros_disabled
+  /// srv[144].
+  bool closeEventChanged = false;
 }
 
 int _int(String? v, int dflt) => int.tryParse((v ?? '').trim()) ?? dflt;
@@ -676,6 +692,158 @@ Document? _numberedDoc(DoiState st, String? shell, String? number) {
     }
   }
   return null;
+}
+
+/// Write the X-R3TABLE push [seg] into [rg] of [doc], row by row from its
+/// top-left (clipped to the range), each field as the Office 16 sheet held
+/// it (a recorded session gui[69], the SFLIGHT rows): C
+/// text trimmed (`AA`, `747-400`), N a number (`0017` -> 17), D
+/// `dd.mm.yyyy` (`20260324` -> `24.03.2026`), P the packed decimal with its
+/// FORMAT decimals (`422.94`, `192518.34`), I / s the integer. The FORMAT
+/// record: column, offset, length, decimals, ABAP type (u32 LE each, from
+/// byte 60).
+void applyOneTable(Document doc, DocRange rg, Uint8List seg) {
+  final (_, (fw, fn), fcells) = dpColumnCells(seg, 'FORMAT');
+  final (_, (dw, dn), dcells) = dpColumnCells(seg, 'DATAASC');
+  if (fw != 80 || fn <= 0 || dw <= 0 || dn <= 0) return;
+  Uint8List join(List<Uint8List> parts) {
+    final b = BytesBuilder(copy: false);
+    for (final p in parts) {
+      b.add(p);
+    }
+    return b.toBytes();
+  }
+
+  final fmt = join(fcells);
+  if (fmt.length < fw * fn) return;
+  // one `03 04` cell per row has its trailing blanks cut: pad each back to
+  // the record width (decodeNamedDpTable)
+  final perRow = dcells.length == dn && dcells.every((c) => c.length <= dw);
+  final data = perRow
+      ? join([
+          for (final c in dcells)
+            Uint8List(dw)
+              ..fillRange(0, dw, 0x20)
+              ..setRange(0, c.length, c),
+        ])
+      : join(dcells);
+  final fb = ByteData.sublistView(fmt);
+  final cols = [
+    for (var i = 0; i < fn && i < rg.cols; i++)
+      (
+        fb.getUint32(i * fw + 64, Endian.little),
+        fb.getUint32(i * fw + 68, Endian.little),
+        fb.getUint32(i * fw + 72, Endian.little),
+        fb.getUint32(i * fw + 76, Endian.little),
+      ),
+  ];
+  for (var r = 0; r < dn && r < rg.rows && (r + 1) * dw <= data.length; r++) {
+    final rec = Uint8List.sublistView(data, r * dw, (r + 1) * dw);
+    for (final (c, (off, len, dec, type)) in cols.indexed) {
+      if (off + len > rec.length) continue;
+      final raw = Uint8List.sublistView(rec, off, off + len);
+      final row = rg.top + r, col = rg.left + c;
+      final n = _oneTableNumber(raw, dec, type);
+      if (n != null) {
+        doc.setNumber(row, col, n);
+        continue;
+      }
+      var text = utf8.decode(raw, allowMalformed: true)
+          .replaceAll('\u0000', '')
+          .trim();
+      if (type == 0x44 && RegExp(r'^\d{8}$').hasMatch(text)) {
+        // D: the OCX's day.month.year
+        text = '${text.substring(6)}.${text.substring(4, 6)}.'
+            '${text.substring(0, 4)}';
+      }
+      doc.setCell(row, col, text);
+    }
+  }
+}
+
+/// A one-table field of ABAP [type] as a number: N digits, P packed BCD
+/// with [dec] decimals, I / s little-endian integers; null otherwise.
+num? _oneTableNumber(Uint8List raw, int dec, int type) {
+  final bd = ByteData.sublistView(raw);
+  switch (type) {
+    case 0x49 when raw.length >= 4: // I
+      return bd.getInt32(0, Endian.little);
+    case 0x73 when raw.length >= 2: // s
+      return bd.getInt16(0, Endian.little);
+    case 0x4e: // N
+      final t = String.fromCharCodes(raw).trim();
+      return RegExp(r'^\d{1,15}$').hasMatch(t) ? int.parse(t) : null;
+    case 0x50 when raw.isNotEmpty && raw.length <= 9: // P (17 digits fit)
+      var v = 0;
+      for (var k = 0; k < raw.length; k++) {
+        final hi = raw[k] >> 4, lo = raw[k] & 15;
+        if (hi > 9) return null;
+        v = v * 10 + hi;
+        if (k < raw.length - 1) {
+          if (lo > 9) return null;
+          v = v * 10 + lo;
+        } else if (lo < 10) {
+          return null; // no sign nibble
+        }
+      }
+      final neg = (raw.last & 15) == 0xD || (raw.last & 15) == 0xB;
+      final s = neg ? -v : v;
+      if (dec <= 0) return s;
+      if (dec > 15) return null;
+      var p = 1;
+      for (var k = 0; k < dec; k++) {
+        p *= 10;
+      }
+      return s % p == 0 ? s ~/ p : s / p;
+  }
+  return null;
+}
+
+/// Whether Excel accepts [name] as a defined name (its documented rules:
+/// a letter, `_` or `\` first, then letters, digits, `.`, `_`, `\`, `?`;
+/// at most 255 characters; never `C` / `R` alone nor a cell reference such
+/// as `A1` / `XFD1048576` / `R1C1`). `22` fails (a recorded session
+/// disabled gui[57]: InsertRange2 6), `ert` passes (a recorded session
+/// srv[61]: 0).
+bool excelNameValid(String name) {
+  final n = name.trimRight();
+  if (n.isEmpty || n.length > 255) return false;
+  if (!RegExp(r'^[\p{L}_\\][\p{L}\p{N}._\\?]*$', unicode: true).hasMatch(n)) {
+    return false;
+  }
+  final u = n.toUpperCase();
+  if (u == 'C' || u == 'R') return false;
+  if (RegExp(r'^R\d*C\d*$').hasMatch(u)) return false;
+  final a1 = RegExp(r'^([A-Z]{1,3})(\d+)$').firstMatch(u);
+  if (a1 != null) {
+    var col = 0;
+    for (final c in a1.group(1)!.codeUnits) {
+      col = col * 26 + c - 64;
+    }
+    final row = int.tryParse(a1.group(2)!) ?? 0;
+    if (col <= 16384 && row >= 1 && row <= 1048576) return false;
+  }
+  return true;
+}
+
+/// The container [shell] raised its OCX event 2 ([officeActivationEvent])
+/// with [params]: by the ABAP it is ON_CLOSE_DOCUMENT (C_OI_CONTAINER_
+/// CONTROL_PROXY EVENTID_ONCLOSE = 2; DISPATCH reads PARAM 0 the document
+/// cookie, PARAM 1 has_changed), whatever moment the frontend raises it
+/// at. Records has_changed on that container's document of that number
+/// for the CloseDocument that follows ([Document.closeEventChanged]) —
+/// GuiGo's own event (SapSession.officeDocumentActivated) and, in the
+/// replays, the real GUI's.
+void doiNoteCloseEvent(DoiState st, String shell, Map<int, String> params) {
+  final docs = st.containers[shell.trim()]?['docs'];
+  if (docs is! List<Document>) return;
+  final n = _int(params[0], 1);
+  for (final d in docs.reversed) {
+    if (d.number == n && !d.closed) {
+      d.closeEventChanged = (params[1] ?? '').trim() == '1';
+      return;
+    }
+  }
 }
 
 Document? _anyDoc(DoiState st) =>
@@ -967,6 +1135,32 @@ Map<int, Uint8List> doiObserveCall(EaSession session, DoiState st, FlushCall cal
         _stampResultType(call, i, 8);
         _putResult(out, res, Uint8List.fromList(officeGetVersion.codeUnits));
       }
+    } else if (verb == 'InsertRange2') {
+      // i_oi_spreadsheet~insert_range(rows, columns, name, updating): Excel
+      // names the selection — a name Excel refuses fails with the proxy's
+      // status 6 (C_OI_ERRORS=>TRANSLATE_PROXY_ERROR_CODE: message
+      // SOFFICEINTEGRATION 206 "Error occurred while setting object
+      // property") and nothing is inserted: a recorded session
+      // disabled srv[66] '22' -> gui[57] 6, its next ranges upload gui[59]
+      // byte-equal to gui[51]; a recorded session srv[61] 'ert' -> 0
+      if (res.isNotEmpty && !excelNameValid(args['#3'] ?? '')) {
+        _putResult(out, res, Uint8List.fromList('6'.codeUnits));
+      }
+    } else if (verb == 'InsertOneTable') {
+      // i_oi_spreadsheet~insert_one_table(rangename, <dp url>, wholetable):
+      // the pushed table written into the named range — a recorded session
+      // macros_disabled srv[75] (94 SFLIGHT rows into InsertRangeDim2's
+      // 94 x 14 `sflight`), the next contents upload gui[69] carrying them
+      // ([applyOneTable]); a range of no rows (a recorded session srv[69],
+      // its push empty) stays empty
+      final doc = _docOf(st, session, m, containers);
+      final rg = doc?.ranges[(args['#1'] ?? '').trim()];
+      final url = (args['#2'] ?? '').trim();
+      final seg = session.dpCache.byUrl[url] ?? ownPushes().byUrl[url];
+      if (doc != null && doc.kind == OfficeDocKind.excel && rg != null &&
+          seg != null) {
+        applyOneTable(doc, rg, seg);
+      }
     } else if (verb == 'InsertRangeDim2') {
       // i_oi_spreadsheet~insert_range_dim(name, left, top, rows, columns,
       // updating, sheetname): the named range Excel creates at those cells
@@ -1137,6 +1331,9 @@ Map<int, Uint8List> doiObserveCall(EaSession session, DoiState st, FlushCall cal
       if (doc != null && url.isNotEmpty) {
         _saveDocument(st, doc, url);
         doc.savedUrls.add(url);
+        // a save after the close event: unchanged again (a recorded session
+        // text_html gui[15] (1, 1, 1), srv[23] save, srv[28] close -> 0)
+        doc.closeEventChanged = false;
         st.capDocs();
         // a refused save is the Office's failed save, error_nr 33: with
         // officeintegration/saveerrorcheck declared (frontend_features
@@ -1166,9 +1363,9 @@ Map<int, Uint8List> doiObserveCall(EaSession session, DoiState st, FlushCall cal
       final doc = _numberedDoc(st, shell, args['#1']);
       if (doc != null) {
         if (res.isNotEmpty) {
-          // has_changed (see [Document.changedSinceSave])
+          // has_changed (see [Document.closeEventChanged])
           _putResult(out, res,
-              Uint8List.fromList((doc.changedSinceSave ? '1' : '0').codeUnits));
+              Uint8List.fromList((doc.closeEventChanged ? '1' : '0').codeUnits));
         }
         doc.closed = true;
         doc.version++;
@@ -1447,14 +1644,25 @@ String? dpgetInurl(Uint8List requestV) {
   var i = _indexOf(requestV, anchor, 0);
   if (i < 0) return (0, const []);
   final ds = i + anchor.length;
-  var end = requestV.length;
-  for (final needle in [
-    [0x02, 0x13],
-    [0x03, 0x01, 0x00]
-  ]) {
-    final e = _indexOfBytes(requestV, needle, ds);
-    if (e >= 0 && e < end) end = e;
+  // The column ends at the next column (`03 01 00`) or the table's close
+  // (`02 13`) — looked for only BETWEEN cells, as [dpColumnCells] does: an
+  // LZH cell's stream may hold those bytes (a recorded session
+  // disabled srv[69] / [77], the ranges pulls after InsertRange2 /
+  // InsertOneTable: a `02 13` inside the FORMAT cell left no records and
+  // the pull unanswered, where the real GUI uploaded gui[59] / gui[67]).
+  int endFrom(int from) {
+    var end = requestV.length;
+    for (final needle in [
+      [0x02, 0x13],
+      [0x03, 0x01, 0x00]
+    ]) {
+      final e = _indexOfBytes(requestV, needle, from);
+      if (e >= 0 && e < end) end = e;
+    }
+    return end;
   }
+
+  var end = endFrom(ds);
   final bd = requestV.buffer
       .asByteData(requestV.offsetInBytes, requestV.lengthInBytes);
   var width = 0;
@@ -1476,8 +1684,8 @@ String? dpgetInurl(Uint8List requestV) {
       }
       j += 6 + rl;
     } else if (requestV[j] == 0x03 && requestV[j + 1] == 0x05) {
-      final cell = find0305Cells(Uint8List.sublistView(requestV, j, end));
-      if (cell.isEmpty) break;
+      final cell = find0305Cells(Uint8List.sublistView(requestV, j));
+      if (cell.isEmpty || cell.first.openOff != 0) break;
       final p = parse0305Cell(cell.first.bytes);
       if (p != null) {
         final blob = lzhInflate(p.lzh);
@@ -1490,6 +1698,7 @@ String? dpgetInurl(Uint8List requestV) {
         }
       }
       j += cell.first.endOff; // the cell's offsets are relative to j
+      end = endFrom(j);
     } else {
       j += 1;
     }

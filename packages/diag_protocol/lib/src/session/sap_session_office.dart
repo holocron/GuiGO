@@ -87,6 +87,24 @@ extension SapSessionOffice on SapSession {
     final sh = shell.trim();
     final st = _officeDoi;
     if (!st.pendingActivation.contains(sh)) return const [];
+    // the SFP Designer's document is never "activated" back to SAP: its
+    // container's event 2 propagates the DESIGNER's close (C_OI_
+    // CONTAINER_CONTROL_PROXY's close semantics; SFP's handler closes its
+    // side), and the next pai_layout then calls has_changed on the dead
+    // proxy — rc_failed, forced CHANGED, the FPUIFB 051 Information modal
+    // ('Impossible de sauvegarder modifications de mise en forme en mode
+    // affich.!'). Live-proven on the test system (tool/sfp_popup_trace.dart): the
+    // event round answers CloseDocument + ReleaseDocument and the modal
+    // paint follows; without the event no has_changed round pops anything
+    // (it answers a clean 0/0 on the tab switches). In the real GUI no
+    // such round exists for the Designer — the clicks go to the Adobe
+    // window, and no SFP capture records one.
+    final current = st.containers[sh]?['current'];
+    if (current is Document &&
+        current.cls.toLowerCase().startsWith('pdfxmldesigner.')) {
+      st.pendingActivation.remove(sh);
+      return const [];
+    }
     if (!(st.registeredEvents[sh]?.contains(officeActivationEvent) ?? false)) {
       st.pendingActivation.remove(sh);
       return const [];
@@ -95,7 +113,12 @@ extension SapSessionOffice on SapSession {
     st.pendingActivation.remove(sh);
     await _flushStagedFirst();
     const params = ['1', '1', '1'];
-    _ea.recordEvent(sh, {for (final (i, p) in params.indexed) i: p});
+    final byPid = {for (final (i, p) in params.indexed) i: p};
+    _ea.recordEvent(sh, byPid);
+    // event 2 is ON_CLOSE_DOCUMENT to the server: its has_changed 1 is what
+    // the next CloseDocument answers, unless a save comes between
+    // (doi.dart [Document.closeEventChanged])
+    doiNoteCloseEvent(st, sh, byPid);
     final reg = _layoutState.registry;
     final sizes = <String, List<(String, String)>>{};
     _areaSizes(reg.parents[sh]).forEach((c, values) {

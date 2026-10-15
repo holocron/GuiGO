@@ -645,12 +645,21 @@ class SapSession {
     if (w != null && !w.isCompleted) w.complete();
   }
 
-  /// When the last NI payload was taken off the inbox ([_actLocked] keeps
-  /// [_actionGap] after it before the next action goes out).
+  /// When the last NI payload was taken off the inbox, and the one before
+  /// it (the receive trace's gap, [_traceRecv]).
   DateTime _lastPayloadAt = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _prevPayloadAt = DateTime.fromMillisecondsSinceEpoch(0);
 
-  /// The least time between the server's last frame and the next action.
-  static const Duration _actionGap = Duration(milliseconds: 250);
+  /// When the current action's frame went out (the receive trace's `+ms`).
+  DateTime _actionSentAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// Whether the last completed action was a type-ahead request
+  /// ([isTypeAheadRequestOkcode]).
+  bool _typeAheadAnswered = false;
+
+  /// Whether the last action went out right behind a type-ahead request's
+  /// answer.
+  bool lastActionAfterTypeAhead = false;
 
   /// The next NI payload off the socket, waiting until [deadline].
   Future<Uint8List> _nextPayload(DateTime deadline) async {
@@ -674,6 +683,7 @@ class SapSession {
     }
     final payload = _inbox.removeFirst();
     _inboxTaken(payload);
+    _prevPayloadAt = _lastPayloadAt;
     _lastPayloadAt = DateTime.now();
     // its off-isolate decode (decode_worker.dart), awaited in frame order
     final decoding = _sncCtx == null
@@ -870,6 +880,7 @@ class SapSession {
         // NI_PING first: its 8 bytes (`NI_PING\0`, 0x49 has the EOP bit)
         // read as a mode-control frame and went unanswered
         if (_isNiPing(payload)) {
+          if (traceEnabled) _trace('recv NI_PING');
           _pong();
           continue;
         }
@@ -879,6 +890,7 @@ class SapSession {
           if (plain == null) continue; // a non-data frame
           frame = plain;
         }
+        if (traceEnabled) _traceRecv(frame);
         _noteServerError(frame);
         // a DIAG mode-management frame (a window's turn end / close / the
         // end of the conversation — sap_session_windows.dart): classified,
@@ -1129,6 +1141,24 @@ class SapSession {
 
   String _frameTrace(Uint8List frame) =>
       traceItemDumps ? _itemIds(frame) : '${frame.length} B';
+
+  /// One received DIAG frame, compactly: its 8-byte header (mode, com_flag,
+  /// mode_stat, err_no, msg_type, msg_info, msg_rc, compress — no user
+  /// data in it), its size, the ms since the action's send and since the
+  /// previous frame. The header is what SAP GUI's token logic reads
+  /// (SAPfront.dll CSession::OverheadInterpreter: com_flag TERM_EOM/NOP/
+  /// EOC/EOS/GRA release the send token), so a stalled round shows it.
+  void _traceRecv(Uint8List frame) {
+    final n = frame.length < diagHeaderLen ? frame.length : diagHeaderLen;
+    final hex = StringBuffer();
+    for (var i = 0; i < n; i++) {
+      hex.write(frame[i].toRadixString(16).padLeft(2, '0'));
+    }
+    final now = _lastPayloadAt;
+    _trace('recv hdr=$hex ${frame.length}B '
+        '+${now.difference(_actionSentAt).inMilliseconds}ms '
+        '(gap ${now.difference(_prevPayloadAt).inMilliseconds}ms)');
+  }
 
   void _trace(String what) {
     if (!traceEnabled) return;
@@ -1628,15 +1658,37 @@ class SapSession {
   /// sides wait into a timeout. Every turn therefore drives the responder
   /// (chunk receipts, flush answers), exactly as the logon ladder does.
   Future<List<Uint8List>> _act(List<Uint8List> items,
-          {bool controlEvent = false,
-          bool dialectReady = false,
-          bool consumesStaged = false}) =>
-      _exclusive(
-          'action',
-          () => _actLocked(items,
-              controlEvent: controlEvent,
-              dialectReady: dialectReady,
-              consumesStaged: consumesStaged));
+      {bool controlEvent = false,
+      bool dialectReady = false,
+      bool consumesStaged = false}) {
+    // the items carry the step they were built on; an action queued behind
+    // another (Enter pressed while a type-ahead request was out) runs after
+    // the server moved on — re-stamped, or the server drops the stale step
+    // and never answers (live the test system 2026-10-15: `%_SEARCH_OKCODE dwdm` and
+    // `dwdm` both went out at step …77 after the server's …78/…79)
+    final builtOn = ctx.step;
+    return _exclusive(
+        'action',
+        () => _actLocked(
+            ctx.step == builtOn ? items : _restamped(items, ctx.step),
+            controlEvent: controlEvent,
+            dialectReady: dialectReady,
+            consumesStaged: consumesStaged));
+  }
+
+  /// [items] with their step item (16/4/38) set to [step].
+  static List<Uint8List> _restamped(List<Uint8List> items, int step) {
+    final head = stepItem(0).sublist(0, 5);
+    bool isStep(Uint8List it) {
+      if (it.length != head.length + 4) return false;
+      for (var k = 0; k < head.length; k++) {
+        if (it[k] != head[k]) return false;
+      }
+      return true;
+    }
+
+    return [for (final it in items) isStep(it) ? stepItem(step) : it];
+  }
 
   Future<List<Uint8List>> _actLocked(List<Uint8List> items,
       {bool controlEvent = false,
@@ -1720,17 +1772,16 @@ class SapSession {
     _actionStartStep = clockStep;
     _modes.actionCommand = modeCommand;
     final failuresBefore = answerFailures;
+    final typeAhead = _typeAheadRequest(built);
     try {
-      // never on the heels of the server's last frame: an okcode sent 3-4 ms
-      // after the type-ahead's repaint is dropped by the server, which
-      // never answers it (live the test system 2026-10-15: `%_SEARCH_OKCODE se80` /
-      // `sfp`, then the code at +3 ms stuck three times out of three; at
-      // +107 / +274 / +670 ms it ran) — a person's Enter is never that fast
-      final since = DateTime.now().difference(_lastPayloadAt);
-      if (!offlineReplay && since < _actionGap) {
-        await Future<void>.delayed(_actionGap - since);
-      }
-      _trace('action send ${_frameTrace(frame)}');
+      // whether this action follows a type-ahead request's answer (the
+      // Enter queued behind it is re-stamped in [_act], never held)
+      lastActionAfterTypeAhead = _typeAheadAnswered;
+      _typeAheadAnswered = false;
+      _trace('action send '
+          '(${DateTime.now().difference(_lastPayloadAt).inMilliseconds}ms '
+          'after the last server frame) ${_frameTrace(frame)}');
+      _actionSentAt = DateTime.now();
       await _send(frame);
       if (staged != null) _gridStateFlushed();
       final all = <Uint8List>[];
@@ -1812,6 +1863,7 @@ class SapSession {
         _modes.close = null;
         all.addAll(await _settleModeClose(late));
       }
+      _typeAheadAnswered = typeAhead;
       return all;
     } finally {
       // in-flight state never outlives its action, failed or not: a stale
@@ -1950,6 +2002,18 @@ class SapSession {
     if (!owed) return items;
     _trace('[mode] first main-window round after a popup: DISPLAY_SIZE');
     return windowsAfterPopupItems(items, ctx);
+  }
+
+  /// Whether [items] are a type-ahead request round: their typed okcode
+  /// (16/12/4) is `%_SEARCH …` / `%_SEARCH_OKCODE …`.
+  bool _typeAheadRequest(List<Uint8List> items) {
+    for (final raw in items) {
+      for (final it in walkItems(raw).items) {
+        if (!it.isAppl || it.id != 12 || it.sid != 4) continue;
+        if (isTypeAheadRequestOkcode(wireDecode(it.value))) return true;
+      }
+    }
+    return false;
   }
 
   /// The shell a `%_GC <shell> <event>` / `%_GS <shell> <event>` okcode

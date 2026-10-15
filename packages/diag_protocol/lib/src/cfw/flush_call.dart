@@ -91,17 +91,16 @@ const Map<String, int> methodType = {
   'GetWindowsDirectory': 8, 'GetWindowsPlatform': 20, 'GetWindowsVersion': 8,
   'GetWithHeader': 11, 'Grid': 3, 'GridHStep': 5, 'GridHStepUnit': 3,
   'GridModified': 11, 'GridStyle': 3, 'GridVStep': 5, 'GridVStepUnit': 3,
-  // the DOI proxy's "did the document change?" (SFP's pai_layout reads it
-  // into an abap_bool and, on ANY non-initial answer or an rc error, pops
-  // FPUIFB 051 — the 'Impossible de sauvegarder modifications de mise en
-  // forme en mode affich.!' Information modal — every time the user works
-  // in the read-only Designer, live the test system 2026-10-15). A '0' value — the old
-  // VT_BOOL typing — reached that abap_bool AS '0': NOT INITIAL reads as
-  // CHANGED. The blank BSTR is the Windows GUI's false on this wire
-  // (a recorded session gui[2] row 70) and blank is initial
-  // under any conversion: never changed — true here, the model's document
-  // bytes never change.
-  'HasDocumentChanged': 8, 'HasDocumentInterface': 3, 'Headers': 9,
+  // the DOI proxy's "did the document change?" — CL_FP_FB_TEMPLATE_DESIGNER
+  // ->has_changed (read on the test system) pulls ret_value into `DATA return_value
+  // TYPE i VALUE 1` and compares `return_value = 0`: the answer MUST be a
+  // numeric zero, anything else (or a retcode non-zero) reads CHANGED and
+  // SFP's pai_layout pops FPUIFB 051 — the 'Impossible de sauvegarder
+  // modifications de mise en forme en mode affich.!' Information modal —
+  // when the user works in the read-only Designer (live the test system/the test system). So a
+  // plain VT_I4 '0' like its sibling DOI methods: the VT_BOOL '0' reached
+  // the i as 1/failed, and a blank BSTR converts worse.
+  'HasDocumentChanged': 3, 'HasDocumentInterface': 3, 'Headers': 9,
   'HideRows': 3, 'HierarchyHeader': 9, 'INTERIOR': 9, 'Image': 9,
   'InitControl': 3, 'InitViewers': 8, 'InsertEx': 9, 'InsertHierarchy': 9,
   'InsertRange': 3, 'Interior': 9, 'IsFolder': 11, 'IsScriptingActive': 20,
