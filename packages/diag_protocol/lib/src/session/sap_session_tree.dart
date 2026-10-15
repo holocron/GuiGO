@@ -210,6 +210,22 @@ extension SapSessionTree on SapSession {
     return c;
   }
 
+  /// The heading of tree [shell]'s header strip — a tree with NO item
+  /// column whose header the server switched on (`WithHeader(1)`: the
+  /// CL_GUI_COLUMN_TREE trees of GFW_DEMO_HIER3, hierarchy item `HD`, the
+  /// real GUI's blank grey strip over each: a recorded session
+  /// srv[28] verb 111, the heading re-put '' at srv[29] verb 20) — else
+  /// null (a column tree draws its header row itself, [treeColumns]; a
+  /// simple tree has none).
+  String? treeHeaderStrip(String shell) {
+    final f = _treeColumnsOf[_w];
+    if (f == null) return null;
+    final c = f[shell] ?? f[_ea.shellAlias[shell] ?? ''];
+    if (c == null || !c.isEmpty) return null;
+    if (!c.withHeaderDeclared || !c.withHeader) return null;
+    return c.hierarchy.heading.trim();
+  }
+
   /// The tree a column declaration / HeaderNames assignment addresses by
   /// [token]: a tree shell, the shell a handle the session minted stands
   /// for — else (a handle the session never minted: a replayed recording
@@ -305,14 +321,70 @@ extension SapSessionTree on SapSession {
     if (answerDialect != GuiDialect.windows) return const [];
     if (!call.verbs.any(_treeFillVerbs.contains)) return const [];
     final cachedAll = _canvasState.tracker.cachedProps;
+    final puts = _topNodePutsOf(call);
     final out = <ControlReport>[];
-    for (final sh in trees.keys) {
+    for (final sh in {...trees.keys, ...puts.keys}) {
       if (call.cachedProps.contains((sh, topNodeKeyProp))) continue;
       if (!(cachedAll[sh]?.contains(topNodeKeyProp) ?? false)) continue;
-      final d = _treeTopNodeDelta(sh);
+      final put = puts[sh];
+      final d = put != null
+          ? (topNodeKeyProp, put)
+          : _treeTopNodeDelta(sh);
       if (d == null) continue;
       _ctxMenu.tracker.noteFlushed(sh, [d]);
       out.add(ControlReport(sh, props: [d]));
+    }
+    return out;
+  }
+
+  /// The trees [call] scrolls itself — a `TopNodeKey(=<key>)` property put
+  /// on the tree, in the queue that fills it (CL_TREE_CONTROL_BASE
+  /// set_top_node: GFW_DEMO_HIER3's trees, a recorded session
+  /// srv[29] verb 49 `TopNodeKey(=N1)` on 137, srv[30] / srv[31] verb 40
+  /// on 141 / 146) -> the key. The OCX reports it back in that very
+  /// answer as the changed cached prop (g[22] 137 `N1`, g[23] 141 `N1`,
+  /// g[24] 146 `N1`) and the view shows it first ([noteTreeTopNode]). The
+  /// tree is the put's object: its shell, the handle's alias, else the tree
+  /// the call fills through that handle ([_treeFilledBy]) — never a guess
+  /// among the screen's trees (the push binding of HIER3 is folded with
+  /// the frame, after this answer).
+  Map<String, String> _topNodePutsOf(FlushCall call) {
+    if (!call.verbs.contains(topNodeKeyProp)) return const {};
+    final meta = verbMeta(call);
+    final kinds = _layoutState.registry.kinds();
+    final created = <String, String>{
+      for (var i = 1; i <= call.verbs.length && i <= meta.length; i++)
+        if (call.verbs[i - 1].startsWith('CreateControl') &&
+            (meta[i - 1].result?.trim() ?? '').isNotEmpty)
+          meta[i - 1].result!.trim(): (verbNamedArgs(call, i)['#1'] ?? '')
+              .trim(),
+    };
+    final out = <String, String>{};
+    for (var i = 1; i <= call.verbs.length && i <= meta.length; i++) {
+      if (call.verbs[i - 1] != topNodeKeyProp) continue;
+      final m = meta[i - 1];
+      if ((m.result?.trim() ?? '').isNotEmpty) continue; // a read
+      String? value;
+      for (final (n, v) in verbArgs(call, i)) {
+        if (n.trim().startsWith('_')) continue;
+        value = v;
+        break;
+      }
+      if (value == null || value.trim().isEmpty) continue;
+      final tok = m.objValue.trim();
+      String? sh;
+      if (tok.isEmpty) {
+        sh = created[m.obj.trim()];
+      } else if (kinds[tok] == 'tree') {
+        sh = tok;
+      } else if (_ea.shellAlias[tok] case final a?
+          when kinds[a] == 'tree') {
+        sh = a;
+      }
+      sh ??= _treeFilledBy(call, tok);
+      if (sh == null || sh.isEmpty) continue;
+      out[sh] = value;
+      noteTreeTopNode(sh, value);
     }
     return out;
   }
@@ -358,7 +430,8 @@ extension SapSessionTree on SapSession {
         call.cachedProps.isNotEmpty &&
         call.verbs.any(_treeFillVerbs.contains)) {
       final cachedAll = _canvasState.tracker.cachedProps;
-      for (final sh in trees.keys) {
+      final puts = _topNodePutsOf(call);
+      for (final sh in {...trees.keys, ...puts.keys}) {
         final here = call.cachedProps.contains((sh, topNodeKeyProp));
         if (!here && !(cachedAll[sh]?.contains(topNodeKeyProp) ?? false)) {
           continue;
@@ -369,10 +442,13 @@ extension SapSessionTree on SapSession {
         // TopNodeKey HDEFAULTS, the server's selection, and its next event
         // the first node FORMNAME (gui[12]); else the first node
         final sel = _selectionPutOf(call, sh);
-        final top = sel ?? _treeTopNodeKey(sh);
+        final top = puts[sh] ?? sel ?? _treeTopNodeKey(sh);
         if (top == null || top.trim().isEmpty) continue;
+        // (the server's own put is reported back whatever it held: the
+        // tracker took the put for the server's value)
         if (!here) {
-          if (_ctxMenu.tracker.changed(sh, [(topNodeKeyProp, top)]).isEmpty) {
+          if (!puts.containsKey(sh) &&
+              _ctxMenu.tracker.changed(sh, [(topNodeKeyProp, top)]).isEmpty) {
             continue;
           }
           call.cachedProps.add((sh, topNodeKeyProp));

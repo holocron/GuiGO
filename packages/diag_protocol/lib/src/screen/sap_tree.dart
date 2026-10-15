@@ -53,9 +53,22 @@ DpTable? decodeNamedDpTable(Uint8List seg) {
   final lengths = [for (final c in cols) c.length];
   final types = [for (final c in cols) c.type];
   final (_, (dw, dn), dcells) = dpColumnCells(seg, 'DATAASC');
-  final data = _join(dcells);
+  var data = _join(dcells);
   if (dw <= 0 || dn <= 0) {
     return DpTable(table, names, const [], lengths: lengths, types: types);
+  }
+  // one `03 04` cell per row, its trailing blanks cut (the rows ran
+  // together joined): each padded back to the record width
+  if (data.length < dw * dn &&
+      dcells.length == dn &&
+      dcells.every((c) => c.length <= dw)) {
+    final b = BytesBuilder(copy: false);
+    for (final c in dcells) {
+      b
+        ..add(c)
+        ..add(Uint8List(dw - c.length)..fillRange(0, dw - c.length, 0x20));
+    }
+    data = b.toBytes();
   }
   final rows = <Map<String, String>>[];
   for (var r = 0; r < dn && (r + 1) * dw <= data.length; r++) {

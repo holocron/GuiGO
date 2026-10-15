@@ -1,7 +1,9 @@
 /// A minimal .xlsx writer: one worksheet per [Worksheet], numbers as
 /// numbers, booleans as booleans, everything else through the shared
 /// string table; formulas with their cached value; column widths; merged
-/// cells. The package has the parts Excel, Numbers and LibreOffice expect
+/// cells; a chart sheet per [Worksheet.chart] (its drawing and a
+/// clustered column chart whose series reference the data cells, with
+/// their cached values). The package has the parts Excel, Numbers and LibreOffice expect
 /// (content types, relationships, workbook, styles, shared strings, core
 /// properties).
 library;
@@ -26,8 +28,19 @@ Uint8List writeXlsx(Workbook book) {
   int sst(String s) =>
       stringIndex.putIfAbsent(s, () => (strings..add(s)).length - 1);
 
+  // each sheet's part: a worksheet, or a chart sheet + drawing + chart
+  final parts = <String>[];
+  var wsN = 0, csN = 0;
+  for (final sh in sheets) {
+    parts.add(
+      sh.isChart
+          ? 'chartsheets/sheet${++csN}.xml'
+          : 'worksheets/sheet${++wsN}.xml',
+    );
+  }
+
   final zip = ZipWriter();
-  zip.addText('[Content_Types].xml', _contentTypes(sheets.length));
+  zip.addText('[Content_Types].xml', _contentTypes(parts));
   zip.addText(
     '_rels/.rels',
     '$_xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
@@ -60,8 +73,9 @@ Uint8List writeXlsx(Workbook book) {
     '$_xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
   );
   for (var i = 0; i < sheets.length; i++) {
+    final kind = sheets[i].isChart ? 'chartsheet' : 'worksheet';
     wbRels.write(
-      '<Relationship Id="rId${i + 1}" Type="$_nsRel/worksheet" Target="worksheets/sheet${i + 1}.xml"/>',
+      '<Relationship Id="rId${i + 1}" Type="$_nsRel/$kind" Target="${parts[i]}"/>',
     );
   }
   final n = sheets.length;
@@ -73,10 +87,26 @@ Uint8List writeXlsx(Workbook book) {
   zip.addText('xl/_rels/workbook.xml.rels', wbRels.toString());
 
   for (var i = 0; i < sheets.length; i++) {
+    final chart = sheets[i].chart;
+    if (chart == null) {
+      zip.addText(
+        'xl/${parts[i]}',
+        _sheetXml(sheets[i], sst, selected: i == active),
+      );
+      continue;
+    }
+    final k = _partNumber(parts[i]);
+    zip.addText('xl/${parts[i]}', _chartSheetXml(selected: i == active));
     zip.addText(
-      'xl/worksheets/sheet${i + 1}.xml',
-      _sheetXml(sheets[i], sst, selected: i == active),
+      'xl/chartsheets/_rels/sheet$k.xml.rels',
+      _rels('$_nsRel/drawing', '../drawings/drawing$k.xml'),
     );
+    zip.addText('xl/drawings/drawing$k.xml', _drawingXml);
+    zip.addText(
+      'xl/drawings/_rels/drawing$k.xml.rels',
+      _rels('$_nsRel/chart', '../charts/chart$k.xml'),
+    );
+    zip.addText('xl/charts/chart$k.xml', _chartXml(chart));
   }
 
   final ss = StringBuffer(
@@ -94,16 +124,26 @@ Uint8List writeXlsx(Workbook book) {
   return zip.finish();
 }
 
-String _contentTypes(int sheets) {
+String _contentTypes(List<String> parts) {
+  const ml = 'application/vnd.openxmlformats-officedocument';
   final b = StringBuffer(
     '$_xmlHead<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
     '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
     '<Default Extension="xml" ContentType="application/xml"/>'
     '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>',
   );
-  for (var i = 1; i <= sheets; i++) {
+  for (final p in parts) {
+    if (p.startsWith('worksheets/')) {
+      b.write(
+        '<Override PartName="/xl/$p" ContentType="$ml.spreadsheetml.worksheet+xml"/>',
+      );
+      continue;
+    }
+    final k = _partNumber(p);
     b.write(
-      '<Override PartName="/xl/worksheets/sheet$i.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>',
+      '<Override PartName="/xl/$p" ContentType="$ml.spreadsheetml.chartsheet+xml"/>'
+      '<Override PartName="/xl/drawings/drawing$k.xml" ContentType="$ml.drawing+xml"/>'
+      '<Override PartName="/xl/charts/chart$k.xml" ContentType="$ml.drawingml.chart+xml"/>',
     );
   }
   b.write(
@@ -112,6 +152,126 @@ String _contentTypes(int sheets) {
     '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
     '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>'
     '</Types>',
+  );
+  return b.toString();
+}
+
+/// The `N` of a `…/sheetN.xml` part.
+int _partNumber(String part) =>
+    int.parse(RegExp(r'(\d+)\.xml$').firstMatch(part)!.group(1)!);
+
+/// A part's relationships: the one [target] of [type], `rId1`.
+String _rels(String type, String target) =>
+    '$_xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    '<Relationship Id="rId1" Type="$type" Target="$target"/>'
+    '</Relationships>';
+
+const _nsDrawing = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+const _nsChart = 'http://schemas.openxmlformats.org/drawingml/2006/chart';
+
+/// A chart sheet: zoomed to the window, its drawing `rId1`.
+String _chartSheetXml({required bool selected}) =>
+    '$_xmlHead<chartsheet xmlns="$_nsMain" xmlns:r="$_nsRel">'
+    '<sheetViews><sheetView${selected ? ' tabSelected="1"' : ''} zoomToFit="1" workbookViewId="0"/></sheetViews>'
+    '<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>'
+    '<drawing r:id="rId1"/></chartsheet>';
+
+/// A chart sheet's drawing: the chart `rId1` filling the sheet.
+const _drawingXml =
+    '$_xmlHead<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="$_nsDrawing">'
+    '<xdr:absoluteAnchor><xdr:pos x="0" y="0"/><xdr:ext cx="9294091" cy="6067425"/>'
+    '<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Chart 1"/>'
+    '<xdr:cNvGraphicFramePr><a:graphicFrameLocks noGrp="1"/></xdr:cNvGraphicFramePr></xdr:nvGraphicFramePr>'
+    '<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>'
+    '<a:graphic><a:graphicData uri="$_nsChart">'
+    '<c:chart xmlns:c="$_nsChart" xmlns:r="$_nsRel" r:id="rId1"/>'
+    '</a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:absoluteAnchor></xdr:wsDr>';
+
+/// Office's chart accent colours, a series each.
+const _seriesColors = [
+  '4472C4',
+  'ED7D31',
+  'A5A5A5',
+  'FFC000',
+  '5B9BD5',
+  '70AD47',
+];
+
+String _fill(String rgb) =>
+    '<a:solidFill><a:srgbClr val="$rgb"/></a:solidFill>';
+
+String _line(String rgb) =>
+    '<c:spPr><a:ln w="9525">${_fill(rgb)}</a:ln></c:spPr>';
+
+/// [chart] as DrawingML: a clustered column chart, each series' name /
+/// categories / values as references (when known) with their cached
+/// values, a category and a value axis, the legend on the right.
+String _chartXml(SheetChart chart) {
+  final b = StringBuffer(
+    '$_xmlHead<c:chartSpace xmlns:c="$_nsChart" xmlns:a="$_nsDrawing" xmlns:r="$_nsRel">'
+    '<c:roundedCorners val="0"/><c:chart><c:autoTitleDeleted val="1"/>'
+    '<c:plotArea><c:layout/><c:barChart><c:barDir val="col"/>'
+    '<c:grouping val="clustered"/><c:varyColors val="0"/>',
+  );
+  void strData(String? ref, List<String> values) {
+    final cache = StringBuffer('<c:ptCount val="${values.length}"/>');
+    for (final (i, v) in values.indexed) {
+      cache.write('<c:pt idx="$i"><c:v>${xmlEscape(v)}</c:v></c:pt>');
+    }
+    b.write(
+      ref == null
+          ? '<c:strLit>$cache</c:strLit>'
+          : '<c:strRef><c:f>${xmlEscape(ref)}</c:f><c:strCache>$cache</c:strCache></c:strRef>',
+    );
+  }
+
+  for (final (i, s) in chart.series.indexed) {
+    b.write('<c:ser><c:idx val="$i"/><c:order val="$i"/>');
+    if (s.nameRef == null) {
+      b.write('<c:tx><c:v>${xmlEscape(s.name)}</c:v></c:tx>');
+    } else {
+      b.write('<c:tx>');
+      strData(s.nameRef, [s.name]);
+      b.write('</c:tx>');
+    }
+    // explicit fills: the package has no theme to take automatic ones from
+    b.write(
+      '<c:spPr>${_fill(_seriesColors[i % _seriesColors.length])}</c:spPr>'
+      '<c:invertIfNegative val="0"/><c:cat>',
+    );
+    strData(s.categoriesRef, s.categories);
+    b.write('</c:cat><c:val>');
+    final cache = StringBuffer(
+      '<c:formatCode>General</c:formatCode><c:ptCount val="${s.values.length}"/>',
+    );
+    for (final (k, v) in s.values.indexed) {
+      if (v == null || !v.isFinite) continue;
+      cache.write('<c:pt idx="$k"><c:v>${_num(v)}</c:v></c:pt>');
+    }
+    b.write(
+      s.valuesRef == null
+          ? '<c:numLit>$cache</c:numLit>'
+          : '<c:numRef><c:f>${xmlEscape(s.valuesRef!)}</c:f><c:numCache>$cache</c:numCache></c:numRef>',
+    );
+    b.write('</c:val></c:ser>');
+  }
+  b.write(
+    '<c:gapWidth val="${chart.gapWidth.clamp(0, 500)}"/>'
+    '<c:overlap val="${chart.overlap.clamp(-100, 100)}"/>'
+    '<c:axId val="1"/><c:axId val="2"/></c:barChart>'
+    '<c:catAx><c:axId val="1"/><c:scaling><c:orientation val="minMax"/></c:scaling>'
+    '<c:delete val="0"/><c:axPos val="b"/><c:numFmt formatCode="General" sourceLinked="1"/>'
+    '<c:majorTickMark val="out"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>'
+    '${_line('BFBFBF')}<c:crossAx val="2"/><c:crosses val="autoZero"/><c:auto val="1"/>'
+    '<c:lblAlgn val="ctr"/><c:lblOffset val="100"/><c:noMultiLvlLbl val="0"/></c:catAx>'
+    '<c:valAx><c:axId val="2"/><c:scaling><c:orientation val="minMax"/></c:scaling>'
+    '<c:delete val="0"/><c:axPos val="l"/>'
+    '<c:majorGridlines>${_line('D9D9D9')}</c:majorGridlines>'
+    '<c:numFmt formatCode="General" sourceLinked="1"/><c:majorTickMark val="out"/>'
+    '<c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/><c:crossAx val="1"/>'
+    '<c:crosses val="autoZero"/><c:crossBetween val="between"/></c:valAx>'
+    '</c:plotArea><c:legend><c:legendPos val="r"/><c:overlay val="0"/></c:legend>'
+    '<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/></c:chart></c:chartSpace>',
   );
   return b.toString();
 }

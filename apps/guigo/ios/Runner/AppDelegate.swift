@@ -140,6 +140,12 @@ final class SsoBrowserController: UIViewController, WKNavigationDelegate, WKUIDe
     title = host
     let config = WKWebViewConfiguration()
     config.websiteDataStore = .nonPersistent()
+    // identify as Mobile Safari: WKWebView's own user agent carries no
+    // `Version/… Safari/…` token, and Web Dynpro ABAP's browser check
+    // refuses it — "Impossible de traiter le message E WEBDYNPRO_RT 015"
+    // (This browser is not supported) on a Web Dynpro test launch
+    let ios = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+    config.applicationNameForUserAgent = "Version/\(ios).0 Mobile/15E148 Safari/604.1"
     let web = WKWebView(frame: view.bounds, configuration: config)
     web.autoresizingMask = [.flexibleWidth, .flexibleHeight]
     web.navigationDelegate = self

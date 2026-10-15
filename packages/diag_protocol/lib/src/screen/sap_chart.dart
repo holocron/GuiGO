@@ -29,6 +29,8 @@ import 'dart:typed_data';
 
 import '../cfw/dp_cache.dart';
 import '../cfw/flush_call.dart';
+import 'sap_barchart.dart' show isBarChartClass;
+import 'sap_gfw_chart.dart';
 
 /// One data series of a chart.
 class SapChartSeries {
@@ -36,8 +38,15 @@ class SapChartSeries {
     required this.label,
     List<double?>? values,
     List<String>? keys,
+    List<double?>? xs,
+    List<String>? pointLabels,
+    this.color,
+    this.style,
+    this.gfw,
   }) : values = values ?? [],
-       keys = keys ?? [];
+       keys = keys ?? [],
+       xs = xs ?? [],
+       pointLabels = pointLabels ?? [];
 
   /// The series label (`Mémoire occupée (Go)`).
   String label;
@@ -48,6 +57,28 @@ class SapChartSeries {
   /// Each point's x / time key (`20231223`), parallel to [values]; for a
   /// `<SimpleChartData>` document the category of the point.
   List<String> keys;
+
+  /// An xy chart's x value per point, parallel to [values] (a GFW scatter /
+  /// milestone trend / time axis: a number, or a time in days since
+  /// 1970-01-01 when [SapChartModel.xTime]); empty for a category chart.
+  List<double?> xs;
+
+  /// Each point's own text (a GFW data container object's TEXT), parallel
+  /// to [values]; empty when the wire carries none.
+  List<String> pointLabels;
+
+  /// The series' colour as the customizing names it: a GFW palette id
+  /// (CL_CU_DISPLAY_CONTEXT *_CLR_PLT_ID — 3 blue, 5 green, 7 red, …);
+  /// null = the chart's automatic colour.
+  int? color;
+
+  /// The GFW values style (CL_CU_VALUES=>CO_STYLE) the series is drawn in;
+  /// null outside the GFW chart.
+  int? style;
+
+  /// The GFW series' customizing (colours, markers, point overrides, a
+  /// histogram's density); null outside the GFW chart.
+  GfwSeriesLook? gfw;
 
   @override
   String toString() => 'SapChartSeries($label: ${values.length} points)';
@@ -62,8 +93,15 @@ class SapChartModel {
     this.title = '',
     List<String>? categories,
     List<SapChartSeries>? series,
+    this.xAxisTitle = '',
+    this.yAxisTitle = '',
+    this.xTime = false,
+    this.yTime = false,
+    Set<int>? events,
+    this.gfw,
   }) : categories = categories ?? [],
-       series = series ?? [];
+       series = series ?? [],
+       events = events ?? {};
 
   /// The chart control's kernel shell id (`264`).
   String shell;
@@ -86,6 +124,24 @@ class SapChartModel {
   List<String> categories;
 
   List<SapChartSeries> series;
+
+  /// The axis titles (a GFW axis bundle's CO_TITLE); '' when none.
+  String xAxisTitle, yAxisTitle;
+
+  /// An xy chart's x values are times (days since 1970-01-01, the series'
+  /// [SapChartSeries.xs]); the y values are times ([SapChartSeries.values]:
+  /// a GFW milestone trend analysis plots dates on both axes).
+  bool xTime, yTime;
+
+  /// The control events the server registered on the chart
+  /// (`RegisterEvent(<chart>, id)`: the GFW chart's 13 value changed /
+  /// 14 label changed / 6 custom changed / 12 selected / 16 double click).
+  /// None of them is a plain click the view fires.
+  Set<int> events;
+
+  /// The GFW chart's customizing (title font, value ranges, scales, data
+  /// table, …); null outside the GFW chart.
+  GfwChartLook? gfw;
 
   @override
   String toString() =>
@@ -248,7 +304,16 @@ SapChartCustomizing? parseChartCustomizingXml(String xml) {
 const String _dataRole = 'XmlData';
 const String _customizingRole = 'XmlCustomizing';
 
-bool _isChartClass(String cls) => cls.toLowerCase().contains('chart');
+/// A chart control class: the Chart Engine's, the GFW business graphic's
+/// Graphitti chart / Java CHTChart — not the GFW chart ADAPTER, whose Java
+/// bean class (`com.sap.components.controls.chart.Adapter`) also says
+/// chart — and not the SAPbarc.OCX bar chart (`SAPGUI.BarchartGraphics.1`,
+/// GRAL BARCOCX1: a Gantt chart fed by its own sapbarc-stream,
+/// sap_barchart.dart; claimed here it drew "(no chart data)").
+bool _isChartClass(String cls) =>
+    cls.toLowerCase().contains('chart') &&
+    !isGfwAdapterClass(cls) &&
+    !isBarChartClass(cls);
 
 final RegExp _digits = RegExp(r'^\d+$');
 
@@ -272,8 +337,29 @@ class SapChartTracker {
   final Map<String, SapChartData> _data = {};
   final Map<String, SapChartCustomizing> _custom = {};
 
+  /// GFW chart adapter shell -> the chart shell it feeds (the chart its
+  /// CL_GFW_GP_PRES_CHART constructor created just before it in the same
+  /// parent; its `LoadURL(<chart handle>)` when that resolves)
+  final Map<String, String> adapterOf = {};
+
+  /// GFW adapter shells in creation order
+  final List<String> adapterShells = [];
+
+  /// chart shell -> the event ids `RegisterEvent` registered on it
+  final Map<String, Set<int>> eventsOf = {};
+
+  /// chart shell -> the language its adapter's SetLanguage named
+  final Map<String, String> languageOf = {};
+
+  /// chart shell -> its GFW pushes (DATA / CUSTDATA / labels)
+  final Map<String, GfwChartState> _gfw = {};
+
   /// Shells with a data push so far.
-  Iterable<String> get shells => _data.keys;
+  Iterable<String> get shells => {
+    ..._data.keys,
+    for (final e in _gfw.entries)
+      if (e.value.rows != null) e.key,
+  };
 
   /// The dynpro container name hosting [shell]: the nearest ancestor (or
   /// the shell itself) a `LinkContainer` named.
@@ -291,6 +377,29 @@ class SapChartTracker {
 
   /// The chart as last pushed to [shell], null when it has no data yet.
   SapChartModel? build(String shell) {
+    final g = _gfw[shell];
+    if (g != null && g.rows != null) {
+      return buildGfwChart(
+        shell: shell,
+        container: containerOf(shell),
+        rows: [
+          for (final r in g.rows!)
+            GfwDataRow(
+              curef: r.curef,
+              grpid: r.grpid,
+              xval: r.xval,
+              yval: r.yval,
+              objid: r.objid,
+              label: r.label,
+            ),
+        ],
+        customizing: g.customizing,
+        xLabels: g.xLabels,
+        yLabels: g.yLabels,
+        events: {...?eventsOf[shell]},
+        language: languageOf[shell] ?? '',
+      );
+    }
     final d = _data[shell];
     if (d == null) return null;
     final c = _custom[shell];
@@ -308,6 +417,7 @@ class SapChartTracker {
             keys: List.of(s.keys),
           ),
       ],
+      events: {...?eventsOf[shell]},
     );
   }
 
@@ -324,19 +434,54 @@ class SapChartTracker {
     FlushCall? parsed,
   }) {
     final call = parsed ?? parseFlushCall(rfc);
-    _recordControls(call);
     final bindings = [
       for (final b in dpPushBindings(call))
-        if (b.role == _dataRole || b.role == _customizingRole) b,
+        if (b.role == _dataRole ||
+            b.role == _customizingRole ||
+            gfwAdapterRoles.contains(b.role))
+          b,
+    ];
+    if (bindings.isEmpty) {
+      _recordControls(call, shellOf);
+      return const {};
+    }
+    final cache = DpCache()..ingestValue(rfc);
+    return foldParsed(call, cache.byUrl, shellOf: shellOf, isLive: isLive);
+  }
+
+  /// [foldCall] over an already parsed call whose DataProvider pushes are
+  /// [pushes] (url -> segment).
+  Set<String> foldParsed(
+    FlushCall call,
+    Map<String, Uint8List> pushes, {
+    String? Function(String owner)? shellOf,
+    bool Function(String shell)? isLive,
+  }) {
+    _recordControls(call, shellOf);
+    final bindings = [
+      for (final b in dpPushBindings(call))
+        if (b.role == _dataRole ||
+            b.role == _customizingRole ||
+            gfwAdapterRoles.contains(b.role))
+          b,
     ];
     if (bindings.isEmpty) return const {};
-    final cache = DpCache()..ingestValue(rfc);
     final touched = <String>{};
     for (final b in bindings) {
+      if (gfwAdapterRoles.contains(b.role)) {
+        final shell = _gfwChartOf(b, shellOf, isLive);
+        if (shell == null) continue;
+        for (final u in b.urls) {
+          final seg = pushes[u];
+          if (seg == null) continue;
+          if (_foldGfw(shell, b.role!, seg)) touched.add(shell);
+        }
+        continue;
+      }
       final shell = _chartOf(b, shellOf, isLive);
       if (shell == null) continue;
       for (final u in b.urls) {
-        final seg = cache.byUrl[u];
+        final seg = pushes[u];
         if (seg == null) continue;
         final xml = _documentOf(seg);
         if (xml == null) continue;
@@ -355,7 +500,10 @@ class SapChartTracker {
     return touched;
   }
 
-  void _recordControls(FlushCall call) {
+  void _recordControls(
+    FlushCall call, [
+    String? Function(String owner)? shellOf,
+  ]) {
     for (var i = 1; i <= call.verbs.length; i++) {
       final verb = call.verbs[i - 1];
       if (verb.startsWith('CreateControl')) {
@@ -372,7 +520,23 @@ class SapChartTracker {
         }
         linkedName.remove(shell); // a reused shell id is a new control
         chartShells.remove(shell);
-        if (_isChartClass(cls)) chartShells.add(shell);
+        adapterShells.remove(shell);
+        adapterOf.remove(shell);
+        eventsOf.remove(shell);
+        _gfw.remove(shell);
+        if (isGfwAdapterClass(cls)) {
+          // CL_GFW_GP_PRES_CHART->CONSTRUCTOR: the chart, then its adapter
+          // in the same parent
+          adapterShells.add(shell);
+          for (final c in chartShells.reversed) {
+            if (parentOf[c] == parentOf[shell]) {
+              adapterOf[shell] = c;
+              break;
+            }
+          }
+        } else if (_isChartClass(cls)) {
+          chartShells.add(shell);
+        }
       } else if (verb == 'LinkContainer') {
         final a = verbNamedArgs(call, i);
         final shell = (a['#1'] ?? '').trim();
@@ -380,8 +544,76 @@ class SapChartTracker {
         if (_digits.hasMatch(shell) && name.isNotEmpty) {
           linkedName[shell] = name;
         }
+      } else if (verb == 'SetLanguage' && adapterShells.isNotEmpty) {
+        // adapter SetLanguage(sy-langu): the month names of a time axis
+        final lang = (verbNamedArgs(call, i)['#1'] ?? '').trim();
+        final own = shellOf?.call(verbMeta(call)[i - 1].objValue.trim());
+        final chart =
+            adapterOf[own ?? ''] ?? adapterOf[adapterShells.last];
+        if (chart != null && lang.isNotEmpty) languageOf[chart] = lang;
+      } else if (verb == 'LoadURL' && shellOf != null) {
+        // adapter LoadURL(<the chart's h_control-obj>): both handles the
+        // client minted, resolved through the alias map
+        final adapter = shellOf(verbMeta(call)[i - 1].objValue.trim());
+        final chart = shellOf((verbNamedArgs(call, i)['#1'] ?? '').trim());
+        if (adapter != null &&
+            chart != null &&
+            adapterShells.contains(adapter) &&
+            _isChart(chart)) {
+          adapterOf[adapter] = chart;
+        }
       }
     }
+    for (final (shell, id) in call.registeredEvents) {
+      if (_isChart(shell)) (eventsOf[shell] ??= {}).add(id);
+    }
+  }
+
+  /// The chart shell a GFW adapter push feeds: its owner handle's adapter
+  /// (through the alias map, else taken as a shell), else — a replayed
+  /// recording keeps the recording client's handles — the newest live
+  /// adapter's chart.
+  String? _gfwChartOf(
+    DpPushBinding b,
+    String? Function(String owner)? shellOf,
+    bool Function(String shell)? isLive,
+  ) {
+    final owner = b.owner?.trim() ?? '';
+    for (final c in [
+      b.shell?.trim(),
+      if (owner.isNotEmpty) ...[shellOf?.call(owner), owner],
+    ]) {
+      if (c == null) continue;
+      final chart = adapterOf[c];
+      if (chart != null) return chart;
+      if (_isChart(c)) return c;
+    }
+    for (final a in adapterShells.reversed) {
+      final chart = adapterOf[a];
+      if (chart != null && (isLive?.call(a) ?? true)) return chart;
+    }
+    return null;
+  }
+
+  /// Fold one GFW adapter push of [role] into [shell]'s chart; whether it
+  /// changed what the chart draws.
+  bool _foldGfw(String shell, String role, Uint8List seg) {
+    final g = _gfw[shell] ??= GfwChartState();
+    switch (role) {
+      case gfwData:
+        g.rows = parseGfwData(seg);
+      case gfwUpdateData:
+        g.applyUpdate(parseGfwUpdate(seg));
+      case gfwCustData:
+        g.customizing = parseGfwCustomizing(seg);
+      case gfwXLabel:
+        g.xLabels = parseGfwLabels(seg);
+      case gfwYLabel:
+        g.yLabels = parseGfwLabels(seg);
+      default:
+        return false;
+    }
+    return g.rows != null;
   }
 
   bool _isChart(String? shell) =>

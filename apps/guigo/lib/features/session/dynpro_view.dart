@@ -1773,10 +1773,24 @@ class _DynproViewState extends State<DynproView> {
           m.netPlans.isNotEmpty) {
         return const SizedBox.shrink();
       }
-      return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 16),
+      // an inline GRAPH item whose graph is not whole yet (its
+      // continuation not received) or holds no node: say so, not "nothing";
+      // only a NETZ stream is a network graph — a classic business /
+      // statistics graphic (BUSG / STAT) gets a neutral slot of its own
+      final graph = m.inlineGraph;
+      final network = graph?.kind == InlineGraphKind.network;
+      final what = network ? 'network graph' : 'classic graphic';
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 16),
         child: Text(
-          '(nothing painted on this screen)',
+          graph == null
+              ? '(nothing painted on this screen)'
+              : !graph.complete
+                  ? '($what incomplete: ${graph.length} bytes received)'
+                  : network
+                      ? '(network graph without nodes)'
+                      : '(classic graphic ${graph.interface ?? ''})'
+                          .replaceFirst(' )', ')'),
           textAlign: TextAlign.center,
         ),
       );

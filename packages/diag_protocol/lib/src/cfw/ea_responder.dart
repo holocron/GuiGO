@@ -10,15 +10,20 @@ import '../codepages.dart';
 import '../framing/diag_frame.dart';
 import '../framing/envelope.dart';
 import '../lzh/lzh.dart';
+import '../screen/sap_barchart.dart' show barChartCuaCodeAnswer;
 import '../screen/sap_calendar.dart'
     show calendarHeldInterval, calendarIntervalAnswer;
 import '../session/gui_profile.dart' show metricsElement;
-import 'browser_launch.dart' show shellExecuteAnswer, shellExecuteVerbs;
+import 'browser_launch.dart'
+    show shellExecuteAnswer, shellExecuteVerbs, verbArgText;
 import 'datamanager_grammar.dart';
 import 'dp_cache.dart';
 import 'dragdrop_service.dart';
 import 'flush_call.dart';
 import 'frontend_features.dart';
+import 'frontend_files.dart';
+import 'frontend_registry.dart'
+    show infoCtrlPathAnswer, registryReadAnswer, registryReadVerbs;
 import 'frontend_rfc.dart';
 import 'reply_container.dart';
 import 'stream_paint.dart';
@@ -83,6 +88,11 @@ class EaSession {
     return eventParams[shell.trim()]?[n];
   }
   final Map<String, String> shellAlias = {}; // server shell <-> reference client mint
+
+  /// The files the server had this frontend write / open
+  /// (frontend_files.dart: SecureSaveDataToUrl to `file://`, DeleteFile,
+  /// ShellExecute).
+  final FrontendFileStore frontendFiles = FrontendFileStore();
   final DpCache dpCache =
       DpCache(maxEntries: dpCacheMaxEntries, maxBytes: dpCacheMaxBytes);
   final Map<String, DpPushBinding> dpUrlOwner = {}; // url -> binding
@@ -505,6 +515,8 @@ MintResult mintObjectHandles(
     final vr = int.parse(s) - 1;
     if (vr < 0 || vr >= call.vars.length) continue;
     if ((typesByVarsrow[vr] ?? 9) != 9) continue;
+    // a null reference (`O-1`) consumes no handle (bds_cold_cache gui[21])
+    if (call.nullObjectRows.contains(vr)) continue;
     final oid = p.objid.trim();
     var verb = '';
     var oidNum = -1;
@@ -694,6 +706,20 @@ List<Uint8List>? buildAnswer(
   String? svarsXml,
   Uint8List? exportXml,
 }) {
+  // an Office application's own automation (CreateObject('Word.Document'),
+  // the ALV form letter's MS_WORD_OLE_FORMLETTER): refused, the whole
+  // queue, with SAPLOLEA's error envelope — the real GUI's answer to a
+  // ProgID it cannot create (a recorded session gui[13]); the ABAP gets
+  // sy-subrc 2, never a handle to a Word that is not there
+  // (frontend_files.dart)
+  if (refusedAutomationVerb(call) != null) {
+    return [
+      _stepItem(session.step),
+      buildApplItem(8, 1,
+          buildFrontendExceptionReply(exception: oleCallMethodFailed)),
+      eomBytes,
+    ];
+  }
   // a pending CFW drop: the SAPGUIService.DragDrop.1 poll reads it back
   final dropAnswers = dragDropAnswers(session, call);
   if (dropAnswers.isNotEmpty) propStore = {...propStore, ...dropAnswers};
@@ -823,7 +849,13 @@ List<Uint8List>? buildAnswer(
       final kind = call.vars[vr].type;
       final vb = verbByVarsrow[vr];
       String value;
-      if (propStore.containsKey(vr) && kind != 'O') {
+      if (call.nullObjectRows.contains(vr)) {
+        // the null object reference: kind 'O', handle text -1 — the real
+        // GUI's GetDocumentProxyInterface of a document it could not open
+        // (a recorded session gui[21] row 20)
+        outKinds[vr] = 'O';
+        value = '-1';
+      } else if (propStore.containsKey(vr) && kind != 'O') {
         value = String.fromCharCodes(propStore[vr]!);
       } else if (t == 9 && call.verbs.isNotEmpty && kind != 'O' &&
           (vb == null || !methodType.containsKey(vb) || kindFollowsRequest.contains(vb))) {
@@ -855,21 +887,46 @@ List<Uint8List>? buildAnswer(
         // ?Version= included) is held complete (a recorded session
         // picture_cold gui[2]: a wiped cache answers blank and the server
         // then pushes the picture; a recorded session gui[0], warm:
-        // 'X' and no push)
-        final args = {
-          for (final a in verbArgs(call, oidByVarsrow[vr]!)) a.$1: a.$2,
-        };
-        value = publishUrlAnswer(session, (args['#1'] ?? '').trim(), t);
+        // 'X' and no push); a BDS url rides as a `_SPARAMETER` (the SVARS
+        // item, a recorded session srv[124]: the Word 97 demo's DEMOWORD97DOC)
+        final url = verbArgText(call, oidByVarsrow[vr]!, '#1') ?? '';
+        value = publishUrlAnswer(session, url.trim(), t);
+      } else if ((vb == 'FileSaveDialogEx' || vb == 'fileSaveDialogEx') &&
+          call.dialect == GuiDialect.windows &&
+          oidByVarsrow[vr] != null &&
+          fileSaveDialogExAnswer(call, oidByVarsrow[vr]!) != null) {
+        // FILE_SAVE_DIALOG on the Windows OCX: `;<path>` — its rc field
+        // EMPTY (a recorded session srv[105] -> gui[86]); the
+        // server's proposed folder and name, no dialog (frontend_files.dart)
+        value = fileSaveDialogExAnswer(call, oidByVarsrow[vr]!)!;
       } else if (shellExecuteVerbs.contains(vb) && oidByVarsrow[vr] != null) {
         // CL_GUI_FRONTEND_SERVICES=>EXECUTE: '42' (HINSTANCE > 32) when the
         // document is a web url handed to the browser — the real Windows
         // GUI's answer (a recorded session gui[91]); '0' (the ABAP's
         // "cannot start" failure) for a local file this device never held
         value = shellExecuteAnswer(call, oidByVarsrow[vr]!);
+      } else if (vb == 'LoadCUACode' && oidByVarsrow[vr] != null) {
+        // BARCHART_SET_FUNCTION_CODE: 1 = the bar chart OCX ran the code
+        // itself (OZIN, a recorded session g[12]), 0 = the
+        // program acts (XBO5 g[15], ODEL) — sap_barchart.dart
+        value = barChartCuaCodeAnswer(
+            verbArgText(call, oidByVarsrow[vr]!, '#1') ?? '');
       } else if (vb == 'GetPlatformEx' && call.dialect == GuiDialect.windows) {
         // SAPfront.dll's GET_PLATFORM enum: the real Windows GUI answers 14
         // (a recorded session gui[21], a recorded session)
         value = windowsPlatformExAnswer;
+      } else if (registryReadVerbs.contains(vb) &&
+          oidByVarsrow[vr] != null &&
+          registryReadAnswer(call, oidByVarsrow[vr]!) != null) {
+        // REGISTRY_GET_VALUE: the Office 16 install probes read what that
+        // PC's registry holds (frontend_registry.dart: the ALV grid's
+        // Excel / Word CurVer, XXL's ExcelWorksheet server); any other key
+        // keeps the blank the recorded GUIs answer
+        value = registryReadAnswer(call, oidByVarsrow[vr]!)!;
+      } else if (vb != null && infoCtrlPathAnswer(vb, call.dialect) != null) {
+        // the InfoCtrl's install / work folder (frontend_registry.dart:
+        // xxl_excel_word_demos gui[13] / gui[11])
+        value = infoCtrlPathAnswer(vb, call.dialect)!;
       } else {
         value = _scalarDefault(t, vb, session,
             owner: ownerByVarsrow[vr], dialect: call.dialect);

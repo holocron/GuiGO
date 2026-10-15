@@ -197,6 +197,9 @@ class XfaPlaced extends XfaElement {
     required this.image,
     this.access,
     this.captionText,
+    this.captionPlace = 'left',
+    this.captionReserve,
+    this.captionFont,
   });
 
   /// The widget: textEdit / numericEdit / dateEdit / checkButton /
@@ -225,6 +228,25 @@ class XfaPlaced extends XfaElement {
 
   /// The caption's own text when the field carries one.
   final String? captionText;
+
+  /// Where the caption sits relative to the widget (`left` — XFA's
+  /// default — `right`, `top`, `bottom`).
+  final String captionPlace;
+
+  /// The caption's reserved minimum along its axis, in points, null when
+  /// the caption declared none (the estimate then sizes it).
+  final double? captionReserve;
+
+  /// The caption element's own font, null when it inherits the field's.
+  final XfaFont? captionFont;
+
+  /// Where the geometry pass put the caption (inside [rect], on the
+  /// [captionPlace] side); null when the field carries no caption.
+  XfaRect? captionRect;
+
+  /// Where the geometry pass put the widget proper: [rect] minus the
+  /// caption's share. Null when the widget takes the whole field rect.
+  XfaRect? widgetRect;
 }
 
 /// A script an element carries, verbatim: the event it runs on, its
@@ -352,7 +374,7 @@ class XfaSubform extends XfaElement {
     required this.occurrences,
   }) : super(kind: XfaKind.subform, tag: 'subform');
 
-  /// `position`, `tb`, `lr-tb`, `rl-tb` (empty: inherit `tb`).
+  /// `position` (empty: XFA's default), `tb`, `lr-tb`, `rl-tb`, `row`.
   final String layout;
 
   /// How many copies the geometry pass lays out (`occur` min, >= 1).
@@ -548,6 +570,7 @@ class _Reader {
   XfaPlaced _readPlaced(XmlElement e, XfaKind kind) {
     final name = e.getAttribute('name');
     final (som, pushed) = _push(name);
+    final cap = _child(e, 'caption');
     final p = XfaPlaced(
       kind: kind,
       tag: e.name.local,
@@ -562,6 +585,10 @@ class _Reader {
       image: _imageOf(e),
       access: e.getAttribute('access'),
       captionText: _captionOf(e),
+      captionPlace:
+          (cap?.getAttribute('place') ?? 'left').trim().toLowerCase(),
+      captionReserve: cap == null ? null : pt(cap.getAttribute('reserve')),
+      captionFont: cap == null ? null : _fontOf(cap),
     );
     elements.add(p);
     _collectNested(e);
@@ -672,8 +699,9 @@ class _Reader {
       final ex = _child(v, 'exData');
       if (ex != null) return _textOfNode(ex);
     }
-    final cap = _captionOf(e);
-    if (cap != null) return cap;
+    // the caption is NOT the widget's text: it is laid out and painted in
+    // its own area beside the widget (captionRect), so a field with an
+    // empty value shows an empty box next to its label
     if (e.name.local == 'field') {
       // a choice list's first save/show item
       final items = _child(e, 'items');
@@ -852,10 +880,15 @@ void layoutXfaForm(XfaForm form) {
   for (final child in root.children) {
     switch (child.kind) {
       case XfaKind.pageSet:
-        // a pageSet's children are the pageAreas themselves
+        // a pageSet's children are the pageAreas themselves; a pageArea
+        // places its subforms like a positioned container: a declared
+        // y is ABSOLUTE from the content origin (FOOTER pinned at the
+        // page bottom, HEADER_TEXT right under the header), and a MISSING
+        // y flows the subform directly below the previously-placed one
+        // (XFA 3.3 §5.5 — MAIN, the paginating body, has no y)
         for (final area in child.children) {
           page = area.page;
-          var y = 0.0;
+          var flow = 0.0;
           for (final sub in area.children) {
             if (sub is XfaSubform && sub.rect == null) {
               final a = form.pages[page.clamp(0, form.pages.length - 1)];
@@ -863,13 +896,13 @@ void layoutXfaForm(XfaForm form) {
                 sub,
                 a,
                 _Reader.pt(sub.attrs['x'], whole: a.w) ?? 0,
-                y + (_Reader.pt(sub.attrs['y'], whole: a.h) ?? 0),
+                _Reader.pt(sub.attrs['y'], whole: a.h) ?? flow,
                 page,
               );
-              y = sub.rect!.bottom;
+              flow = sub.rect!.bottom;
             }
           }
-          flowed = y;
+          flowed = flow;
         }
       default:
         if (child is XfaSubform && child.rect == null) {
@@ -894,7 +927,11 @@ void _layoutSubform(
       _stackedHeight(s, w);
   s.rect = XfaRect(ox, oy, w, h);
   s.page = pageIndex;
-  switch (s.layout.isEmpty ? 'tb' : s.layout) {
+  // XFA 3.3 §4.4.1: a subform without `layout` is a POSITIONED container —
+  // its children sit at their declared x/y. Treating that as tb stacked
+  // the positioned cells of a Designer table row onto successive lines
+  // (every column one step lower and further right).
+  switch (s.layout.isEmpty ? 'position' : s.layout) {
     case 'position':
       for (final c in s.children) {
         if (c.rect != null) continue;
@@ -907,22 +944,48 @@ void _layoutSubform(
       var x = ox, y = oy, rowH = 0.0;
       for (final c in s.children) {
         if (c.rect != null) continue;
-        final cw = _Reader.pt(c.attrs['w'], whole: w) ?? _autoWidth(c, w);
+        // a flowed child wider than its container is clamped to it (the
+        // 55mm page-number fields inside a 29mm column), then wrapped
+        // when the line's remaining space cannot take it
+        final cw = (_Reader.pt(c.attrs['w'], whole: w) ?? _autoWidth(c, w))
+            .clamp(0.0, w);
         final ch = _Reader.pt(c.attrs['h'], whole: h) ?? _autoHeight(c, cw);
-        if (x > ox && x + cw > ox + w) {
+        // the hair of tolerance: a full-width cell pair (mm-rounded widths
+        // summing to the container's own mm width) must not wrap on
+        // 1e-10pt of drift
+        if (x > ox && x + cw > ox + w + 0.75) {
           x = ox;
           y += rowH;
           rowH = 0;
         }
         _place(c, page, x, y, cw, ch, pageIndex);
         x += cw;
-        if (ch > rowH) rowH = ch;
+        // the LAID height (a subform child's own pass), not the estimate
+        final bottom = c.rect?.bottom ?? y + ch;
+        if (bottom - y > rowH) rowH = bottom - y;
+      }
+    case 'row':
+      // XFA's table row (the Designer's Table object): the cells share ONE
+      // line, side by side — stacking them (the tb default) painted every
+      // cell on its own line. A declared x anchors the cell at that
+      // offset; a declared y nudges it inside the row.
+      var cursor = ox;
+      for (final c in s.children) {
+        if (c.rect != null) continue;
+        final cw = (_Reader.pt(c.attrs['w'], whole: w) ?? _autoWidth(c, w))
+            .clamp(0.0, w);
+        final ch = _Reader.pt(c.attrs['h'], whole: h) ?? _autoHeight(c, cw);
+        final cx = _Reader.pt(c.attrs['x'], whole: w) ?? cursor;
+        final cy = _Reader.pt(c.attrs['y'], whole: h) ?? 0;
+        _place(c, page, cx, oy + cy, cw, ch, pageIndex);
+        if (cx + cw > cursor) cursor = cx + cw;
       }
     default: // tb (and rl-tb, stacked for the read-only view)
       var y = oy;
       for (final c in s.children) {
         if (c.rect != null) continue;
-        final cw = _Reader.pt(c.attrs['w'], whole: w) ?? _autoWidth(c, w);
+        final cw = (_Reader.pt(c.attrs['w'], whole: w) ?? _autoWidth(c, w))
+            .clamp(0.0, w);
         final ch = _Reader.pt(c.attrs['h'], whole: h) ?? _autoHeight(c, cw);
         _place(
           c,
@@ -933,7 +996,10 @@ void _layoutSubform(
           ch,
           pageIndex,
         );
-        y += ch;
+        // advance past what the child actually took: a subform's own pass
+        // sizes it (a row of cells is ONE line), the flat estimate is only
+        // the fallback
+        y = c.rect?.bottom ?? y + ch;
       }
   }
 }
@@ -946,13 +1012,98 @@ void _place(XfaElement c, XfaPageArea page, double x, double y, double w,
     case XfaPlaced p:
       p.rect = XfaRect(x, y, w, h);
       p.page = pageIndex;
+      _layoutCaption(p, x, y, w, h);
     default:
       c.rect = null;
   }
 }
 
+/// Splits a captioned field's rect: the caption takes its side
+/// (`captionPlace`, `captionReserve` at minimum, grown to fit the text),
+/// the widget takes what is left.
+void _layoutCaption(XfaPlaced p, double x, double y, double w, double h) {
+  if (p.captionText == null) return;
+  final reserve = p.captionReserve ?? 0;
+  switch (p.captionPlace) {
+    case 'right':
+    case 'left':
+      final capW = _captionExtent(p, reserve, w);
+      final leftward = p.captionPlace != 'right';
+      p.captionRect =
+          XfaRect(leftward ? x : x + w - capW, y, capW, h);
+      p.widgetRect = XfaRect(
+          leftward ? x + capW : x, y, (w - capW).clamp(0.0, w), h);
+    case 'bottom':
+    case 'top':
+      final size = p.captionFont?.size ?? p.font?.size ?? 10;
+      final capH = (reserve > 0 ? reserve : size * 1.5).clamp(0.0, h);
+      final upward = p.captionPlace != 'bottom';
+      p.captionRect = XfaRect(x, upward ? y : y + h - capH, w, capH);
+      p.widgetRect =
+          XfaRect(x, upward ? y + capH : y, w, (h - capH).clamp(0.0, h));
+  }
+}
+
+/// The caption's share of the field's cross axis: the declared reserve
+/// grown to the estimated text width, never beyond the field itself.
+double _captionExtent(XfaPlaced p, double reserve, double w) {
+  final size = p.captionFont?.size ?? p.font?.size ?? 10;
+  final estimate = (p.captionText ?? '').length * size * 0.5;
+  return (estimate > reserve ? estimate : reserve).clamp(0.0, w);
+}
+
 /// The height a subform without one takes: its children stacked.
 double _stackedHeight(XfaSubform s, double w) {
+  // a row (one line of cells) is as tall as its tallest cell, not the sum
+  if (s.layout == 'row') {
+    var tallest = 0.0;
+    for (final c in s.children) {
+      final cw =
+          c is XfaSubform ? (_Reader.pt(c.attrs['w'], whole: w) ?? w) : w;
+      final ch = _Reader.pt(c.attrs['h'], whole: cw) ?? _autoHeight(c, cw);
+      if (ch > tallest) tallest = ch;
+    }
+    return tallest > 0 ? tallest : 20;
+  }
+  // a positioned container is as tall as its lowest child (its children
+  // carry absolute y), not the sum of their heights
+  if (s.layout.isEmpty || s.layout == 'position') {
+    var lowest = 0.0;
+    for (final c in s.children) {
+      final cw =
+          c is XfaSubform ? (_Reader.pt(c.attrs['w'], whole: w) ?? w) : w;
+      final ch = c is XfaPlaced
+          ? (_Reader.pt(c.attrs['h'], whole: cw) ?? _autoHeight(c, cw))
+          : (_Reader.pt(c.attrs['h'], whole: cw) ??
+              _stackedHeight(c as XfaSubform, cw));
+      final bottom =
+          (_Reader.pt(c.attrs['y'], whole: w) ?? 0) + ch;
+      if (bottom > lowest) lowest = bottom;
+    }
+    return lowest > 0 ? lowest : 20;
+  }
+  // an lr-tb container: its children wrapped into rows, one estimate pass
+  if (s.layout == 'lr-tb' || s.layout == 'rl-tb') {
+    var x = 0.0, rows = 0.0, rowH = 0.0;
+    for (final c in s.children) {
+      final cw = c is XfaSubform
+          ? (_Reader.pt(c.attrs['w'], whole: w) ?? w)
+          : (_Reader.pt(c.attrs['w'], whole: w) ?? _autoWidth(c, w));
+      final ch = c is XfaSubform
+          ? (_Reader.pt(c.attrs['h'], whole: cw) ??
+              _stackedHeight(c, cw))
+          : (_Reader.pt(c.attrs['h'], whole: cw) ?? _autoHeight(c, cw));
+      if (x > 0 && x + cw > w + 0.75) {
+        rows += rowH;
+        x = 0;
+        rowH = 0;
+      }
+      x += cw;
+      if (ch > rowH) rowH = ch;
+    }
+    final total = rows + rowH;
+    return total > 0 ? total : 20;
+  }
   var total = 0.0;
   for (final c in s.children) {
     if (c is XfaPlaced) {
@@ -969,9 +1120,10 @@ double _stackedHeight(XfaSubform s, double w) {
 double _autoHeight(XfaElement e, double w) {
   if (e is XfaPlaced) {
     final size = e.font?.size ?? 10;
+    final perLine = w <= 1 ? size * 80.0 : w / (size * 0.5);
     final lines = e.text.isEmpty
         ? 1
-        : (e.text.length / (w / (size * 0.5))).ceil().clamp(1, 200);
+        : (e.text.length / perLine).ceil().clamp(1, 200);
     return size * 1.35 * lines + 4;
   }
   return 14;
@@ -980,7 +1132,10 @@ double _autoHeight(XfaElement e, double w) {
 double _autoWidth(XfaElement e, double parentW) {
   if (e is XfaPlaced) {
     final size = e.font?.size ?? 10;
-    return (e.text.length * size * 0.5).clamp(30.0, parentW);
+    // clamp(lower, upper) throws when lower > upper: a parent narrower
+    // than the floor would crash the whole layout
+    final want = e.text.length * size * 0.5;
+    return want < 4 ? 4.0 : (want > parentW ? parentW : want);
   }
   return parentW;
 }

@@ -372,21 +372,27 @@ String _xmlUnescape(String s) => s
     .replaceAll('&quot;', '"')
     .replaceAll('&amp;', '&');
 
+/// The RFC-queue ROW header the kernel opens every RFC_QUEUE row with
+/// (`<24 hex id>SAPGUI` + element / part counters): 68 B, every 1 853-B
+/// row, so it lands inside a DP push's 256-B chunk chain every 7 slots
+/// (a recorded session raw srv[38]: gaps 324 after markers #7,
+/// #14 … #35) — [queueElements] strips it BEFORE any chain is deframed.
+const int queueRowHeader = 68;
+
 /// Reassemble the SAPGUI queue ELEMENTS an RFC_QUEUE column carries
 /// (queue_elements port).
 List<Uint8List> queueElements(Uint8List blob, int width) {
-  const queueRowHeader = 68;
   if (width <= queueRowHeader || blob.length < width) {
     return blob.isEmpty ? [] : [blob];
   }
-  if (!_isQueueRowHeader(Uint8List.sublistView(blob, 0, queueRowHeader))) {
+  if (!isQueueRowHeader(blob)) {
     return [blob];
   }
   final parts = <String, Map<int, Uint8List>>{};
   final order = <String>[];
   for (var i = 0; i < blob.length; i += width) {
     final row = Uint8List.sublistView(blob, i, i + width > blob.length ? blob.length : i + width);
-    if (row.length < queueRowHeader || !_isQueueRowHeader(Uint8List.sublistView(row, 0, queueRowHeader))) {
+    if (row.length < queueRowHeader || !isQueueRowHeader(row)) {
       return [blob];
     }
     final id = String.fromCharCodes(row, 0, 24);
@@ -420,7 +426,9 @@ Uint8List _joinSorted(Map<int, Uint8List> parts) {
   return out;
 }
 
-bool _isQueueRowHeader(Uint8List hdr) {
+/// Whether [hdr] opens with a [queueRowHeader] (at least that long).
+bool isQueueRowHeader(Uint8List hdr) {
+  if (hdr.length < queueRowHeader) return false;
   for (var i = 0; i < 24; i++) {
     final c = hdr[i];
     if (!((c >= 48 && c <= 57) || (c >= 65 && c <= 70))) return false;

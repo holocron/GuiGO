@@ -73,6 +73,7 @@ class SapTreeView extends StatefulWidget {
     this.onContextMenu,
     this.onTopNode,
     this.columns,
+    this.headerStrip,
     this.charWidth,
     this.paneCols,
     this.icons,
@@ -96,6 +97,12 @@ class SapTreeView extends StatefulWidget {
   /// A column tree's layout ([SapTreeColumns]); null or without item
   /// columns = a simple tree, drawn as a list.
   final SapTreeColumns? columns;
+
+  /// The heading of the header strip over a tree with no item column
+  /// (SapSessionTree.treeHeaderStrip: `WithHeader(1)` on a CL_GUI_COLUMN_
+  /// TREE of the hierarchy alone — GFW_DEMO_HIER3's trees, a blank grey
+  /// strip in the real GUI, no column headings); null = none.
+  final String? headerStrip;
 
   /// Points per declared character of a column width: the composer's cell
   /// width. Null: the pane's width over [paneCols] when given, else 7 (the
@@ -312,13 +319,39 @@ class _SapTreeViewState extends State<SapTreeView> {
         (context, busy) => _row(context, rows[i].$1, rows[i].$2, busy: busy),
       ),
     );
-    if (widget.onTopNode == null) return list;
-    return NotificationListener<ScrollEndNotification>(
-      onNotification: (n) {
-        _reportTop(n.metrics);
-        return false;
-      },
-      child: list,
+    final Widget body = widget.onTopNode == null
+        ? list
+        : NotificationListener<ScrollEndNotification>(
+            onNotification: (n) {
+              _reportTop(n.metrics);
+              return false;
+            },
+            child: list,
+          );
+    final strip = widget.headerStrip;
+    if (strip == null) return body;
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          key: const ValueKey('tree-header-strip'),
+          height: headerHeight,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          alignment: Alignment.centerLeft,
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainerHighest,
+            border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
+          ),
+          child: Text(
+            strip,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.labelMedium,
+          ),
+        ),
+        Expanded(child: body),
+      ],
     );
   }
 

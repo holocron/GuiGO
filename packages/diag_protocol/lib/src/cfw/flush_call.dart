@@ -91,7 +91,17 @@ const Map<String, int> methodType = {
   'GetWindowsDirectory': 8, 'GetWindowsPlatform': 20, 'GetWindowsVersion': 8,
   'GetWithHeader': 11, 'Grid': 3, 'GridHStep': 5, 'GridHStepUnit': 3,
   'GridModified': 11, 'GridStyle': 3, 'GridVStep': 5, 'GridVStepUnit': 3,
-  'HasDocumentChanged': 3, 'HasDocumentInterface': 3, 'Headers': 9,
+  // the DOI proxy's "did the document change?" (SFP's pai_layout reads it
+  // into an abap_bool and, on ANY non-initial answer or an rc error, pops
+  // FPUIFB 051 — the 'Impossible de sauvegarder modifications de mise en
+  // forme en mode affich.!' Information modal — every time the user works
+  // in the read-only Designer, live the test system 2026-10-15). A '0' value — the old
+  // VT_BOOL typing — reached that abap_bool AS '0': NOT INITIAL reads as
+  // CHANGED. The blank BSTR is the Windows GUI's false on this wire
+  // (a recorded session gui[2] row 70) and blank is initial
+  // under any conversion: never changed — true here, the model's document
+  // bytes never change.
+  'HasDocumentChanged': 8, 'HasDocumentInterface': 3, 'Headers': 9,
   'HideRows': 3, 'HierarchyHeader': 9, 'INTERIOR': 9, 'Image': 9,
   'InitControl': 3, 'InitViewers': 8, 'InsertEx': 9, 'InsertHierarchy': 9,
   'InsertRange': 3, 'Interior': 9, 'IsFolder': 11, 'IsScriptingActive': 20,
@@ -177,6 +187,35 @@ const Map<String, int> methodType = {
   'FitWidest': 3, 'DrillUp': 3, 'DrillDown': 3,
   'InstallReadOnlyTemplate': 3, 'SetTemplate': 3, 'ExecuteMacro2': 3,
   'SetInPlaceBorderSpace': 3,
+  // the SOI spreadsheet's formatting calls (OFFICEINTEGRATIONDOCPROXYIMP
+  // i_oi_spreadsheet~set_format / set_color / cell_format / screen_update
+  // / load_lib: RESULT = l_error->error_nr, an int) — XXL's insert_full,
+  // the real GUI's t3 `0` on every one (a recorded session
+  // gui[37]-[42], a recorded session gui[41]-[46]).
+  // GetApplicationProperty's retvalue is a CHAR (t8 `.`, the decimal
+  // separator: xxl gui[36]); the PIVOT proxy's InsertFull2 its status text
+  // (t8 `''`, xxl_two_runs gui[48]). SetFont stays the table's object (an
+  // automation Font), stamped VT_I4 on a DOI proxy (doiObserveCall)
+  'SetFormat': 3, 'SetColor': 3, 'CellFormat': 3, 'ScreenUpdating': 3,
+  'LoadLib': 3, 'GetApplicationProperty': 8, 'InsertFull2': 8,
+  // the ALV in-place Excel's own members of the same spreadsheet proxy
+  // (SAPoipe8.OCX; CL_SALV_GRU_VIEW_EXCEL update: set_data_table /
+  // set_info_table / set_fixed_cols / setlocale / update_frontend, and the
+  // view's get_selected_cells): the real GUI's t3 `0` on each
+  // (a recorded session srv[55]-[58] -> gui[39]-[42],
+  // srv[61] -> gui[45]). Unmapped they were answered a blank BSTR (or an
+  // object handle) where the ABAP reads an int. The Office manager's
+  // GetRegisteredProgIDs('BASIC', table) the same (OAOR srv[171] ->
+  // gui[143]); its table rides the SaveDataToUrl upload (doi.dart).
+  'SetDataTable': 3, 'SetInfoTable': 3, 'SetFixedCols': 3, 'SetLocale': 3,
+  'UpdateFrontend': 3, 'GetSelectedAreas': 3, 'GetRegisteredProgIDs': 3,
+  // the GFW business graphic (CL_GFW_GP_PRES_CHART): the chart's
+  // ValueToDateString(f, 1) is read into a CHAR40 'mm/dd/yyyy hh:mm:ss'
+  // (CONVERT_FLOAT_TO_DATETIME, on a scroll / zoom event) — a BSTR, not
+  // an object handle. Its other adapter / chart calls (LoadURL,
+  // SetVersion, SendObjId, SetLanguage, ShowLegendSymbol, SaveImage,
+  // PrintOut, SaveAsJPeg) import no result.
+  'ValueToDateString': 8,
 };
 
 /// The frontend dialect a session speaks (the connect frame's profile).
@@ -186,6 +225,11 @@ const List<String> _winI2 = [
   'SetColumnWidth', 'SetGrid', 'AddControl', 'TypeAheadExport', 'GetColumnWidth',
   'GetRowHeight', 'SetRowHeight', 'SetRowMode', 'SetRowSash', 'SetColumnSash',
   'SetColumnMode', 'LISTFILES', 'TextModified', 'LoadCUACode',
+  // CL_GUI_FRONTEND_SERVICES=>FILE_DELETE: VT_I2, the Win32 error code —
+  // `2` for a missing file, `0` once deleted (a recorded session
+  // inplace srv[131] -> gui[108], srv[144] -> gui[119]); the Java
+  // GuiSapInfo's int stays the base table's
+  'DeleteFile', 'deleteFile',
 ];
 const List<String> _winI4 = [
   'GetContainer', 'CurrentCellColIDNumeric', 'CurrentCellRowIDNumeric',
@@ -271,6 +315,12 @@ class FlushCall {
   /// mint side-channel (set by the responder after a queue is answered)
   List<(String, int, bool)> mintTrace = [];
   List<(String, String)> shellAliases = [];
+
+  /// _RESULT VARS rows (0-based) the answer carries as the NULL object
+  /// reference `O-1`, no handle minted — set by the DOI fold before the
+  /// answer: GetDocumentProxyInterface after an OpenDocument whose class
+  /// this frontend cannot start (a recorded session gui[21]).
+  Set<int> nullObjectRows = {};
 
   /// the object handle the answer minted per _RESULT VARS row (0-based row
   /// -> handle; set by the responder) — what a later queue names the object

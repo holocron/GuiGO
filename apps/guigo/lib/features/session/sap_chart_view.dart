@@ -2,11 +2,20 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import 'sap_chart_xy.dart';
+
 /// One plotted series: its label and a value per category (null = gap).
 class ChartSeriesData {
-  const ChartSeriesData(this.label, this.values);
+  const ChartSeriesData(this.label, this.values, {this.xs = const [], this.color});
   final String label;
   final List<double?> values;
+
+  /// An xy chart's x value per point (a GFW scatter / time axis /
+  /// milestone trend), parallel to [values]; empty for a category chart.
+  final List<double?> xs;
+
+  /// The series' own colour (the customizing's); null = the automatic one.
+  final Color? color;
 }
 
 /// A SAP chart control (the DBA cockpit's metric history, Chart Engine
@@ -22,6 +31,9 @@ class SapChartView extends StatefulWidget {
     required this.title,
     required this.categories,
     required this.series,
+    this.gapWidth,
+    this.xTime = false,
+    this.yTime = false,
   });
 
   final String type;
@@ -29,15 +41,27 @@ class SapChartView extends StatefulWidget {
   final List<String> categories;
   final List<ChartSeriesData> series;
 
+  /// Columns / bars: the gap between category clusters in % of one
+  /// column's width (Excel's gap width; 150 = its default). Null: the
+  /// clusters fill 80 % of their band.
+  final int? gapWidth;
+
+  /// An xy chart's x / y values are times (days since 1970-01-01).
+  final bool xTime, yTime;
+
   @override
   State<SapChartView> createState() => _SapChartViewState();
 }
 
 /// The chart family of a customizing chart type.
-enum ChartKind { line, area, column, bar }
+enum ChartKind { line, area, column, bar, pie, xy }
 
 ChartKind chartKindOf(String type) {
   final t = type.toLowerCase();
+  // the GFW business graphic's pie (CO_STYLE 27) and milestone trend
+  // analysis (81: dates on both axes)
+  if (t.contains('pie')) return ChartKind.pie;
+  if (t.contains('milestone')) return ChartKind.xy;
   // no ChartType in the customizing: the Chart Engine's default, columns
   // (the GFW demo's click names its element "Columns")
   if (t.trim().isEmpty) return ChartKind.column;
@@ -159,8 +183,15 @@ class _SapChartViewState extends State<SapChartView> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final kind = chartKindOf(widget.type);
+    final type = chartKindOf(widget.type);
+    // a series with x values per point is drawn on two value axes
+    final kind = type != ChartKind.pie && widget.series.any((s) => s.xs.isNotEmpty)
+        ? ChartKind.xy
+        : type;
     final n = widget.categories.length;
+    if (kind == ChartKind.pie || kind == ChartKind.xy) {
+      return _otherBody(context, kind, scheme);
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -177,7 +208,7 @@ class _SapChartViewState extends State<SapChartView> {
           children: [
             for (final (i, s) in widget.series.indexed)
               Row(mainAxisSize: MainAxisSize.min, children: [
-                Container(width: 12, height: 12, color: _palette[i % _palette.length]),
+                Container(width: 12, height: 12, color: s.color ?? _palette[i % _palette.length]),
                 const SizedBox(width: 6),
                 Text(s.label, style: const TextStyle(fontSize: 12)),
               ]),
@@ -194,6 +225,7 @@ class _SapChartViewState extends State<SapChartView> {
               grid: scheme.outlineVariant.withValues(alpha: 0.5),
               text: scheme.onSurface,
               labels: _labels,
+              gapWidth: widget.gapWidth,
             );
             // the read-out under the finger is its own layer of paint: a
             // hover move repaints it, not the axes and the data
@@ -223,6 +255,67 @@ class _SapChartViewState extends State<SapChartView> {
       ],
     );
   }
+
+  /// A pie (its legend the categories) or an xy chart (sap_chart_xy.dart).
+  Widget _otherBody(BuildContext context, ChartKind kind, ColorScheme scheme) {
+    final pie = kind == ChartKind.pie;
+    final legend = pie
+        ? [
+            for (final (i, c) in widget.categories.indexed)
+              (categoryLabel(c), PieChartPainter.sliceColor(i)),
+          ]
+        : [
+            for (final (i, s) in widget.series.indexed)
+              (s.label, s.color ?? _palette[i % _palette.length]),
+          ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (widget.title.trim().isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Text(widget.title.trim(),
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.titleSmall),
+          ),
+        Wrap(
+          alignment: WrapAlignment.center,
+          spacing: 14,
+          children: [
+            for (final (label, color) in legend)
+              if (label.isNotEmpty)
+                Row(mainAxisSize: MainAxisSize.min, children: [
+                  Container(width: 12, height: 12, color: color),
+                  const SizedBox(width: 6),
+                  Text(label, style: const TextStyle(fontSize: 12)),
+                ]),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Expanded(
+          child: CustomPaint(
+            size: Size.infinite,
+            painter: pie
+                ? PieChartPainter(
+                    categories: widget.categories,
+                    series: widget.series,
+                    text: scheme.onSurface,
+                  )
+                : XyChartPainter(
+                    series: widget.series,
+                    xTime: widget.xTime,
+                    yTime: widget.yTime,
+                    milestone: chartKindOf(widget.type) == ChartKind.xy &&
+                        widget.xTime &&
+                        widget.yTime,
+                    axis: scheme.onSurfaceVariant,
+                    grid: scheme.outlineVariant.withValues(alpha: 0.5),
+                  ),
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 class _ChartPainter extends CustomPainter {
@@ -234,6 +327,7 @@ class _ChartPainter extends CustomPainter {
     required this.grid,
     required this.text,
     required this.labels,
+    this.gapWidth,
   });
 
   final ChartKind kind;
@@ -241,6 +335,15 @@ class _ChartPainter extends CustomPainter {
   final List<ChartSeriesData> series;
   final Color axis, grid, text;
   final ChartLabelCache labels;
+  final int? gapWidth;
+
+  /// The part of a category's band its cluster of columns covers.
+  double get _clusterFill {
+    final g = gapWidth;
+    if (g == null || series.isEmpty) return 0.8;
+    final n = series.length;
+    return n / (n + g.clamp(0, 500) / 100);
+  }
 
   static const _left = 56.0, _bottom = 28.0, _top = 8.0, _right = 12.0;
   double _width = double.infinity; // the canvas width, labels stay inside
@@ -335,15 +438,16 @@ class _ChartPainter extends CustomPainter {
     canvas.clipRect(plot.inflate(1));
     final band = (horizontal ? plot.height : plot.width) / n;
     for (final (si, s) in series.indexed) {
-      final color = _palette[si % _palette.length];
+      final color = s.color ?? _palette[si % _palette.length];
       if (kind == ChartKind.column || kind == ChartKind.bar) {
-        final w = math.max(band * 0.8 / series.length, 0.6);
+        final fill = _clusterFill;
+        final w = math.max(band * fill / series.length, 0.6);
         final paint = Paint()..color = color;
         final zero = vPos(math.max(vLo, 0));
         for (var i = 0; i < n && i < s.values.length; i++) {
           final v = s.values[i];
           if (v == null) continue;
-          final c0 = cPos(i) - band * 0.4 + si * w;
+          final c0 = cPos(i) - band * fill / 2 + si * w;
           final r = horizontal
               ? Rect.fromLTRB(math.min(zero, vPos(v)), c0, math.max(zero, vPos(v)), c0 + w)
               : Rect.fromLTRB(c0, math.min(zero, vPos(v)), c0 + w, math.max(zero, vPos(v)));
@@ -387,6 +491,7 @@ class _ChartPainter extends CustomPainter {
       old.series != series ||
       old.categories != categories ||
       old.kind != kind ||
+      old.gapWidth != gapWidth ||
       old.axis != axis;
 }
 

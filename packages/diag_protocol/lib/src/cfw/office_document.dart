@@ -6,6 +6,7 @@ library;
 import 'dart:typed_data';
 
 import 'doi.dart' show Document;
+import 'doi_chart.dart';
 
 /// The Office family of a DOI document, by the ProgID the server opened.
 enum OfficeDocKind { word, excel, other }
@@ -66,12 +67,94 @@ class SapOfficeDocument {
   /// Bumps on any change of the document (bytes, cells, ranges).
   final int version;
 
+  /// The spreadsheet model's sheets in tab order (an Excel document's
+  /// [sheet]; empty otherwise): worksheets with their cells, chart sheets
+  /// with their chart resolved against the cells (a created `Excel.Chart`:
+  /// doi_default_chart.dart).
+  List<SapOfficeSheet> get sheets {
+    final d = sheet;
+    return d == null ? const [] : officeSheetsOf(d);
+  }
+
+  /// The index in [sheets] of the sheet Excel shows (the model's active
+  /// sheet), 0 when unknown.
+  int get activeSheet {
+    final d = sheet;
+    if (d == null) return 0;
+    final i = d.sheets.keys.toList().indexOf(d.activeSheet);
+    return i < 0 ? 0 : i;
+  }
+
   @override
   String toString() =>
       'SapOfficeDocument($shell $progId $format '
       '${bytes?.length ?? '-'} B $fileExtension'
       '${readOnly ? ' read-only' : ''} v$version)';
 }
+
+/// One sheet of a DOI spreadsheet model, as the screen shows it.
+class SapOfficeSheet {
+  const SapOfficeSheet({required this.name, required this.cells, this.chart});
+
+  final String name;
+
+  /// The non-empty cells, (row, column) 1-based -> a [num] for a cell
+  /// typed as a number, else its [String] text.
+  final Map<(int, int), Object> cells;
+
+  /// A chart sheet's chart (it holds no cells), null for a worksheet.
+  final SapOfficeChart? chart;
+
+  bool get isChart => chart != null;
+
+  @override
+  String toString() =>
+      'SapOfficeSheet($name ${isChart ? 'chart' : '${cells.length} cells'})';
+}
+
+/// A chart sheet's chart with the data it plots.
+class SapOfficeChart {
+  const SapOfficeChart({
+    required this.type,
+    required this.series,
+    this.gapWidth = 150,
+    this.overlap = 0,
+  });
+
+  final DoiChartType type;
+  final List<DoiChartSeriesData> series;
+
+  /// The gap between category clusters, % of a column's width.
+  final int gapWidth;
+
+  /// The overlap of a cluster's columns, %.
+  final int overlap;
+
+  /// The category labels (the first series').
+  List<String> get categories =>
+      series.isEmpty ? const [] : series.first.categories;
+}
+
+/// [doc]'s sheets in tab order: [SapOfficeDocument.sheets].
+List<SapOfficeSheet> officeSheetsOf(Document doc) => [
+  for (final MapEntry(key: name, value: cells) in doc.sheets.entries)
+    SapOfficeSheet(
+      name: name,
+      cells: {
+        for (final MapEntry(key: at, value: text) in cells.entries)
+          if (text.isNotEmpty) at: doc.valueAt(at.$1, at.$2, name),
+      },
+      chart: switch (doc.charts[name]) {
+        null => null,
+        final c => SapOfficeChart(
+          type: c.type,
+          series: resolveDoiChart(doc, c),
+          gapWidth: c.gapWidth,
+          overlap: c.overlap,
+        ),
+      },
+    ),
+];
 
 /// The extension [bytes] (else [progId] / [format]) are best opened with:
 /// the content's magic first — `{\rtf` RTF, `PK\x03\x04` an OOXML package

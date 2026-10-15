@@ -22,17 +22,20 @@ import '../cfw/context_menu.dart';
 import '../cfw/control_toolbar.dart';
 import '../cfw/datamanager_grammar.dart';
 import '../cfw/doi.dart';
+import '../cfw/doi_trace.dart';
 import '../cfw/office_document.dart';
 import '../cfw/dp_cache.dart' show DpCache;
 import '../cfw/dragdrop_service.dart';
 import '../cfw/ea_responder.dart';
 import '../cfw/flush_call.dart';
+import '../cfw/frontend_files.dart';
 import '../cfw/frontend_rfc.dart';
 import '../cfw/reply_container.dart' show constPrefix;
 import '../cfw/html_viewer.dart';
 import '../cfw/stream_paint.dart';
 import '../cfw/text_editor.dart';
 import '../cfw/tree_header_names.dart';
+import '../screen/sap_barchart.dart';
 import '../screen/sap_calendar.dart';
 import '../screen/sap_canvas.dart';
 import '../screen/sap_chart.dart';
@@ -73,6 +76,7 @@ import 'trace_ring.dart';
 import 'type_ahead_actions.dart';
 import 'value_help_actions.dart';
 
+part 'sap_session_barchart.dart';
 part 'sap_session_browser.dart';
 part 'sap_session_calendar.dart';
 part 'sap_session_canvas.dart';
@@ -81,6 +85,7 @@ part 'sap_session_context_menu.dart';
 part 'sap_session_editor.dart';
 part 'sap_session_field_type_ahead.dart';
 part 'sap_session_fields.dart';
+part 'sap_session_graph.dart';
 part 'sap_session_grid.dart';
 part 'sap_session_grid_edit.dart';
 part 'sap_session_grid_rows.dart';
@@ -640,6 +645,13 @@ class SapSession {
     if (w != null && !w.isCompleted) w.complete();
   }
 
+  /// When the last NI payload was taken off the inbox ([_actLocked] keeps
+  /// [_actionGap] after it before the next action goes out).
+  DateTime _lastPayloadAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// The least time between the server's last frame and the next action.
+  static const Duration _actionGap = Duration(milliseconds: 250);
+
   /// The next NI payload off the socket, waiting until [deadline].
   Future<Uint8List> _nextPayload(DateTime deadline) async {
     // a [close] ends every read at once, buffered frames or not
@@ -662,6 +674,7 @@ class SapSession {
     }
     final payload = _inbox.removeFirst();
     _inboxTaken(payload);
+    _lastPayloadAt = DateTime.now();
     // its off-isolate decode (decode_worker.dart), awaited in frame order
     final decoding = _sncCtx == null
         ? FrameDecodeOffload.ahead(payload, live: !offlineReplay)
@@ -1073,6 +1086,7 @@ class SapSession {
     _foldGrids(frames);
     _foldCharts(frames);
     _foldNetPlans(frames);
+    _foldBarCharts(frames);
     _foldCanvases(frames);
     _foldEditors(frames);
   }
@@ -1345,6 +1359,7 @@ class SapSession {
       }
       await _answerWallIfPresent(got);
       await _driveAutomation(got); // acks elicit more frames — keep pumping
+      await _answerInlineGraph(got); // sap_session_graph.dart
       if (partial) break;
     }
   }
@@ -1455,6 +1470,7 @@ class SapSession {
           _ingestGridCall(value, parsed);
           _ingestChartCall(value, parsed);
           _ingestNetPlanCall(value, parsed);
+          _ingestBarChartCall(value, parsed);
           _ingestCanvasCall(value, parsed);
           _ingestContextMenuCall(value, parsed);
           editorsTouched = _ingestEditorCall(value, parsed);
@@ -1475,6 +1491,7 @@ class SapSession {
         _guarded('flush sinks', () {
           _propertySinks.addAll(propertySinksOf(call));
           _loadedSinks.addAll(loadedObjectSinksOf(call));
+          _w.loadedSources.addAll(loadedObjectSourcesOf(call));
           _ea.noteDpBindings(call);
         });
         _guarded('header names', () => _noteHeaderNames(call, value));
@@ -1504,6 +1521,13 @@ class SapSession {
                 () => _editorFlushReport(call, editorsTouched));
         final propStore = {
           ...?_guarded('doi fold', () => doiObserveCall(_ea, _doi, call)),
+          // the files the server writes / deletes / opens on this frontend
+          // (frontend_files.dart: DeleteFile 0 / 2, ShellExecute 42)
+          ...?_guarded(
+              'frontend files',
+              () => frontendFilesObserveCall(
+                  _ea.frontendFiles, _ea.dpCache, call,
+                  step: closingStep)),
           ...?_guarded('editor props', () => _editorPropAnswers(call)),
           ...?_guarded('cfw field props', () => _cfwFieldPropAnswers(call)),
           ...?_guarded(
@@ -1543,8 +1567,17 @@ class SapSession {
           await _send(clientFrame(items));
           sent++;
           _guarded('doi answer', () => doiNoteAnswer(_doi, call));
+          // a written file the server opened: handed to the app
+          _guarded('frontend file opens', _publishFileOpens);
           _trace('flush answered (${call.verbs.length} verbs, '
               'step $closingStep)');
+          // a DOI flush: its verbs and our answer values (doi_trace.dart)
+          final answered = items;
+          final doiLine = traceEnabled
+              ? _guarded(
+                  'doi trace', () => doiFlushTrace(_doi, call, answered))
+              : null;
+          if (doiLine != null) _trace('$doiLine (step $closingStep)');
         }
       }
       // a front-end RFC (`CALL FUNCTION … DESTINATION 'SAPGUI'`): a
@@ -1557,6 +1590,12 @@ class SapSession {
           await _send(a);
           sent++;
         }
+      }
+      // a bar chart's command read-back pull (sap_session_barchart.dart):
+      // the refused function code's CACTBAR, else the empty stream
+      for (final a in _barCharts.answerPullsOf(f, step)) {
+        await _send(a);
+        sent++;
       }
       // a NetPlan graph's stream read-back pull: the armed node-click
       // command, else the empty stream (unanswered, the server waits)
@@ -1576,6 +1615,7 @@ class SapSession {
       _bindPendingCharts();
     }
     _foldNetPlans(frames);
+    _foldBarCharts(frames);
     _foldCanvases(frames); // a canvas wave in the same turn as its paint
     _foldEditors(frames);
     return sent;
@@ -1681,10 +1721,26 @@ class SapSession {
     _modes.actionCommand = modeCommand;
     final failuresBefore = answerFailures;
     try {
+      // never on the heels of the server's last frame: an okcode sent 3-4 ms
+      // after the type-ahead's repaint is dropped by the server, which
+      // never answers it (live the test system 2026-10-15: `%_SEARCH_OKCODE se80` /
+      // `sfp`, then the code at +3 ms stuck three times out of three; at
+      // +107 / +274 / +670 ms it ran) — a person's Enter is never that fast
+      final since = DateTime.now().difference(_lastPayloadAt);
+      if (!offlineReplay && since < _actionGap) {
+        await Future<void>.delayed(_actionGap - since);
+      }
       _trace('action send ${_frameTrace(frame)}');
       await _send(frame);
       if (staged != null) _gridStateFlushed();
       final all = <Uint8List>[];
+      // the first reply may be slow (a cold SE80's Workbench load): the
+      // real GUI waits under its busy cursor as long as the dialog step
+      // runs, so the first turn is waited for up to the server's own
+      // dialog-step limit (rdisp/max_wprun_time, 600 s default) — a dead
+      // connection is the liveness watchdog's (sap_session_liveness.dart),
+      // an answer this session could not build fails at the first 30 s
+      final firstReplyBy = DateTime.now().add(const Duration(minutes: 10));
       for (var i = 0; i < 120; i++) {
         // an offline replay has every frame of the exchange queued already:
         // nothing left means the server's part is done (no idle wait)
@@ -1701,11 +1757,21 @@ class SapSession {
         } on TimeoutException catch (e) {
           _throwIfAnswerOwed(failuresBefore, e);
           if (all.isNotEmpty) break; // the server finished; nothing more came
+          if (!offlineReplay &&
+              _sockError == null &&
+              state != SessionState.closed &&
+              DateTime.now().isBefore(firstReplyBy)) {
+            _trace('action: no reply yet after 30 s — still waiting');
+            i--; // the wait is not a turn
+            continue;
+          }
           rethrow;
         }
         final firstTurn = all.isEmpty;
         all.addAll(got);
-        final sent = await _driveAutomation(got);
+        // the GRAPH close message's done reply too (sap_session_graph.dart)
+        final sent =
+            await _driveAutomation(got) + await _answerInlineGraph(got);
         final paints = _paintsScreen(got);
         _trace('action turn $i: ${got.length} frames, sent $sent, '
             'paints $paints${part == null ? '' : ' (partial: timed out)'} '
@@ -1730,7 +1796,9 @@ class SapSession {
           if (firstTurn) throw part;
           break;
         }
-        if (sent == 0 && paints) break;
+        // an inline graph still being transmitted continues unasked
+        // (gral_netzocx1_java srv[38] -> srv[39]): read on
+        if (sent == 0 && paints && !_inlineGraphOpen) break;
       }
       if (loggedOff) return all; // no layout round, no drain: it is over
       // the docked layout's own round, if owed — right after the paint,
@@ -2012,7 +2080,9 @@ class SapSession {
       final v = Uint8List.fromList(it.value);
       if (!isClientTablePull(v)) continue;
       final url = clientTablePullUrl(v);
-      if (url != null && _netPlans.hasSink(url)) continue;
+      if (url != null && (_netPlans.hasSink(url) || _barCharts.hasSink(url))) {
+        continue;
+      }
       // a value-help search's select options (sap_session_value_help.dart)
       final selOpts = url == null ? null : _valueHelpPullAnswer(url, v);
       if (selOpts != null) {
@@ -2086,6 +2156,8 @@ class SapSession {
           continue;
         }
         final loaded = sink == null && _loadedSinks.remove(url);
+        final source = url == null ? null : _w.loadedSources.remove(url);
+        final sourceSeg = source == null ? null : _ea.dpCache.byUrl[source];
         // an HTML viewer's sapevent POST body (sap_session_html.dart)
         final post = loaded ? _takeHtmlPost() : null;
         rfc = post != null
@@ -2094,7 +2166,10 @@ class SapSession {
                 windows: answerDialect == GuiDialect.windows,
               )
             : loaded
-            ? loadedObjectPullAnswer(v)
+            ? loadedObjectPullAnswer(v,
+                sourceFormat: sourceSeg == null
+                    ? const []
+                    : pushedTableFormatRows(sourceSeg))
             : nodeKeyTableAnswer(keys);
         _trace('client table pull answered ($url ${sink?.prop}, '
             '${keys.length} rows, step $at${loaded ? ', loaded object' : ''}'
@@ -2590,6 +2665,10 @@ class SapSession {
     // bytes of the send say it too, but not by name — the SE80 log of
     // vkey 45 (the toolbar's external breakpoint) read as a margin tap
     _trace('press vkey $vkey');
+    // Back on an inline graph is the graph's own message
+    // (sap_session_graph.dart)
+    final graphKey = _inlineGraphKey(vkey);
+    if (graphKey != null) return graphKey;
     // typed / ticked classic-list cells ride the list key round
     final listCells = _listCellKeyRound(vkey);
     if (listCells != null) return listCells;
@@ -2887,6 +2966,7 @@ class SapSession {
     await _modes.changes.close();
     await _closedController.close();
     await _closeBrowserLaunches();
+    await _closeFileOpens();
   }
 }
 

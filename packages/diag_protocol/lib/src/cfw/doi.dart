@@ -9,9 +9,14 @@ import 'dart:typed_data';
 
 import '../framing/envelope.dart' show containsBytes;
 import '../lzh/lzh.dart';
+import 'browser_launch.dart' show verbArgText;
 import 'dp_cache.dart';
 import 'ea_responder.dart';
 import 'flush_call.dart';
+import 'doi_alv_sheet.dart' show alvColumnAt, applyAlvTable;
+import 'doi_chart.dart' show DoiChart;
+import 'doi_default_chart.dart' show applyDefaultChart, isExcelChartClass;
+import 'doi_pivot.dart' show applyInsertFull2;
 import 'frontend_rfc.dart' show buildFrontendExceptionReply;
 import 'office_document.dart';
 import 'reply_container.dart';
@@ -21,7 +26,15 @@ import 'tree_header_names.dart' show collapseInlineRow;
 const String macroRefusedRc = '30';
 const String macroRefusedText =
     'macro not executed: no macro engine on this client';
+/// The sheet a document OPENED from bytes GuiGo cannot read starts with —
+/// the BDS demo sheet's own `Tabelle1` (a recorded session gui[84]).
 const String defaultSheet = 'Tabelle1';
+
+/// The sheet a CREATED workbook starts with: the French Office 16's new
+/// workbook `Feuil1` — XXL's GetActiveSheet (a recorded session
+/// srv[56] -> gui[47] t8 `Feuil1`, InsertFull2's source sheet #5), the same
+/// name the created chart's data sheet bears (doi_default_chart.dart).
+const String createdSheet = 'Feuil1';
 final RegExp containerClassRx = RegExp(r'^SAP\.DocumentContainerControl\.\d+$', caseSensitive: false);
 
 const Set<String> rangeRoles = {'RangeDef', 'Ranges', 'Content2', 'Content'};
@@ -81,13 +94,35 @@ const Map<String, int> doiMethodTypes = {
   'GetActiveSheet': 8, 'GetProtection': 8, 'GetDimension': 3, 'GetAllfields': 3, 'AddStringItem': 3,
   'AddStringItem2': 3, 'ExecuteMacro': 3, 'LastErrorString': 8, 'AddMenuBar': 3, 'AddMenu': 3,
   'AddMenuItem': 3, 'HideRows': 3, 'ShowRows': 3, 'InsertRange': 3, 'DeleteRange': 3, 'SetSelection': 3,
-  'ProtectDocument': 3, 'AddSchema2': 3, 'HasDocumentChanged': 3, 'CheckRegisteredProgIDs': 3,
+  'ProtectDocument': 3, 'AddSchema2': 3, 'CheckRegisteredProgIDs': 3,
+  // the proxy's "did the document change?" (SFP's pai_layout reads it):
+  // answered the blank BSTR — the Windows GUI's false on this wire — never
+  // a '0' value: it reached SFP's abap_bool AS '0', NOT INITIAL read as
+  // CHANGED, and FPUIFB 051 (the 'Impossible de sauvegarder modifications
+  // de mise en forme en mode affich.!' Information modal) popped every
+  // time the user worked in the read-only Designer (live the test system 2026-10-15;
+  // the earlier VT_BOOL '0' typing had the same failure — the row's text
+  // lands in the abap_bool verbatim). Blank is initial under any
+  // conversion, and "never changed" is true here: the model's document
+  // bytes never change.
+  'HasDocumentChanged': 8,
   // a recorded session: the chart / spreadsheet / Word 97 / pivot demos
   'StartLinkServer': 3, 'AddTableItem': 3, 'AddBinaryItem': 3, 'InsertRange2': 3,
   'InsertRangeDim2': 3, 'InsertOneTable': 3, 'SetFieldtype': 3, 'SetSelection2': 3,
   'SetSourceTable': 3, 'SetFrame': 3, 'FitWidest': 3, 'DrillUp': 3, 'DrillDown': 3,
   // SO10 / SMARTFORMS (the SAPscript Word editor), SFP (the Designer)
   'InstallReadOnlyTemplate': 3, 'SetTemplate': 3, 'ExecuteMacro2': 3, 'SetInPlaceBorderSpace': 3,
+  // XXL's insert_full (a recorded session srv[45]-[51],
+  // a recorded session srv[49]-[57]): the spreadsheet's
+  // formatting calls, error_nr ints like the rest; the decimal separator
+  // and the pivot's status text strings
+  'SetFormat': 3, 'SetColor': 3, 'CellFormat': 3, 'ScreenUpdating': 3, 'LoadLib': 3,
+  'GetApplicationProperty': 8, 'InsertFull2': 8,
+  // the ALV in-place sheet's members (a recorded session
+  // srv[55]-[58], [61]: t3 `0`) and the Office manager's ProgID list
+  // (srv[171] -> gui[143])
+  'SetDataTable': 3, 'SetInfoTable': 3, 'SetFixedCols': 3, 'SetLocale': 3,
+  'UpdateFrontend': 3, 'GetSelectedAreas': 3, 'GetRegisteredProgIDs': 3,
 };
 
 /// The SUBTYPE and DATABIN record width a document's save-back upload
@@ -123,7 +158,8 @@ class Document {
       {this.sourceUrl, String format = 'NATIVE', this.created = false})
       : kind = officeKindOf(cls),
         format = format.trim().isEmpty ? 'NATIVE' : format.trim().toUpperCase() {
-    if (kind != OfficeDocKind.word) sheets[defaultSheet] = {};
+    if (created) activeSheet = createdSheet;
+    if (kind != OfficeDocKind.word) sheets[activeSheet] = {};
   }
 
   final String cls;
@@ -156,6 +192,15 @@ class Document {
   /// template's `ProtectDocument` macro; `UnProtectDocument` lifts it).
   bool readOnly = false;
 
+  /// Opened in Office's own window, not in place: CreateDocument /
+  /// OpenDocument's open mode (#4) C_OI_CONTAINER_CONTROL_PROXY=>
+  /// OPEN_MODE_EDIT -2 (`open_inplace = ''` — XXL_FULL_API's created
+  /// `Excel.Sheet`, the chart demo's created chart, the Word 97 demo), vs
+  /// OPEN_MODE_INPLACEEDIT -4 / INPLACEVIEW -5 (the BDS sheet,
+  /// a recorded session srv[49]). The real GUI shows such a document in an
+  /// Excel / Word window that outlives the SAP control (release_document).
+  bool outOfPlace = false;
+
   /// The read-only template the document was attached to (SetTemplate
   /// after InfoCtrl.InstallReadOnlyTemplate) and its bytes as pushed.
   String? templateName;
@@ -173,13 +218,29 @@ class Document {
     version++;
   }
 
+  /// The sheets in tab order (a chart sheet holds no cells): sheet ->
+  /// (row, column) 1-based -> the cell's text.
   final Map<String, Map<(int, int), String>> sheets = {};
+
+  /// The cells typed as numbers ([setNumber]: the created chart's data),
+  /// their text in [sheets]; a [setCell] makes a cell text again.
+  final Map<String, Map<(int, int), num>> numbers = {};
+
+  /// The chart sheets' charts, by sheet name (doi_default_chart.dart: a
+  /// created `Excel.Chart`).
+  final Map<String, DoiChart> charts = {};
   String activeSheet = defaultSheet;
   final Map<String, DocRange> ranges = {};
   final List<String> rangeOrder = [];
   final List<(String, String)> stringItems = [];
   final Map<String, String> tables = {};
   bool closed = false;
+
+  /// The server released the document (ReleaseDocument /
+  /// ReleaseAllDocuments): its Office window may live on ([outOfPlace]),
+  /// but no later verb of another container addresses it
+  /// (a recorded session srv[54]/[55]).
+  bool released = false;
   final List<String> savedUrls = [];
   final List<String> notes = [];
 
@@ -211,11 +272,62 @@ class Document {
 
   void setCell(int row, int col, String value, [String? sheet]) {
     sheets.putIfAbsent(sheet ?? activeSheet, () => {})[(row, col)] = value;
+    numbers[sheet ?? activeSheet]?.remove((row, col));
     version++;
   }
 
   String cell(int row, int col, [String? sheet]) =>
       (sheets[sheet ?? activeSheet] ?? const {})[(row, col)] ?? '';
+
+  /// A number cell: [value] typed, its text (`12`, `1.5`) in [sheets].
+  void setNumber(int row, int col, num value, [String? sheet]) {
+    final s = sheet ?? activeSheet;
+    final whole = value is int ||
+        (value.isFinite && value == value.roundToDouble() && value.abs() < 1e15);
+    setCell(row, col, whole ? value.toInt().toString() : value.toString(), s);
+    numbers.putIfAbsent(s, () => {})[(row, col)] = value;
+  }
+
+  /// The typed number of a [setNumber] cell, null for a text cell.
+  num? numberAt(int row, int col, [String? sheet]) =>
+      numbers[sheet ?? activeSheet]?[(row, col)];
+
+  /// The numeric formats SetFormat gave named ranges: range -> decimals
+  /// (i_oi_spreadsheet~set_format(range, typ 1, currency, decimals) — XXL's
+  /// data columns DATA5..DATA9, a recorded session srv[52]).
+  final Map<String, int> numberFormats = {};
+
+  /// What Excel holds at the cell: a [setNumber] number, the number a
+  /// numeric text becomes in a range [numberFormats] formats (the server
+  /// sends `2976986.78000000000000` as text; Excel stores the number), else
+  /// the text.
+  Object valueAt(int row, int col, [String? sheet]) {
+    final s = sheet ?? activeSheet;
+    final n = numberAt(row, col, s);
+    if (n != null) return n;
+    final text = cell(row, col, s);
+    if (text.isNotEmpty && s == activeSheetOfRanges && numberFormats.isNotEmpty) {
+      for (final MapEntry(key: name, value: _) in numberFormats.entries) {
+        final rg = ranges[name];
+        if (rg == null ||
+            row < rg.top ||
+            row >= rg.top + rg.rows ||
+            col < rg.left ||
+            col >= rg.left + rg.cols) {
+          continue;
+        }
+        final v = num.tryParse(text.trim());
+        if (v != null) {
+          return v == v.roundToDouble() && v.abs() < 1e15 ? v.toInt() : v;
+        }
+      }
+    }
+    return text;
+  }
+
+  /// The sheet the named ranges were placed on (InsertRangeDim2 places them
+  /// on the active sheet; a later pivot sheet does not move them).
+  String activeSheetOfRanges = '';
 
   /// SOI_RANGE_LIST rows (name, rows, columns, code) in definition order.
   List<(String, int, int, String)> rangeRows() => [
@@ -288,14 +400,48 @@ class Document {
   }
 
   /// Whether the document changed since the frontend last saved it — what
-  /// CloseDocument(n, save) answers: the created chart closed unsaved
-  /// with save 1 -> '1' (a recorded session gui[25]), the Word 97 document
+  /// CloseDocument(n, save) answers, whatever its save flag: the created
+  /// chart closed unsaved with save 1 -> '1' (a recorded session gui[25])
+  /// and with save 0 -> '1' (a recorded session srv[77] ->
+  /// gui[64], after the user's "Non"), the Word 97 document
   /// SaveDocumentToURL'd before its CloseDocument(1, 1) -> '0' (gui[159]),
-  /// a CloseDocument(1, 0) -> '0' (gui[94]).
+  /// the opened BDS sheet's CloseDocument(1, 0) -> '0' (gui[94]).
   bool get changedSinceSave => created && savedUrls.isEmpty;
 }
 
 int _int(String? v, int dflt) => int.tryParse((v ?? '').trim()) ?? dflt;
+
+/// An ABAP integer argument as the kernel writes it — a trailing sign for
+/// a negative one (`2-`, `1-`: a recorded session's open modes and
+/// `updating`); null when not a number.
+int? _abapInt(String? v) {
+  final s = (v ?? '').trim();
+  if (s.endsWith('-')) {
+    final n = int.tryParse(s.substring(0, s.length - 1).trim());
+    return n == null ? null : -n;
+  }
+  return int.tryParse(s);
+}
+
+/// C_OI_CONTAINER_CONTROL_PROXY=>OPEN_MODE_EDIT: the document opens in
+/// Office's own window (`open_inplace = ''`); INPLACEEDIT is -4,
+/// INPLACEVIEW -5.
+const int openModeEdit = -2;
+
+/// The decimal separator the Office 16 Excel reports
+/// (Application.International) — the en-US / fr-CH Windows default. NOT on
+/// record: the recorded PC's locale is unknown.
+const String excelDecimalSeparator = '.';
+
+/// What the Excel application answers GetApplicationProperty([property],
+/// [sub]) with, null when unknown (the blank default).
+String? excelApplicationProperty(String property, String sub) {
+  final p = property.trim().toUpperCase(), s = sub.trim().toUpperCase();
+  if (p == 'INTERNATIONAL' && s == 'DECIMAL_SEPARATOR') {
+    return excelDecimalSeparator;
+  }
+  return null;
+}
 
 /// A pushed cell value as text: the decoded field, trimmed.
 String _text(String v) {
@@ -393,6 +539,12 @@ class DoiState {
   /// SaveDataToUrl(dp, …02A000), pulled by srv[27]).
   final Map<String, Uint8List> progIdSinks = {};
 
+  /// GetRegisteredProgIDs result sinks: sink url -> the pushed (empty)
+  /// table whose FORMAT the list is uploaded in (a recorded session
+  /// inplace srv[171]: SetDataFromUrl(dp, …8000) GetRegisteredProgIDs
+  /// ('BASIC', dp) SaveDataToUrl(…, …A000), pulled by srv[172]).
+  final Map<String, Uint8List> progIdListSinks = {};
+
   /// The containers whose open document has not had its activation event
   /// yet ([officeActivationEvent]), newest last — consumed by the session's
   /// [SapSession.officeDocumentActivated].
@@ -433,6 +585,7 @@ class DoiState {
     _capOldest(dpPropertySinks, maxEntries);
     _capOldest(dpPropertySinkSrc, maxEntries);
     _capOldest(progIdSinks, maxEntries);
+    _capOldest(progIdListSinks, maxEntries);
     _capOldest(registeredEvents, maxEntries);
     _capOldest(templates, maxDocs);
     if (pendingActivation.length > maxEntries) {
@@ -500,7 +653,8 @@ Document? _currentDoc(DoiState st, String? shell) {
   final cont = shell != null ? st.containers[shell] : null;
   if (cont != null && cont['current'] != null) return cont['current'] as Document;
   for (final c in st.containers.values) {
-    if (c['current'] != null) return c['current'] as Document;
+    final d = c['current'];
+    if (d is Document && !d.released) return d;
   }
   return null;
 }
@@ -535,11 +689,19 @@ Document? _docOf(DoiState st, EaSession session, VerbMeta m, Map<String, String>
   if (_digitsOnlyRx.hasMatch(objv)) {
     for (final e in containers.entries) {
       if (objv == e.key || objv == (session.shellAlias[e.key] ?? e.key)) {
-        return _currentDoc(st, e.key);
+        // THAT container's document only: before its CreateDocument /
+        // OpenDocument it has none, and the link-server items wait for it
+        // (pending) — never the document of another, released container
+        // (a recorded session srv[64]-[67] / srv[90]: the
+        // chart demo's and the Word demo's items landed on the previous
+        // scene's sheet / chart)
+        return st.containers[e.key]?['current'] as Document?;
       }
     }
   }
-  if (st.createdDocs.length == 1) return st.createdDocs.first.$2;
+  if (st.createdDocs.length == 1 && !st.createdDocs.first.$2.released) {
+    return st.createdDocs.first.$2;
+  }
   return null;
 }
 
@@ -567,12 +729,19 @@ Map<int, Uint8List> doiObserveCall(EaSession session, DoiState st, FlushCall cal
   }
   final lastError = <String, String>{};
   final dpUrlByRow = <String, String>{};
+  // the teardown flush destroys its container in the same queue (its
+  // DestroyWindow is folded first) after the proxies were freed: its
+  // ReleaseAllDocuments still releases the documents
+  // (a recorded session srv[49] / [67])
   if (containers.isEmpty &&
       st.proxies.isEmpty &&
       !verbs.any((v) =>
           v == 'CreateDocument' ||
           v == 'OpenDocument' ||
-          v == 'CheckRegisteredProgIDs')) {
+          v == 'ReleaseDocument' ||
+          v == 'ReleaseAllDocuments' ||
+          v == 'CheckRegisteredProgIDs' ||
+          v == 'GetRegisteredProgIDs')) {
     return out;
   }
   for (final (sh, ev) in call.registeredEvents) {
@@ -591,21 +760,72 @@ Map<int, Uint8List> doiObserveCall(EaSession session, DoiState st, FlushCall cal
   DpCache? own;
   DpCache ownPushes() => own ??= (DpCache()..ingestValue(call.raw));
   final checksProgIds = verbs.contains('CheckRegisteredProgIDs');
+  final listsProgIds = verbs.contains('GetRegisteredProgIDs');
+  String? lastLoaded; // the url the last SetDataFromUrl of the call loaded
+  // the container objects whose OpenDocument this call could not start:
+  // the LastError code each answers next (the OpenDocument wrapper's
+  // one-flush batch, a recorded session srv[28])
+  final openFailed = <String, String>{};
   for (var i = 1; i <= verbs.length; i++) {
     final verb = verbs[i - 1];
     final m = meta[i - 1];
-    final args = {for (final a in verbArgs(call, i)) a.$1: a.$2};
+    // a `_SPARAMETER` argument (a url longer than a VARS cell) is the SVARS
+    // item it numbers, never its row's `1`: the Word 97 demo's BDS
+    // OpenDocument #3 (a recorded session srv[125] -> SAPR3://SAPR3CMS/get/
+    // …/DEMOWORD97DOC) — read as `1`, the document the server pushed under
+    // that url was never found, and its SaveDocumentToURL refused (33 ->
+    // SOFFICEINTEGRATION 133, SAPRDEMOWORD97INTEGRATION SELECT, live
+    // 2026-10-14) where the real GUI saved it (srv[126] '0', gui[117])
+    final args = {
+      for (final a in verbArgs(call, i))
+        a.$1: verbArgText(call, i, a.$1) ?? a.$2,
+    };
     final obj = m.obj.trim();
     final objv = m.objValue.trim();
     final res = m.result?.trim() ?? '';
+    final failKey = objv.isNotEmpty ? objv : obj;
+    if (verb == 'FreeObject') {
+      // a released handle names no proxy / data object any more: the next
+      // object reuses its number (Windows handle reuse) — a stale binding
+      // put the chart demo's link-server items on the XXL sheet's document
+      // (a recorded session srv[53] frees the proxies,
+      // srv[62] mints the next container under a freed number)
+      final h = (args['#1'] ?? '').trim();
+      if (_digitsOnlyRx.hasMatch(h)) {
+        st.proxies.remove('obj:$h');
+        st.dpRoles.remove('obj:$h');
+      }
+      continue;
+    }
     if (verb == 'SetDataFromUrl') {
       final u = (args['#3'] ?? '').trim();
       if (u.startsWith('SAPR3://') && obj.isNotEmpty) {
         dpUrlByRow[obj] = u;
+        lastLoaded = u;
         if (st.docBytes.containsKey(u) || st.docErrors.containsKey(u)) {
           st.dpRoles['row:$obj'] = ('document', u);
         }
       }
+    } else if (verb == 'OpenDocument' && !progIdHosted(args['#1'] ?? '')) {
+      // a class this frontend cannot start (no Lotus 1-2-3 …): ordinary
+      // typed results and NO document — OpenDocument 0, LastError 8, the
+      // proxy the null object, LastError 40 (a recorded session
+      // srv[28] -> gui[21]; recorded values, SAPsdcc.OCX's enum unread).
+      // The server then tears the container down itself (srv[30])
+      openFailed[failKey] = '8';
+      if (res.isNotEmpty) {
+        _putResult(out, res, Uint8List.fromList('0'.codeUnits));
+      }
+    } else if (verb == 'LastError' && openFailed.containsKey(failKey)) {
+      if (res.isNotEmpty) {
+        _putResult(out, res, Uint8List.fromList(openFailed[failKey]!.codeUnits));
+      }
+    } else if (verb == 'GetDocumentProxyInterface' &&
+        openFailed.containsKey(failKey)) {
+      // `O-1`, no handle minted, no proxy bound (gui[21] row 20)
+      final row = int.tryParse(res);
+      if (row != null && row >= 1) call.nullObjectRows.add(row - 1);
+      openFailed[failKey] = '40';
     } else if (verb == 'CreateDocument' || verb == 'OpenDocument') {
       var shell = _shellOfObject(session, call, m, containers);
       if (!containers.containsKey(shell ?? '') && containers.length == 1) {
@@ -622,17 +842,34 @@ Map<int, Uint8List> doiObserveCall(EaSession session, DoiState st, FlushCall cal
               _pushedBytes(ownPushes().byUrl[url]);
         }
       }
-      final doc = Document(args['#1'] ?? '', (cont['docs'] as List<Document>).length + 1,
+      // the frontend numbers documents per container from 1 and frees a
+      // number on ReleaseDocument: the re-open after ReleaseDocument(1) is
+      // document 1 again (a recorded session, the second Word
+      // session), never len(docs)+1
+      final live = {
+        for (final d in cont['docs'] as List<Document>)
+          if (!d.released) d.number,
+      };
+      var number = 1;
+      while (live.contains(number)) {
+        number++;
+      }
+      final doc = Document(args['#1'] ?? '', number,
           sourceUrl: url, format: args['#2'] ?? '', created: verb == 'CreateDocument');
       if (data != null) {
         doc.setSource(data.$1, subtype: data.$2);
       } else if (url != null && url.isNotEmpty) {
         doc.notes.add('OpenDocument source $url not in the DP cache; the model starts empty');
       }
+      // a new chart object: Excel's default chart sheet + data sheet
+      // (doi_default_chart.dart, a recorded session srv[35])
+      if (doc.created && isExcelChartClass(doc.cls)) applyDefaultChart(doc);
       // the open flags: 0x200 = read-only (SO10 / SMARTFORMS display 513)
       if (((int.tryParse((args['#5'] ?? '').trim()) ?? 0) & 0x200) != 0) {
         doc.readOnly = true;
       }
+      // the open mode: -2 = OPEN_MODE_EDIT, Office's own window
+      if (_abapInt(args['#4']) == openModeEdit) doc.outOfPlace = true;
       doc.stringItems.addAll(cont['pending_items'] as List<(String, String)>);
       doc.tables.addAll(cont['pending_tables'] as Map<String, String>);
       cont['pending_items'] = <(String, String)>[];
@@ -730,6 +967,124 @@ Map<int, Uint8List> doiObserveCall(EaSession session, DoiState st, FlushCall cal
         _stampResultType(call, i, 8);
         _putResult(out, res, Uint8List.fromList(officeGetVersion.codeUnits));
       }
+    } else if (verb == 'InsertRangeDim2') {
+      // i_oi_spreadsheet~insert_range_dim(name, left, top, rows, columns,
+      // updating, sheetname): the named range Excel creates at those cells
+      // — XXL's insert_full places its ranges so (DATA<n>, TESTVKEY,
+      // TESTHKEY, TEST<n>, TESTKEYS) before SetRangesData3 fills them BY
+      // NAME (OFFICEINTEGRATIONDOCPROXYIMP). A range of no rows (the pivot
+      // demo's `sflight`, rows 0 — a recorded session srv[69]; the
+      // InsertOneTable after it sizes it) is left to that fill.
+      final doc = _docOf(st, session, m, containers);
+      final name = (args['#1'] ?? '').trim();
+      final left = _abapInt(args['#2']) ?? 0;
+      final top = _abapInt(args['#3']) ?? 0;
+      final rows = _abapInt(args['#4']) ?? 0;
+      final cols = _abapInt(args['#5']) ?? 0;
+      final sheet = (args['#7'] ?? '').trim();
+      if (doc != null &&
+          doc.kind == OfficeDocKind.excel &&
+          name.isNotEmpty &&
+          top > 0 &&
+          left > 0 &&
+          rows > 0 &&
+          cols > 0 &&
+          (sheet.isEmpty || sheet == doc.activeSheet)) {
+        doc.defineRange(name, top, left, rows, cols);
+        if (doc.activeSheetOfRanges.isEmpty) {
+          doc.activeSheetOfRanges = doc.activeSheet;
+        }
+      }
+    } else if (verb == 'SetFormat') {
+      // i_oi_spreadsheet~set_format(range, typ, currency, decimals): typ 1
+      // a number with that many decimals (xxl_two_runs srv[52] DATA5 `1,
+      // '', 2`; the text columns `0, '', 1-`)
+      final doc = st.proxies['obj:$objv'] ?? st.proxies['row:$obj'];
+      final name = (args['#1'] ?? '').trim();
+      if (doc != null && doc.kind == OfficeDocKind.excel && name.isNotEmpty) {
+        if ((args['#2'] ?? '').trim() == '1') {
+          doc.numberFormats[name] = _abapInt(args['#4']) ?? 0;
+        } else {
+          doc.numberFormats.remove(name);
+        }
+      }
+    } else if (verb == 'InsertFull2') {
+      // the PIVOT proxy's pivot over the filled sheet (doi_pivot.dart,
+      // xxl_two_runs srv[57]); its answer is the OCX's empty status text
+      final doc = st.proxies['obj:$objv'] ?? st.proxies['row:$obj'];
+      if (doc != null && doc.kind == OfficeDocKind.excel) {
+        List<List<String>> table(String arg) {
+          final u = dpUrlByRow[(m.slots[arg] ?? '').trim()];
+          final seg = u == null
+              ? null
+              : session.dpCache.byUrl[u] ?? ownPushes().byUrl[u];
+          return seg == null ? const [] : doiPushRows(seg);
+        }
+
+        final made = applyInsertFull2(
+          doc,
+          dataTitles: table('#1'),
+          keyTitles: table('#2'),
+          header: table('#3'),
+          roles: table('#4'),
+          source: args['#5'] ?? '',
+          dataRows: _abapInt(args['#6']) ?? 0,
+          dataCols: _abapInt(args['#7']) ?? 0,
+          keyCols: _abapInt(args['#8']) ?? 0,
+        );
+        if (made == null) doc.notes.add('InsertFull2: no pivot data');
+      }
+      if (res.isNotEmpty) {
+        _stampResultType(call, i, 8);
+        _putResult(out, res, Uint8List(0));
+      }
+    } else if (verb == 'SetDataTable' || verb == 'SetInfoTable') {
+      // the ALV in-place view's own tables on the spreadsheet proxy
+      // (doi_alv_sheet.dart; a recorded session srv[55] /
+      // [56]): the DataProvider #1 was loaded in the same flush
+      final doc = st.proxies['obj:$objv'] ?? st.proxies['row:$obj'];
+      final u = dpUrlByRow[(m.slots['#1'] ?? '').trim()] ?? lastLoaded;
+      final seg = u == null
+          ? null
+          : session.dpCache.byUrl[u] ?? ownPushes().byUrl[u];
+      if (doc != null && doc.kind == OfficeDocKind.excel && seg != null) {
+        if (applyAlvTable(doc, seg, isInfo: verb == 'SetInfoTable')) {
+          doc.version++;
+        }
+      }
+    } else if (verb == 'GetSelectedAreas') {
+      // the in-place view's selection read (CL_SALV_GRU_VIEW_EXCEL
+      // get_selected_cells, srv[61] / [67]): three DataProviders the OCX
+      // fills — the selected areas, their rows, their columns — each
+      // saved back by a later SaveDataToUrl and pulled (srv[62]-[66])
+      final doc = st.proxies['obj:$objv'] ?? st.proxies['row:$obj'];
+      if (doc != null && doc.kind == OfficeDocKind.excel) {
+        for (final (arg, family) in const [
+          ('#1', 'selareas'),
+          ('#2', 'selrows'),
+          ('#3', 'selcols'),
+        ]) {
+          final row = (m.slots[arg] ?? '').trim();
+          if (row.isNotEmpty) st.dpRoles['row:$row'] = (family, doc);
+        }
+      }
+    } else if (verb == 'SetFont') {
+      // i_oi_spreadsheet~set_font: RESULT = error_nr, an int — the table's
+      // object type (an automation Font) is wrong on a spreadsheet proxy
+      final doc = st.proxies['obj:$objv'] ?? st.proxies['row:$obj'];
+      if (doc != null && doc.kind == OfficeDocKind.excel && res.isNotEmpty) {
+        _stampResultType(call, i, 3);
+        _putResult(out, res, Uint8List.fromList('0'.codeUnits));
+      }
+    } else if (verb == 'GetApplicationProperty') {
+      // i_oi_document_proxy~get_application_property: insert_full reads
+      // ('INTERNATIONAL', 'DECIMAL_SEPARATOR') and TRANSLATEs its
+      // SET COUNTRY 'DE' numbers (`1234,5`) with it; blank, every value's
+      // comma became a space
+      final v = excelApplicationProperty(args['#1'] ?? '', args['#2'] ?? '');
+      if (v != null && res.isNotEmpty) {
+        _putResult(out, res, Uint8List.fromList(v.codeUnits));
+      }
     } else if (verb == 'ExecuteMacro' || verb == 'ExecuteMacro2') {
       final doc = _docOf(st, session, m, containers);
       final name = (args['#1'] ?? args['#01'] ?? '').trim();
@@ -795,15 +1150,25 @@ Map<int, Uint8List> doiObserveCall(EaSession session, DoiState st, FlushCall cal
           _putResult(out, res, Uint8List.fromList('33'.codeUnits));
         }
       }
+    } else if (verb == 'ReleaseDocument' || verb == 'ReleaseAllDocuments') {
+      final shell = _shellOfObject(session, call, m, containers);
+      final cont = st.containers[shell ?? ''];
+      if (cont != null) {
+        for (final d in cont['docs'] as List<Document>) {
+          if (verb == 'ReleaseAllDocuments' ||
+              d.number == _int(args['#1'], 1)) {
+            d.released = true;
+          }
+        }
+      }
     } else if (verb == 'CloseDocument') {
       final shell = _shellOfObject(session, call, m, containers);
       final doc = _numberedDoc(st, shell, args['#1']);
       if (doc != null) {
-        final save = (args['#2'] ?? '').trim();
         if (res.isNotEmpty) {
           // has_changed (see [Document.changedSinceSave])
-          final changed = save.isNotEmpty && save != '0' && doc.changedSinceSave;
-          _putResult(out, res, Uint8List.fromList((changed ? '1' : '0').codeUnits));
+          _putResult(out, res,
+              Uint8List.fromList((doc.changedSinceSave ? '1' : '0').codeUnits));
         }
         doc.closed = true;
         doc.version++;
@@ -822,6 +1187,18 @@ Map<int, Uint8List> doiObserveCall(EaSession session, DoiState st, FlushCall cal
         // `SAPR3://…02A000` where GuiGo's blank made the Form Builder abort
         // with "cannot start the design tool")
         _putResult(out, res, Uint8List.fromList(sink.codeUnits));
+      }
+      if (listsProgIds && dpUrlByRow.containsKey(obj)) {
+        // the Office manager's registered ProgIDs, uploaded in the pushed
+        // table's FORMAT (OAOR srv[171] -> gui[144])
+        final src = dpUrlByRow[obj]!;
+        final seg = session.dpCache.byUrl[src] ?? ownPushes().byUrl[src];
+        if (seg != null) {
+          st.progIdListSinks
+            ..remove(sink)
+            ..[sink] = Uint8List.fromList(seg);
+          continue;
+        }
       }
       if (checksProgIds && dpUrlByRow.containsKey(obj)) {
         // the Office manager's check result (a recorded session
@@ -1282,6 +1659,8 @@ Uint8List? doiAnswerPullRfc(EaSession session, DoiState st, Uint8List value) {
   if (inurl == null) return null;
   final progIds = st.progIdSinks.remove(inurl);
   if (progIds != null) return progIdCheckAnswer(value, progIds);
+  final list = st.progIdListSinks.remove(inurl);
+  if (list != null) return registeredProgIdsAnswer(value, list);
   final family = st.dpPropertySinks[inurl];
   if (family == null || !family.startsWith('doi:')) return null;
   final src = st.dpPropertySinkSrc[inurl];
@@ -1304,6 +1683,8 @@ Uint8List? doiAnswerPullRfc(EaSession session, DoiState st, Uint8List value) {
         // where the ranges' ROWS / COLUMNS are zero-filled (gui[47] `0011`)
         {'1': '$rr', '2': '$cc', '3': v}
     ];
+  } else if (fam == 'selareas' || fam == 'selrows' || fam == 'selcols') {
+    return selectionPullAnswer(value, doc, fam);
   } else if (fam == 'sheets') {
     // the workbook's sheet order (the reference client's answer_pull), not sorted
     rows = [
@@ -1317,6 +1698,56 @@ Uint8List? doiAnswerPullRfc(EaSession session, DoiState st, Uint8List value) {
   return doiTableAnswer(value, layoutRowsByFormat(records, rows));
 }
 
+/// The in-place spreadsheet's selection read-back ([fam] `selareas` /
+/// `selrows` / `selcols`): the headless sheet's selection is Excel's
+/// initial one, cell A1 — the real GUI's uploads after the open
+/// (a recorded session srv[62] / [64] / [66] -> gui[45] /
+/// [47] / [49], the same at srv[68]-[72]): the areas table one record
+/// TOP 1, LEFT 1, ROWS 1, COLUMNS 1 (INT4 LE) and a blank flag, the OCX's
+/// own `0`s after it (bytes 17-19 of its 20-byte record); the rows table one
+/// record row 1 with no ALV row id (row 1 is the header row); the columns
+/// table one record column 1, its field name and column id from the
+/// catalog. The tables' FORMAT / record width are the request's. Null
+/// when the request declares no FORMAT.
+Uint8List? selectionPullAnswer(Uint8List requestV, Document doc, String fam) {
+  final (_, records) = dpgetFormat(requestV);
+  if (records.isEmpty || records.any((r) => r.length < _fmtRecMin)) {
+    return null;
+  }
+  final fields = [for (final r in records) fmtRec(r)];
+  // the request's own DATAASC record width (20 B for the areas)
+  var rowLen = dpColumnCells(requestV, 'DATAASC').$2.$1;
+  for (final f in fields) {
+    if (f.offset + f.length > rowLen) rowLen = f.offset + f.length;
+  }
+  if (rowLen <= 0 || rowLen > 1 << 16) return null;
+  final (name, id) = alvColumnAt(doc, 1);
+  final List<Object> values = switch (fam) {
+    'selareas' => [1, 1, 1, 1, ''],
+    'selrows' => [1, '', ''],
+    _ => [1, name, id],
+  };
+  final row = Uint8List(rowLen)..fillRange(0, rowLen, 0x20);
+  for (var k = 0; k < fields.length && k < values.length; k++) {
+    final f = fields[k];
+    final v = values[k];
+    if (f.type == 0x49 /* I */ && f.length == 4 && v is int) {
+      ByteData.sublistView(row, f.offset, f.offset + 4)
+          .setInt32(0, v, Endian.little);
+    } else {
+      final b = utf8.encode('$v');
+      final n = b.length < f.length ? b.length : f.length;
+      row.setRange(f.offset, f.offset + n, b);
+    }
+  }
+  final last = fields.last;
+  if (fam == 'selareas') {
+    // the OCX's `0`s past the fields (gui[45]: `… 20 30` collapsed)
+    row.fillRange(last.offset + last.length, rowLen, 0x30);
+  }
+  return doiTableAnswer(requestV, [row], rowLength: rowLen);
+}
+
 /// A DOI read-back's answer in the real GUI's envelope (a recorded session
 /// gui[47] / gui[49] / gui[84], the ranges / contents / sheets uploads):
 /// TYPE `APPLICATION`, SUBTYPE `X-R3TABLE`, DATE `00000000`, TIME
@@ -1326,7 +1757,7 @@ Uint8List? doiAnswerPullRfc(EaSession session, DoiState st, Uint8List value) {
 /// empty PROPS and the `06 67` trailer. Null when the request declares no
 /// FORMAT (nothing to lay the rows out by).
 Uint8List? doiTableAnswer(Uint8List requestV, List<Uint8List> rows,
-    {int totalSize = 0, List<Uint8List>? formatRecords}) {
+    {int totalSize = 0, List<Uint8List>? formatRecords, int? rowLength}) {
   final (width0, reqRecords) = dpgetFormat(requestV);
   final records = formatRecords ?? reqRecords;
   if (records.isEmpty) return null;
@@ -1341,6 +1772,9 @@ Uint8List? doiTableAnswer(Uint8List requestV, List<Uint8List> rows,
     final extent = f.offset + f.length;
     if (extent > rowLen) rowLen = extent;
   }
+  // a record wider than its fields (the selection areas' 20 B for 17 B of
+  // fields, a recorded session gui[45])
+  if (rowLength != null && rowLength > rowLen) rowLen = rowLength;
   // the request's u32 width / offsets / lengths come off the wire: a table
   // past what any decode could produce is a hostile request
   if (rowLen <= 0 ||
@@ -1399,6 +1833,21 @@ bool progIdRegistered(String progId) {
   return officeKindOf(p) != OfficeDocKind.other || p.startsWith('pdfxmldesigner.');
 }
 
+/// Whether OpenDocument can start a document of class [progId] here: a
+/// class [progIdRegistered] hosts, or one the Office 16 PC registers
+/// ([officeRegisteredProgIds], its version-independent name too —
+/// `PowerPoint.Show` for `PowerPoint.Show.12`). Not `Lotus123.Workbook`
+/// (a recorded session srv[28]: that PC had no Lotus).
+bool progIdHosted(String progId) {
+  final p = progId.trim().toLowerCase();
+  if (p.isEmpty || progIdRegistered(p)) return true;
+  for (final (id, _, _, _, _) in officeRegisteredProgIds) {
+    final r = id.toLowerCase();
+    if (r == p || r.startsWith('$p.')) return true;
+  }
+  return false;
+}
+
 /// The answer to the Office manager's CheckRegisteredProgIDs result pull:
 /// the ProgID table the server pushed ([pushSeg]), each row written back
 /// with its last column (the 1-char registered flag) `X` when
@@ -1451,6 +1900,71 @@ Uint8List? progIdCheckAnswer(Uint8List requestV, Uint8List pushSeg) {
   }
   return doiTableAnswer(requestV, rows,
       totalSize: rl * rows.length, formatRecords: records);
+}
+
+/// The Office document classes an Office 16 PC registers, as the Office
+/// manager's `GetRegisteredProgIDs('BASIC', table)` lists them: ProgID,
+/// description, short type, product, capability flags — the real SAP GUI
+/// for Windows' upload, row for row (a recorded session
+/// srv[172] -> gui[144], 9 records of the pushed 6-column X-UNKNOWN
+/// table, the 6th column blank). The table GuiGo's Office 16 identity
+/// (frontend_features.dart, frontend_registry.dart) answers with: a
+/// document of these classes is shown read-only in the Office pane
+/// (PowerPoint's as its bytes, the platform viewer). The no-Office table
+/// is unrecorded.
+const List<(String, String, String, String, String)> officeRegisteredProgIds = [
+  ('Excel.Chart.8', 'Microsoft Excel Chart', 'Chart', 'Microsoft Excel 2003',
+      'BASIC FORM SPREADSHEET PIVOT'),
+  ('Excel.Sheet.12', 'Microsoft Excel Worksheet', 'Worksheet',
+      'Microsoft Excel 12', 'BASIC FORM SPREADSHEET PIVOT'),
+  ('Excel.Sheet.8', 'Microsoft Excel 97-2003 Worksheet', 'Worksheet',
+      'Microsoft Excel 2003', 'BASIC FORM SPREADSHEET PIVOT'),
+  ('PowerPoint.Show.12', 'Microsoft PowerPoint Presentation', 'Presentation',
+      'Microsoft PowerPoint Presentation', 'BASIC'),
+  ('PowerPoint.Show.8', 'Microsoft PowerPoint 97-2003 Presentation',
+      'Presentation', 'Microsoft PowerPoint 97-2003 Presentation', 'BASIC'),
+  ('PowerPoint.Slide.12', 'Microsoft PowerPoint Slide', 'Slide',
+      'Microsoft PowerPoint Slide', 'BASIC'),
+  ('PowerPoint.Slide.8', 'Microsoft PowerPoint 97-2003 Slide', 'Slide',
+      'Microsoft PowerPoint 97-2003 Slide', 'BASIC'),
+  ('Word.Document.12', 'Microsoft Word Document', 'Document', 'Microsoft Word',
+      'BASIC WORDPROCESSOR MAILMERGE FORM'),
+  ('Word.Document.8', 'Microsoft Word 97 - 2003 Document', 'Document',
+      'Microsoft Word 97 - 2003', 'BASIC WORDPROCESSOR MAILMERGE FORM'),
+];
+
+/// The answer to the Office manager's GetRegisteredProgIDs result pull:
+/// [officeRegisteredProgIds] laid out by the pushed table's FORMAT
+/// ([pushSeg]: six C columns 70 / 70 / 20 / 50 / 256 / 1), in the DOI
+/// upload envelope (TOTALSIZE 0, as gui[144]). Null when the push declares
+/// no FORMAT.
+Uint8List? registeredProgIdsAnswer(Uint8List requestV, Uint8List pushSeg) {
+  final (_, (fw, fn), fcells) = dpColumnCells(pushSeg, 'FORMAT');
+  final fb = BytesBuilder(copy: false);
+  for (final c in fcells) {
+    fb.add(c);
+  }
+  final f = fb.takeBytes();
+  final w = fw > 0 ? fw : cat80;
+  final records = [
+    for (var i = 0; (i + 1) * w <= f.length && (fn <= 0 || i < fn); i++)
+      Uint8List.sublistView(f, i * w, (i + 1) * w),
+  ];
+  if (records.isEmpty || records.any((r) => r.length < _fmtRecMin)) {
+    return null;
+  }
+  final names = [
+    for (final r in records) String.fromCharCodes(r, 30, 60).trim().toUpperCase(),
+  ];
+  final rows = [
+    for (final (a, b, c, d, e) in officeRegisteredProgIds)
+      {
+        for (final (k, v) in [a, b, c, d, e, ''].indexed)
+          if (k < names.length) names[k]: v,
+      },
+  ];
+  return doiTableAnswer(requestV, layoutRowsByFormat(records, rows),
+      formatRecords: records);
 }
 
 /// The save-back document pull's verdict: true = ours, the bytes held;

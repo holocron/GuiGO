@@ -97,6 +97,9 @@ extension SapSessionLayout on SapSession {
         graphShells: {
           for (final g in netPlans)
             if (g.shell case final sh?) sh,
+          // the SAPbarc.OCX bar charts (sap_session_barchart.dart)
+          for (final b in barCharts)
+            if (b.shell case final sh?) sh,
         },
         contentShells: st.contentShells,
         editorLines: _editorLines,

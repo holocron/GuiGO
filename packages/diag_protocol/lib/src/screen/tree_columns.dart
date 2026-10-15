@@ -82,6 +82,18 @@ class SapTreeColumns {
   /// server says otherwise — a column tree's default).
   bool withHeader = true;
 
+  /// Whether the server put `WithHeader` at all: a tree with no item
+  /// column draws its (hierarchy) header strip only when told to.
+  bool withHeaderDeclared = false;
+
+  /// The hierarchy item's own ITEM_NAME — `InsertHierarchy(<name>)` /
+  /// `LastHierarchyItemName(<name>)`: `&Hierarchy` for the ALV tree, `HD`
+  /// for CL_GUI_COLUMN_TREE's trees of GFW_DEMO_HIER3
+  /// (a recorded session srv[28] verbs 116 / 132). Its cells
+  /// are the node texts, never an item column of their own (read as one
+  /// the trees were drawn as two-column trees, "Gerr | Germany").
+  String hierarchyName = hierarchyItem;
+
   /// Whether the server declared any item column.
   bool get isEmpty => byName.isEmpty;
 
@@ -112,9 +124,15 @@ class SapTreeColumns {
     return null;
   }
 
+  /// Whether [name] names the hierarchy column (its item or its header).
+  bool isHierarchy(String name) =>
+      name == hierarchyItem ||
+      name == 'HierarchyHeader' ||
+      name.trim() == hierarchyName.trim();
+
   /// The column [name] (blank-insensitive), created when [create].
   SapTreeColumn? column(String name, {bool create = false}) {
-    if (name == hierarchyItem || name == 'HierarchyHeader') return hierarchy;
+    if (isHierarchy(name)) return hierarchy;
     final hit = byName[name] ?? _byTrimmed(name);
     if (hit != null || !create) return hit;
     return byName[name] = SapTreeColumn(name);
@@ -135,6 +153,8 @@ class SapTreeColumns {
     byName.clear();
     headerNames = null;
     withHeader = true;
+    withHeaderDeclared = false;
+    hierarchyName = hierarchyItem;
   }
 
   void remove(String name) {
@@ -210,7 +230,12 @@ Set<String> foldTreeColumns(
         } else if (verb == 'Headers' && res.isNotEmpty) {
           rows[res] = _Obj(_Kind.headers, owner.tree);
         } else if (verb == 'WithHeader') {
-          cols.withHeader = _value(call, i) != '0';
+          cols
+            ..withHeader = _value(call, i) != '0'
+            ..withHeaderDeclared = true;
+        } else if (verb == 'LastHierarchyItemName') {
+          final n = _value(call, i).trimRight();
+          if (n.trim().isNotEmpty) _renameHierarchy(cols, n);
         } else if (res.isNotEmpty) {
           rows.remove(res);
         }
@@ -219,6 +244,7 @@ Set<String> foldTreeColumns(
         switch (verb) {
           case 'InsertHierarchy' || 'AddEx2' || 'ItemEx':
             if (name.trim().isEmpty) break;
+            if (verb == 'InsertHierarchy') _renameHierarchy(cols, name);
             final c = cols.column(name, create: true)!;
             touched.add(owner.tree);
             if (res.isNotEmpty) {
@@ -272,6 +298,16 @@ Set<String> foldTreeColumns(
     }
   }
   return touched;
+}
+
+/// The hierarchy item is [name]: a column declared under it before is
+/// the hierarchy's.
+void _renameHierarchy(SapTreeColumns cols, String name) {
+  final t = name.trim();
+  final stray = cols.byName[name] ??
+      cols.byName.values.where((c) => c.name.trim() == t).firstOrNull;
+  cols.hierarchyName = name;
+  if (stray != null) cols.byName.remove(stray.name);
 }
 
 const Set<String> _columnVerbs = {

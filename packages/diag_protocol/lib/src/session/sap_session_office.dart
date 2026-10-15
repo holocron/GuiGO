@@ -23,6 +23,49 @@ extension SapSessionOffice on SapSession {
     return out;
   }
 
+  /// The session's Office WINDOWS, newest first: every document the server
+  /// opened in Office's own window ([Document.outOfPlace]: open mode
+  /// OPEN_MODE_EDIT -2) that no pane of the current window draws — XXL's
+  /// spreadsheet (DWDM "Api test simple": XXL_FULL_API links its container
+  /// to a `CONTAINER` area no screen paints). It outlives its container's
+  /// ReleaseDocument / DestroyControl, as the real Excel window outlives
+  /// the SAP control (XXL then asks the user to save the data there:
+  /// SOFFICEINTEGRATION 233); a CloseDocument, or the user closing it
+  /// ([dismissOfficeWindow]), ends it.
+  List<SapOfficeDocument> get officeWindows {
+    final st = _officeDoi;
+    final gone = _dismissedOfficeWindows[st] ??= <Document>{};
+    final drawn = {
+      for (final r in regions)
+        if (r.shell != null) r.shell!,
+    };
+    final out = <SapOfficeDocument>[];
+    for (final (sh, doc) in st.createdDocs.reversed) {
+      if (!doc.outOfPlace || doc.closed || gone.contains(doc)) continue;
+      // a pane of this window shows it (the chart demo's container)
+      final held = identical(st.containers[sh]?['current'], doc);
+      if (held && drawn.contains(sh) && _onScreen(sh) && _shellVisible(sh)) {
+        continue;
+      }
+      final w = officeDocumentOf(sh, doc);
+      _officeWindowDoc[w] = doc;
+      out.add(w);
+    }
+    return out;
+  }
+
+  /// The user closed Office window [window] (one of [officeWindows]):
+  /// nothing goes on the wire — the server released the document already,
+  /// or still holds it and closes it itself.
+  void dismissOfficeWindow(SapOfficeDocument window) {
+    final doc = _officeWindowDoc[window];
+    if (doc == null) return;
+    final gone = _dismissedOfficeWindows[_officeDoi] ??= <Document>{};
+    gone.add(doc);
+    // bounded like the documents themselves
+    if (gone.length > DoiState.maxDocs) gone.remove(gone.first);
+  }
+
   /// Raise the container's activation event for the document [shell]
   /// shows — when the user first works in it (taps into the document
   /// pane): `%_GC <shell> 2`, PARAMs 0..2 = 1, 1, 1, the event shell
@@ -93,6 +136,41 @@ extension SapSessionOffice on SapSession {
   }
 }
 
+/// The opened-files stream of a session (see [SapSessionOffice
+/// .frontendFileOpens]).
+final Expando<StreamController<FrontendFile>> _fileOpenStreams =
+    Expando('frontend file opens');
+
+extension SapSessionFiles on SapSession {
+  StreamController<FrontendFile> get _fileOpens =>
+      _fileOpenStreams[this] ??= StreamController<FrontendFile>.broadcast();
+
+  /// Every file the server wrote to this frontend and then OPENED
+  /// (frontend_files.dart: `SecureSaveDataToUrl(…, file://<path>)` then
+  /// `ShellExecute('OPEN', <path>)` — the ALV export "Calcul avec tableur"'s
+  /// .xlsx, OAOR's downloaded document), in wire order: on SAP GUI for
+  /// Windows the shell opens it in Excel / Word; the app hands it to the
+  /// platform's viewer / share sheet. The call was already answered (t3
+  /// `42`); a file nobody listens to is dropped. Broadcast.
+  Stream<FrontendFile> get frontendFileOpens => _fileOpens.stream;
+
+  void _publishFileOpens() {
+    final opened = _ea.frontendFiles.takeOpened();
+    if (opened.isEmpty) return;
+    final c = _fileOpens;
+    for (final f in opened) {
+      _trace('frontend file opened: $f');
+      if (!c.isClosed) c.add(f);
+    }
+  }
+
+  Future<void> _closeFileOpens() async {
+    _ea.frontendFiles.clear();
+    final c = _fileOpenStreams[this];
+    if (c != null && !c.isClosed) await c.close();
+  }
+}
+
 /// The screen's view of [doc], open in the DOI container [shell].
 SapOfficeDocument officeDocumentOf(String shell, Document doc) =>
     SapOfficeDocument(
@@ -106,3 +184,10 @@ SapOfficeDocument officeDocumentOf(String shell, Document doc) =>
       sheet: doc.kind == OfficeDocKind.excel ? doc : null,
       version: doc.version,
     );
+
+/// The Office windows the user closed, per session DOI state.
+final Expando<Set<Document>> _dismissedOfficeWindows =
+    Expando('dismissed office windows');
+
+/// The document behind each [SapSessionOffice.officeWindows] entry.
+final Expando<Document> _officeWindowDoc = Expando('office window document');

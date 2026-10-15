@@ -681,10 +681,16 @@ class _SapGraphViewState extends State<SapGraphView> {
         Expanded(
           child: LayoutBuilder(
             builder: (context, cons) {
-              // first show of a graph: scale it down to fit the view
+              // first show of a graph: scale it down to fit the view — and
+              // again when the pane is resized: a pane laid out before its
+              // splitter cell had its size (GFW_DEMO_HIER3's structure
+              // graphic, the bottom row of a 2 x 1 splitter) was fitted to
+              // the first, tiny constraints and stayed drawn tiny in the
+              // corner of the pane it then filled
               const margin = 24.0;
               final key =
-                  '${widget.nodes.length}:${widget.edges.length}:${widget.title}';
+                  '${widget.nodes.length}:${widget.edges.length}:${widget.title}'
+                  ':${cons.maxWidth.round()}x${cons.maxHeight.round()}';
               if (_fitted != key &&
                   cons.maxWidth.isFinite &&
                   cons.maxHeight.isFinite) {

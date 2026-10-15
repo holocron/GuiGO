@@ -103,6 +103,7 @@ class Worksheet {
     List<CellRange>? merged,
     this.defaultColumnWidth,
     this.hidden = false,
+    this.chart,
   }) : cells = cells ?? {},
        columnWidths = columnWidths ?? {},
        merged = merged ?? [];
@@ -117,6 +118,12 @@ class Worksheet {
   final List<CellRange> merged;
   final double? defaultColumnWidth;
   final bool hidden;
+
+  /// A chart sheet's chart (the sheet then holds no cells), null for a
+  /// worksheet.
+  final SheetChart? chart;
+
+  bool get isChart => chart != null;
 
   SheetCell? cell(int row, int col) => cells[(row, col)];
 
@@ -158,6 +165,67 @@ class Worksheet {
     }
     return false;
   }
+}
+
+/// The chart types a [SheetChart] draws.
+enum SheetChartType { clusteredColumn }
+
+/// One plotted series: its name, a category label and a value per point,
+/// and the cell references Excel keeps them under (`Feuil1!$B$1`,
+/// `Feuil1!$A$2:$A$7`, …: [sheetRangeRef]) — null when unknown.
+class ChartSeries {
+  const ChartSeries({
+    required this.name,
+    required this.categories,
+    required this.values,
+    this.nameRef,
+    this.categoriesRef,
+    this.valuesRef,
+  });
+
+  final String name;
+  final List<String> categories;
+
+  /// A value per category, null = a gap.
+  final List<num?> values;
+  final String? nameRef, categoriesRef, valuesRef;
+}
+
+/// A chart sheet's chart.
+class SheetChart {
+  const SheetChart({
+    this.type = SheetChartType.clusteredColumn,
+    required this.series,
+    this.gapWidth = 150,
+    this.overlap = 0,
+  });
+
+  final SheetChartType type;
+  final List<ChartSeries> series;
+
+  /// The gap between category clusters, % of one column's width.
+  final int gapWidth;
+
+  /// The overlap of a cluster's columns, % (-100..100).
+  final int overlap;
+
+  /// The category labels (the first series').
+  List<String> get categories =>
+      series.isEmpty ? const [] : series.first.categories;
+}
+
+/// [range] of [sheet] as an absolute reference (`Feuil1!$A$2:$A$7`),
+/// the sheet name quoted when it is not a plain word (`'My data'!$B$1`).
+String sheetRangeRef(String sheet, CellRange range) {
+  String abs(int r, int c) => '\$${columnLetters(c)}\$$r';
+  final cells = range.top == range.bottom && range.left == range.right
+      ? abs(range.top, range.left)
+      : '${abs(range.top, range.left)}:${abs(range.bottom, range.right)}';
+  final plain =
+      RegExp(r'^[A-Za-z_][A-Za-z0-9_.]*$').hasMatch(sheet) &&
+      parseCellRef(sheet) == null;
+  final name = plain ? sheet : "'${sheet.replaceAll("'", "''")}'";
+  return '$name!$cells';
 }
 
 class Workbook {

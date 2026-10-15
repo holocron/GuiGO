@@ -31,7 +31,10 @@ class _SapFormViewState extends State<SapFormView>
     with SingleTickerProviderStateMixin {
   late final TabController _tabs;
   XfaElement? _selected;
-  final Map<String, ui.Image> _images = {};
+  // replaced (not mutated) per decoded image: the painter's shouldRepaint
+  // compares snapshots, and a mutated map IS the old painter's map too —
+  // the logo decoded but the page never repainted
+  Map<String, ui.Image> _images = {};
 
   XfaForm get _form => widget.form;
 
@@ -66,7 +69,8 @@ class _SapFormViewState extends State<SapFormView>
             frame.image.dispose();
             return;
           }
-          setState(() => _images[img.base64] = frame.image);
+          // a NEW map: the painter diff must see a different snapshot
+          setState(() => _images = {..._images, img.base64: frame.image});
         });
       } on FormatException {
         // a broken picture: the frame outline is drawn instead
@@ -353,13 +357,16 @@ class _FormPages extends StatelessWidget {
           ),
         );
       }
+      // several pages at their natural size: constrained:false or the
+      // viewer hands the Column the pane's bounded height and the stack
+      // of 842-pt pages overflows it (the striped band on the live form)
       return InteractiveViewer(
         maxScale: 8,
         minScale: 0.2,
+        constrained: false,
         child: SizedBox(
           width: page.w,
           child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               for (final w in pages) ...[w, const SizedBox(height: 24)],
@@ -410,8 +417,11 @@ class _PageCard extends StatelessWidget {
       child: Container(
         width: page.w,
         height: page.h,
+        clipBehavior: Clip.hardEdge,
         decoration: BoxDecoration(
-          color: scheme.surfaceContainerLowest,
+          // the page is PAPER whatever the app theme — a dark surface made
+          // the sheet vanish into the dark UI and the form read as empty
+          color: const Color(0xffffffff),
           border: Border.all(color: scheme.outlineVariant),
           boxShadow: [
             BoxShadow(
@@ -460,12 +470,12 @@ class _FormPainter extends CustomPainter {
           e.page == pageIndex &&
           e.rect != null &&
           e != form.root) {
-        _paintSubform(canvas, e, scheme);
+        _paintSubform(canvas, e);
       }
     }
     for (final e in form.placed) {
       if (e.page != pageIndex) continue;
-      _paintPlaced(canvas, e, scheme);
+      _paintPlaced(canvas, e);
     }
     final sel = selected;
     if (sel != null && sel.rect != null && sel.page == pageIndex) {
@@ -481,17 +491,24 @@ class _FormPainter extends CustomPainter {
     }
   }
 
-  void _paintSubform(Canvas canvas, XfaSubform s, ColorScheme scheme) {
+  // The page is paper: document colors are FIXED, not themed — the ink is
+  // dark and the fills light whatever the app's dark mode does.
+  static const Color docInk = Color(0xff202124);
+  static const Color docFaint = Color(0xff5f6368);
+  static const Color docEdge = Color(0xff9aa0a6);
+  static const Color docFillReadOnly = Color(0xffeff0f2);
+
+  void _paintSubform(Canvas canvas, XfaSubform s) {
     final r = s.rect!;
     final paint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 0.5
-      ..color = scheme.outlineVariant.withValues(alpha: 0.6);
+      ..color = const Color(0x1a000000); // 10% black grouping box
     canvas.drawRect(Rect.fromLTWH(r.x, r.y, r.w, r.h), paint);
   }
 
-  void _paintPlaced(Canvas canvas, XfaPlaced e, ColorScheme scheme) {
-    final r = e.rect!;
+  void _paintPlaced(Canvas canvas, XfaPlaced e) {
+    final r = e.widgetRect ?? e.rect!;
     final rect = Rect.fromLTWH(r.x, r.y, r.w, r.h);
     // background
     if (e.fill != null) {
@@ -502,13 +519,13 @@ class _FormPainter extends CustomPainter {
       case 'line':
         final p = Paint()
           ..strokeWidth = e.border.isEmpty ? 0.5 : e.border.first.thickness
-          ..color = e.border.isEmpty ? _ink(scheme) : _edge(e.border.first, scheme)
+          ..color = e.border.isEmpty ? docInk : _edge(e.border.first)
           ..style = PaintingStyle.stroke;
         canvas.drawLine(rect.topLeft, rect.bottomRight, p);
       case 'rect':
         final p = Paint()
           ..strokeWidth = e.border.isEmpty ? 0.5 : e.border.first.thickness
-          ..color = e.border.isEmpty ? _ink(scheme) : _edge(e.border.first, scheme)
+          ..color = e.border.isEmpty ? docInk : _edge(e.border.first)
           ..style = PaintingStyle.stroke;
         canvas.drawRect(rect, p);
       case 'image' when e.image != null:
@@ -531,7 +548,7 @@ class _FormPainter extends CustomPainter {
             Paint()
               ..style = PaintingStyle.stroke
               ..strokeWidth = 0.5
-              ..color = scheme.outline,
+              ..color = docEdge,
           );
         }
       default:
@@ -544,25 +561,56 @@ class _FormPainter extends CustomPainter {
             canvas.drawRect(
               rect,
               Paint()
-                ..color = (readOnly ? scheme.surfaceContainerHigh : scheme.surface)
-                    .withValues(alpha: 0.9),
+                ..color = readOnly
+                    ? docFillReadOnly.withValues(alpha: 0.9)
+                    : const Color(0xffffffff).withValues(alpha: 0.9),
             );
-            _paintEdges(canvas, rect, e, scheme,
-                fallback: readOnly ? scheme.outlineVariant : scheme.outline);
+            _paintEdges(canvas, rect, e,
+                fallback: readOnly ? const Color(0xffbdc1c6) : docEdge);
           }
         }
         if (e.ui == 'checkButton') {
-          _paintCheck(canvas, rect, e, scheme);
-          return;
+          _paintCheck(canvas, rect, e);
+        } else {
+          _paintText(canvas, rect, e, readOnly: readOnly);
+          if (e.ui == 'choiceList') {
+            _paintArrow(canvas, rect);
+          }
         }
-        _paintText(canvas, rect, e, scheme, readOnly: readOnly);
-        if (e.ui == 'choiceList') {
-          _paintArrow(canvas, rect, scheme);
-        }
+    }
+    // the field's caption: its own area beside the widget (left of it by
+    // XFA's default), in the caption's own font — never inside the box
+    final cr = e.captionRect;
+    final cap = e.captionText;
+    if (cr != null && cap != null && cap.isNotEmpty) {
+      _paintLabel(canvas, Rect.fromLTWH(cr.x, cr.y, cr.w, cr.h), e);
     }
   }
 
-  void _paintEdges(Canvas canvas, Rect rect, XfaPlaced e, ColorScheme scheme,
+  void _paintLabel(Canvas canvas, Rect rect, XfaPlaced e) {
+    final f = e.captionFont ?? e.font;
+    final size = (f?.size ?? 10).clamp(4.0, 200.0);
+    final style = TextStyle(
+      fontFamily: f?.typeface,
+      fontFamilyFallback: const ['Helvetica', 'Arial', 'sans-serif'],
+      fontSize: size,
+      fontWeight: f?.bold == true ? FontWeight.bold : FontWeight.normal,
+      fontStyle: f?.italic == true ? FontStyle.italic : FontStyle.normal,
+      color: docInk,
+    );
+    final tp = TextPainter(
+      text: TextSpan(text: e.captionText, style: style),
+      textDirection: TextDirection.ltr,
+      maxLines: rect.height < size * 1.6 ? 1 : null,
+      ellipsis: '…',
+    )..layout(minWidth: 0, maxWidth: rect.width <= 0 ? 1 : rect.width);
+    tp.paint(
+      canvas,
+      Offset(rect.left, rect.top + (rect.height - tp.height) / 2),
+    );
+  }
+
+  void _paintEdges(Canvas canvas, Rect rect, XfaPlaced e,
       {required Color fallback}) {
     final n = e.border.length;
     if (n == 0) {
@@ -577,7 +625,7 @@ class _FormPainter extends CustomPainter {
     }
     final paint = Paint()
       ..style = PaintingStyle.stroke
-      ..color = _edge(e.border.first, scheme);
+      ..color = _edge(e.border.first);
     if (n == 1) {
       paint.strokeWidth = e.border.first.thickness;
       canvas.drawRect(rect, paint);
@@ -602,12 +650,12 @@ class _FormPainter extends CustomPainter {
       final p = Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = ed.thickness
-        ..color = _edge(ed, scheme);
+        ..color = _edge(ed);
       canvas.drawLine(segs[i].$1, segs[i].$2, p);
     }
   }
 
-  void _paintCheck(Canvas canvas, Rect rect, XfaPlaced e, ColorScheme scheme) {
+  void _paintCheck(Canvas canvas, Rect rect, XfaPlaced e) {
     final side = rect.height < 10 ? rect.height : 10.0;
     final box = Rect.fromLTWH(rect.left, rect.topCenter.dy - side / 2, side, side);
     canvas.drawRect(
@@ -615,7 +663,7 @@ class _FormPainter extends CustomPainter {
       Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = 0.75
-        ..color = _ink(scheme),
+        ..color = docInk,
     );
     _paintText(
       canvas,
@@ -626,24 +674,22 @@ class _FormPainter extends CustomPainter {
         rect.height,
       ),
       e,
-      scheme,
       readOnly: false,
     );
   }
 
-  void _paintArrow(Canvas canvas, Rect rect, ColorScheme scheme) {
+  void _paintArrow(Canvas canvas, Rect rect) {
     final p = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1
-      ..color = scheme.onSurfaceVariant;
+      ..color = docFaint;
     final cx = rect.right - 7;
     final cy = rect.topCenter.dy;
     canvas.drawLine(Offset(cx - 2.5, cy - 1), Offset(cx, cy + 1.5), p);
     canvas.drawLine(Offset(cx, cy + 1.5), Offset(cx + 2.5, cy - 1), p);
   }
 
-  void _paintText(Canvas canvas, Rect rect, XfaPlaced e, ColorScheme scheme,
-      {required bool readOnly}) {
+  void _paintText(Canvas canvas, Rect rect, XfaPlaced e, {required bool readOnly}) {
     final text = e.text;
     final font = e.font;
     final size = (font?.size ?? 10).clamp(4.0, 200.0);
@@ -653,7 +699,7 @@ class _FormPainter extends CustomPainter {
       fontSize: size,
       fontWeight: font?.bold == true ? FontWeight.bold : FontWeight.normal,
       fontStyle: font?.italic == true ? FontStyle.italic : FontStyle.normal,
-      color: readOnly ? scheme.onSurfaceVariant : _ink(scheme),
+      color: readOnly ? docFaint : docInk,
     );
     if (text.isEmpty) {
       // an empty field still shows its extent: a faint baseline dot row is
@@ -672,14 +718,10 @@ class _FormPainter extends CustomPainter {
     );
   }
 
-  Color _ink(ColorScheme scheme) => scheme.brightness == Brightness.dark
-      ? const Color(0xffe6e6e6)
-      : const Color(0xff1a1a1a);
-
   Color _ui(XfaColor c) => Color.fromARGB(255, c.r, c.g, c.b);
 
-  Color _edge(XfaEdge e, ColorScheme scheme) => e.color == null
-      ? _ink(scheme)
+  Color _edge(XfaEdge e) => e.color == null
+      ? docInk
       : Color.fromARGB(255, e.color!.r, e.color!.g, e.color!.b);
 
   @override
@@ -727,7 +769,7 @@ class _StructureTile extends StatelessWidget {
     final label = e.label;
     final detail = switch (e) {
       XfaPlaced() => e.ui,
-      XfaSubform() => e.layout.isEmpty ? 'tb' : e.layout,
+      XfaSubform() => e.layout.isEmpty ? 'position' : e.layout,
       _ => '',
     };
     return Column(
@@ -864,6 +906,8 @@ class _DetailsPane extends StatelessWidget {
           if (placed != null) ...[
             row('Widget', placed.ui),
             if (placed.access != null) row('Access', placed.access!),
+            if (placed.captionText case final cap?)
+              row('Caption', '$cap · ${placed.captionPlace}'),
             if (placed.font case final f?)
               row(
                 'Font',

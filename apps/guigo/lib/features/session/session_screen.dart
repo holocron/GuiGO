@@ -16,13 +16,16 @@ import '../../core/sap_icons.dart';
 import 'browser_platform.dart';
 import 'dynpro_view.dart';
 import 'frame_coalescer.dart';
+import 'sap_barchart_view.dart';
+import 'sap_basis_graphic_view.dart';
 import 'sap_calendar_view.dart';
 import 'sap_date_navigator_view.dart';
 import 'sap_canvas_layout.dart';
-import 'sap_chart_view.dart';
+import 'sap_chart_xy.dart';
 import 'sap_combo_box_view.dart';
 import 'sap_control_toolbar.dart';
 import 'sap_graph_view.dart';
+import 'sap_netplan_view.dart';
 import 'sap_grid_view.dart';
 import 'sap_html_view.dart';
 import 'sap_office_view.dart';
@@ -37,6 +40,8 @@ import 'session_busy.dart';
 import 'sap_tree_view.dart';
 import 'splitter_sash_grip.dart';
 import 'modal_window.dart';
+import 'office_platform.dart';
+import 'office_windows_page.dart';
 import 'type_ahead.dart';
 
 class SessionArgs {
@@ -504,6 +509,18 @@ class _SessionScreenState extends State<SessionScreen>
         SnackBar(content: Text(why)),
       );
     });
+    // a file the server wrote here and opened (the ALV export's .xlsx,
+    // OAOR's downloaded document — SAP GUI's shell opens it in Excel /
+    // Word): the platform viewer / share sheet; the call was answered
+    // already (ShellExecute 42), nothing waits on the user
+    session.frontendFileOpens.listen((file) async {
+      if (!mounted || !_current(session)) return;
+      final why = await openFrontendFile(file);
+      if (why == null || !mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(why)),
+      );
+    });
     // the server's own close (idle auto-logout): surface it at once,
     // not on the next action
     session.closed.listen((why) {
@@ -793,6 +810,7 @@ class _SessionScreenState extends State<SessionScreen>
             }),
             actions: [
               _region((_) => _windowSwitcher() ?? const SizedBox.shrink()),
+              _region((_) => _officeWindowsButton() ?? const SizedBox.shrink()),
               ValueListenableBuilder<bool>(
                 valueListenable: _busyN,
                 builder: (_, busy, _) => busy
@@ -977,6 +995,37 @@ class _SessionScreenState extends State<SessionScreen>
         ),
         Expanded(child: body),
       ],
+    );
+  }
+
+  /// The Office windows ([SapSessionOffice.officeWindows]) behind one app
+  /// bar button: the documents the server opened in Excel's / Word's own
+  /// window (XXL's spreadsheet), shown on their own page.
+  Widget? _officeWindowsButton() {
+    final s = _session;
+    final wins = s?.officeWindows ?? const <SapOfficeDocument>[];
+    if (s == null || wins.isEmpty) return null;
+    final excel = wins.first.kind == OfficeDocKind.excel;
+    return IconButton(
+      tooltip: wins.length == 1
+          ? officeWindowTitle(wins.first)
+          : '${wins.length} Office windows',
+      icon: Badge(
+        isLabelVisible: wins.length > 1,
+        label: Text('${wins.length}'),
+        child: Icon(excel ? Icons.grid_on : Icons.description_outlined),
+      ),
+      onPressed: () => Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => OfficeWindowsPage(
+            windows: () => s.officeWindows,
+            onClose: (w) {
+              s.dismissOfficeWindow(w);
+              if (mounted) setState(() {});
+            },
+          ),
+        ),
+      ),
     );
   }
 
@@ -1168,6 +1217,30 @@ class _SessionScreenState extends State<SessionScreen>
         child: Opacity(
           opacity: modalActive ? 0.6 : 1.0,
           child: _netPlanView(graphs.first),
+        ),
+      );
+    }
+    // a dynpro that is only a bar chart (GRAL BARCOCX1: SAPbarc.OCX
+    // LinkControl'd to dynpro 0300): the chart is the screen
+    final bars = view?.barCharts ?? const <SapBarChartModel>[];
+    if (bars.isNotEmpty && paintsNothing) {
+      return IgnorePointer(
+        ignoring: modalActive,
+        child: Opacity(
+          opacity: modalActive ? 0.6 : 1.0,
+          child: _barChartView(bars.first),
+        ),
+      );
+    }
+    // a classic business / statistics graphic (SAPLGRAP 0100, the inline
+    // GRAPH item BUSG / STAT): the graphic is the screen
+    final basis = basisGraphicOf(base.inlineGraph);
+    if (basis != null && paintsNothing) {
+      return IgnorePointer(
+        ignoring: modalActive,
+        child: Opacity(
+          opacity: modalActive ? 0.6 : 1.0,
+          child: SapBasisGraphicView(graphic: basis),
         ),
       );
     }
@@ -1545,6 +1618,7 @@ class _SessionScreenState extends State<SessionScreen>
         v.grids.containsKey(shell) ||
         v.charts.any((c) => c.shell == shell) ||
         v.netPlans.any((g) => g.shell == shell) ||
+        v.barCharts.any((b) => b.shell == shell) ||
         v.canvases.any((c) => c.shell == shell) ||
         s.calendarFor(shell) != null ||
         v.drawnPictures.contains(shell) ||
@@ -1767,6 +1841,9 @@ class _SessionScreenState extends State<SessionScreen>
       final graph = (view?.netPlans ?? const <SapNetPlanModel>[]).where(
         (g) => g.shell == shell,
       );
+      final barChart = (view?.barCharts ?? const <SapBarChartModel>[]).where(
+        (b) => b.shell == shell,
+      );
       final canvas = (view?.canvases ?? const <SapCanvasModel>[]).where(
         (c) => c.shell == shell,
       );
@@ -1899,6 +1976,9 @@ class _SessionScreenState extends State<SessionScreen>
           // item columns, their widths in the pane's cells; a link /
           // button cell's click, a cell's double-click with its column
           columns: _session?.treeColumns(shell),
+          // a tree with no item column whose header the server switched
+          // on (GFW_DEMO_HIER3's trees): the blank strip over it
+          headerStrip: _session?.treeHeaderStrip(shell),
           paneCols: cells.width.round(),
           icons: _icons,
           onItemClick: (key, item) =>
@@ -1912,16 +1992,11 @@ class _SessionScreenState extends State<SessionScreen>
         content = _gridView(grid, menu: base.modalLevel == 0);
       } else if (chart.isNotEmpty) {
         final c = chart.first;
-        content = SapChartView(
-          type: c.chartType,
-          title: c.title,
-          categories: c.categories,
-          series: [
-            for (final s in c.series) ChartSeriesData(s.label, s.values),
-          ],
-        );
+        content = sapChartViewOf(c);
       } else if (graph.isNotEmpty) {
         content = _netPlanView(graph.first);
+      } else if (barChart.isNotEmpty) {
+        content = _barChartView(barChart.first);
       } else if (canvas.isNotEmpty) {
         content = _canvasView(canvas.first);
       } else if ((view?.drawnPictures.contains(shell) ?? false) &&
@@ -2240,12 +2315,32 @@ class _SessionScreenState extends State<SessionScreen>
     );
   }
 
+  /// A SAPbarc.OCX bar chart (GRAL BARCOCX1): table, calendar header,
+  /// bars and milestones; scroll and zoom stay on the device (the real GUI
+  /// sends nothing for them).
+  Widget _barChartView(SapBarChartModel b) => SapBarChartView(
+        key: ValueKey('barchart-${b.shell ?? b.title}'),
+        chart: b,
+        // the click is local (no frame): the mark rides the next read-back
+        onSelect: (n) => _session?.selectBarChartNode(b, n),
+      );
+
   /// A NetPlan / JNet network graph: the server's layout raster where it
   /// placed the nodes, its highlight colours; a node tap is the control's
   /// node double-click (the event the real GUI raises on every click). A
   /// drag moves a node on the view only: no capture shows a JNet move on
   /// the wire.
   Widget _netPlanView(SapNetPlanModel g) {
+    // a control's graph with its stream's look (formats, frames, legend):
+    // drawn as SAPnetz.OCX draws it, at its natural scale
+    if (netPlanHasLook(g)) {
+      return SapNetPlanView(
+        key: ValueKey('netplan-${g.shell}'),
+        graph: g,
+        onTapNode: (node) =>
+            _run(() async => _session!.selectNetPlanNode(g, node)),
+      );
+    }
     return SapGraphView(
       key: ValueKey('netplan-${g.shell ?? g.title}'),
       title: g.title,
@@ -2286,13 +2381,13 @@ class _SessionScreenState extends State<SessionScreen>
     for (final g in view?.netPlans ?? const <SapNetPlanModel>[]) {
       out[g.container ?? 'netplan:${g.shell ?? g.title}'] = _netPlanView(g);
     }
+    for (final b in view?.barCharts ?? const <SapBarChartModel>[]) {
+      out[b.container ?? 'barchart:${b.shell ?? b.title}'] = _barChartView(b);
+    }
     for (final c in view?.charts ?? const <SapChartModel>[]) {
-      out[c.container ?? 'chart:${c.shell}'] = SapChartView(
+      out[c.container ?? 'chart:${c.shell}'] = sapChartViewOf(
+        c,
         key: ValueKey('chart-${c.shell}'),
-        type: c.chartType,
-        title: c.title,
-        categories: c.categories,
-        series: [for (final s in c.series) ChartSeriesData(s.label, s.values)],
       );
     }
     return out;
@@ -3426,6 +3521,7 @@ class _SessionView {
   late final List<SapTextEditor> editors = session.editors;
   late final List<SapChartModel> charts = session.charts;
   late final List<SapNetPlanModel> netPlans = session.netPlans;
+  late final List<SapBarChartModel> barCharts = session.barCharts;
   late final List<SapCanvasModel> canvases = session.canvases;
   late final Map<String, SapControlToolbar> controlToolbars =
       session.controlToolbars;

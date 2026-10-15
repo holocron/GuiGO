@@ -144,6 +144,53 @@ Set<String> loadedObjectSinksOf(FlushCall call) {
   return out;
 }
 
+/// The pushed table each loaded object [call] re-saves was filled from, by
+/// sink: `SetDataFromUrl(APPLICATION, X-R3TABLE, <push>)` +
+/// `AssignProperty2(<dp>, 'r3TableAutoObj', <obj>, <prop>)` fill `<obj>`'s
+/// `<prop>` from the push; `AssignProperty2(<obj>, <prop>, <dp2>,
+/// 'r3TableAutoObj')` + `SaveDataToUrl(…, <sink>)` save it back — XXL's
+/// `LISTFILES` queue on the InfoCtrl's `R3TABLE`
+/// (a recorded session srv[25] / [28] / [30]).
+Map<String, String> loadedObjectSourcesOf(FlushCall call) {
+  final out = <String, String>{};
+  final filled = <String, String>{}; // '<obj>|<prop>' -> the push url
+  String? loaded, pending;
+  for (var i = 1; i <= call.verbs.length; i++) {
+    final verb = call.verbs[i - 1];
+    final a = verbNamedArgs(call, i);
+    String arg(String k) => (a[k] ?? '').trim();
+    if (verb == 'SetDataFromUrl') {
+      final url = arg('#3');
+      loaded = url.startsWith('SAPR3://') ? url : null;
+    } else if (verb == 'AssignProperty2' && arg('#2') == 'r3TableAutoObj') {
+      if (loaded != null) filled['${arg('#3')}|${arg('#4')}'] = loaded;
+    } else if (verb == 'AssignProperty2' && arg('#4') == 'r3TableAutoObj') {
+      pending = filled['${arg('#1')}|${arg('#2')}'];
+    } else if (verb == 'SaveDataToUrl') {
+      final url = arg('#3');
+      if (pending != null && url.startsWith('SAPR3://')) out[url] = pending;
+      pending = null;
+    }
+  }
+  return out;
+}
+
+/// The FORMAT records of a pushed table segment [seg] (its 80-byte column
+/// descriptors), empty without any.
+List<Uint8List> pushedTableFormatRows(Uint8List seg) {
+  final (_, (w, n), cells) = dpColumnCells(seg, 'FORMAT');
+  if (w <= 0 || n <= 0) return const [];
+  final b = BytesBuilder(copy: false);
+  for (final c in cells) {
+    b.add(c);
+  }
+  final all = b.takeBytes();
+  return [
+    for (var i = 0; i < n && (i + 1) * w <= all.length; i++)
+      Uint8List.sublistView(all, i * w, (i + 1) * w),
+  ];
+}
+
 /// The declared DATAASC record width of a pull request (its `03 02`
 /// geometry; 1024 on the F1 help-table pull), 0 without one.
 int clientTablePullRowWidth(Uint8List v) {
@@ -183,9 +230,16 @@ List<Uint8List> clientTablePullFormatRows(Uint8List v) {
 /// object's records — the real GUI returned four client-side records the
 /// server never pushed ('8000', '1', '18', '2308737'); none is what the
 /// reference client answers live (the test system 2026-10-10, no dump).
+///
+/// A request that declares no FORMAT gets [sourceFormat] — the descriptors
+/// of the pushed table the object was filled from
+/// ([loadedObjectSourcesOf]): XXL's empty `LISTFILES` table comes back
+/// with the push's 15 `X-UNKNOWN` columns (xxl_excel_word_demos gui[19] /
+/// [22] / [24], equal to srv[25]'s push).
 Uint8List loadedObjectPullAnswer(
   Uint8List request, {
   List<Uint8List> rows = const [],
+  List<Uint8List> sourceFormat = const [],
 }) {
   final w = clientTablePullRowWidth(request);
   final fmt = clientTablePullFormatRows(request);
@@ -193,6 +247,7 @@ Uint8List loadedObjectPullAnswer(
     rows: rows,
     rowWidth: w == 0 ? 1024 : w,
     formatRecord: fmt.isEmpty ? null : fmt.first,
+    formatRecords: fmt.isEmpty && sourceFormat.isNotEmpty ? sourceFormat : null,
     date: '00000000',
     time: '000000',
   );
@@ -404,6 +459,19 @@ List<String> nodeKeyTableKeys(Uint8List seg) {
     b.add(c);
   }
   final data = b.takeBytes();
+  // a row per `03 04` cell with its trailing blanks cut: the HIER3 trees'
+  // ExpandedKeys (a recorded session srv[29] — width 12, 9
+  // rows, 27 bytes: `N1 ` … `N9 `, the keys left-justified) — joined and
+  // sliced by the width they ran together (`N1 N2 N3 N4`, no node open)
+  if (data.length < w * n &&
+      cells.length == n &&
+      cells.every((c) => c.length <= w)) {
+    return [
+      for (final c in cells)
+        if (latin1.decode(c).trim() case final k when k.isNotEmpty)
+          _rjust(k, 11),
+    ];
+  }
   return [
     for (var r = 0; r < n && (r + 1) * w <= data.length; r++)
       if (latin1.decode(Uint8List.sublistView(data, r * w, (r + 1) * w))

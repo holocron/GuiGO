@@ -27,6 +27,7 @@ library;
 
 import 'dart:math' as math;
 
+import 'sap_barchart.dart' show isBarChartClass;
 import 'sap_calendar.dart' show calendarClassRx;
 import 'screen_model.dart';
 
@@ -115,6 +116,18 @@ const String propControlWidth = '300';
 const String propDockSide = '470';
 const String propVisible = '290';
 
+/// The CFW alignment / position props a control's box inside its parent
+/// follows (the jar's com.sap.platin.r3.cet.GuiCtlProperty: SAP_PROP_ALIGN
+/// 10, SAP_PROP_TOP 270, SAP_PROP_METRIC 410), the ALIGN bits
+/// (SAP_ALIGN_AT_TOP 4, SAP_ALIGN_AT_BOTTOM 8; 15 = fill) and
+/// SAP_METRIC_PIXEL 1.
+const String propAlign = '10';
+const String propTop = '270';
+const String propMetric = '410';
+const int alignAtTop = 4;
+const int alignAtBottom = 8;
+const String metricPixel = '1';
+
 /// render_ladder.RUNGS
 const Map<String, String> ladderRungs = {
   'R1': 'composited dynpro atoms',
@@ -171,6 +184,9 @@ String controlKind(String cls) {
   // test, which its `Container` (not `CONTAINER`) never matched anyway
   if (_officeClass.hasMatch(c.trim())) return 'office';
   if (c.contains('NetPlanGraphics') || c.contains('JNet')) return 'jnet';
+  // the SAPbarc.OCX bar chart (GRAL BARCOCX1): a graphic of the same SAP
+  // Graphics family, drawn as a graph region — no business chart
+  if (isBarChartClass(c)) return 'jnet';
   if (['CONTAINER', 'Splitter', 'DOCKING', 'DIALOGCTRL'].any(c.contains)) {
     return 'container';
   }
@@ -181,8 +197,9 @@ String controlKind(String cls) {
   }
   if (const {
     'SAPGRAPHICS.CHART.1',
-    'SAPGUI.BARCHARTGRAPHICS.1',
     'GRAPHITTI.CHART.1',
+    // the GFW business graphic's Java bean (TGPN JAVA / BUSG / CHART)
+    'COM.ICUBE.BEANS.CHTCHART.CHTCHART',
   }.contains(u)) {
     return 'chart';
   }
@@ -1710,7 +1727,58 @@ Map<String, _Box> _shellBoxes(_Facts fx) {
     });
   }
   _toolbarRows(fx, boxes);
+  _alignedStack(fx, boxes);
   return boxes;
+}
+
+/// Two sibling controls sharing their parent's box, one ALIGNED to its
+/// top with a HEIGHT (no bottom bit), one to its bottom (no top bit) below
+/// a TOP: the first keeps that strip, the second the rest — the ALV grid's
+/// in-place Excel view (CL_SALV_GRU_VIEW_EXCEL set_visible, the real SAP
+/// GUI for Windows' a recorded session srv[59]: the grid
+/// 118 `ALIGN 7` (left|right|top) `HEIGHT 22` — its toolbar strip — and
+/// the Office container 246 `METRIC 1` (pixel) `TOP 22` `ALIGN 11`
+/// (left|right|bottom), both children of the docking container 117). The
+/// switch back (srv[90]) is the grid's `ALIGN 15` (fill) and the
+/// container's `290 = 0` (hidden: no box) — the rule no longer applies.
+void _alignedStack(_Facts fx, Map<String, _Box> boxes) {
+  final byRect = <(String?, (int, int, int, int)), List<String>>{};
+  boxes.forEach((sh, b) {
+    if (b.kind == 'control') (byRect[(b.parent, b.rect)] ??= []).add(sh);
+  });
+  String prop(String sh, String id) => (fx.reg.props[sh]?[id] ?? '').trim();
+  int? align(String sh) => int.tryParse(prop(sh, propAlign));
+  // a pixel extent / position in rows (the default metric's units are the
+  // METRICS ones, [metricY2]); 0 when unset
+  int rows(String sh, String id) {
+    final v = double.tryParse(prop(sh, id));
+    if (v == null || v <= 0) return 0;
+    final per = prop(sh, propMetric) == metricPixel ? cellH : metricY2;
+    return math.max(_pyRound(v / per), 1);
+  }
+
+  byRect.forEach((key, kids) {
+    final rect = key.$2;
+    if (kids.length < 2 || rect.$3 <= 1) return;
+    String? strip, rest;
+    for (final k in kids) {
+      final a = align(k);
+      if (a == null) continue;
+      final top = a & alignAtTop != 0, bottom = a & alignAtBottom != 0;
+      if (top && !bottom && rows(k, propControlHeight) > 0) strip ??= k;
+      if (bottom && !top) rest ??= k;
+    }
+    if (strip == null || rest == null) return;
+    final h = math.min(rows(strip, propControlHeight), rect.$3 - 1);
+    final off = math.min(
+      math.max(rows(rest, propTop), h),
+      rect.$3 - 1,
+    );
+    boxes[strip]!.height = h;
+    boxes[rest]!
+      ..top = rect.$1 + off
+      ..height = rect.$3 - off;
+  });
 }
 
 /// render_tiler.content_sized_docks (+ _dock_drawable, _apply_shifts)
@@ -2216,6 +2284,35 @@ List<ScreenRegion> composeScreen(
         reason:
             'control toolbar, ${buttons.length} button(s) drawn in its box '
             '(render_stacked.draw_toolbars)',
+      ),
+    );
+  });
+
+  // GuiGo's own: a DOI container in a DOCKED pane drawn as its Office
+  // document in its box — the ALV in-place Excel's container 246 in the
+  // grid's docking container 117 (a recorded session srv[50],
+  // below the grid's strip: [_alignedStack]), OAOR's 127 in dock 122
+  // (srv[170]). A container in a dynpro area takes the area's 'OF' rung
+  // (the containers loop below); a docked one had no rung at all.
+  fx.kinds.forEach((sh, kind) {
+    if (kind != 'office') return;
+    final b = boxOf(sh);
+    if (b == null || !fx.shellLive(sh) || fx.hidden(sh)) return;
+    var key = b.parent;
+    var up = key == null ? null : boxes[key];
+    for (var guard = 0; up != null && up.kind != 'dock' && guard < 32; guard++) {
+      key = up.parent;
+      up = key == null ? null : boxes[key];
+    }
+    if (up == null) return;
+    regions.add(
+      ScreenRegion(
+        kind: 'office',
+        shell: sh,
+        container: key,
+        rect: at(b.top, b.left, b.height, b.width),
+        rung: 'OF',
+        reason: _reason('OF', sh, 'Office document drawn in its docked box'),
       ),
     );
   });

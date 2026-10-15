@@ -441,6 +441,16 @@ class ScreenModel {
   /// codepage the paint declared before it; empty on most screens.
   final List<SapNetPlanModel> netPlans = [];
 
+  /// The inline GRAPH conversation on this screen ([InlineGraphStream]):
+  /// the transmission the paint opened, extended by the continuation items
+  /// of later frames until complete; null on every other screen and once
+  /// the server closed the graph (`KNETZ`, cng9 srv[34]). Its
+  /// [InlineGraphStream.kind] says what it carries: a network graph (parsed
+  /// into [netPlans]) or a classic business / statistics graphic, whose
+  /// joined [InlineGraphStream.bytes] are kept as received. The profile
+  /// (INI) service on the same item never lands here.
+  InlineGraphStream? inlineGraph;
+
   /// The classic ABAP list this window paints (empty on a dynpro): its
   /// pickable lines — no blank row, no frame rule.
   final List<ListLine> listLines = [];
@@ -712,7 +722,10 @@ ScreenModel _foldSegment(
     m.windowRows = ses[14];
     m.windowCols = ses[15];
   }
-  final st = _FoldState();
+  final st = _FoldState()
+    ..graph = previous != null && previous.modalLevel == modalLevel
+        ? previous.inlineGraph
+        : null;
   for (var i = 0; i < seg.items.length; i++) {
     if (seg.frameStarts.contains(i)) st.newFrame();
     final it = seg.items[i];
@@ -771,7 +784,10 @@ ScreenModel _foldSegment(
     m.containers.addAll(previous.containers);
     m.hostedDynpros.addAll(previous.hostedDynpros);
     m.controlPaths.addAll(previous.controlPaths);
-    m.netPlans.addAll(previous.netPlans);
+    // an inline graph this turn continued or closed is the turn's own
+    m.netPlans.addAll(previous.netPlans
+        .where((g) => !st.graphTouched || g.shell != null));
+    if (!st.graphTouched) m.inlineGraph = previous.inlineGraph;
     m.listLines.addAll(previous.listLines);
     m.listPaint.addAll(previous.listPaint);
     m.listWindow = previous.listWindow;
@@ -783,7 +799,7 @@ ScreenModel _foldSegment(
   _buildListLines(m, st);
   m.containers.addAll(st.path.declared);
   m.hostedDynpros.addAll(st.path.dynpros);
-  if (delta) _mergeDelta(m, previous);
+  if (delta) _mergeDelta(m, previous, keepGraph: !st.graphTouched);
   m.fields.sort((x, y) {
     final c = x.row.compareTo(y.row);
     return c != 0 ? c : x.col.compareTo(y.col);
@@ -817,7 +833,8 @@ bool _paintsBody(DiagItem it) =>
 /// table control, container, list and graph stays as painted. A repainted
 /// input keeps its caption and type-ahead arming when the delta resent
 /// neither.
-void _mergeDelta(ScreenModel m, ScreenModel previous) {
+void _mergeDelta(ScreenModel m, ScreenModel previous,
+    {bool keepGraph = true}) {
   (String?, int, int) cell(ScreenField f) => (f.container, f.row, f.col);
   final prevAt = {for (final f in previous.fields) cell(f): f};
   final painted = <(String?, int, int)>{};
@@ -850,7 +867,10 @@ void _mergeDelta(ScreenModel m, ScreenModel previous) {
   for (final e in previous.controlPaths.entries) {
     m.controlPaths.putIfAbsent(e.key, () => e.value);
   }
-  if (m.netPlans.isEmpty) m.netPlans.addAll(previous.netPlans);
+  if (keepGraph && m.netPlans.isEmpty) {
+    m.netPlans.addAll(previous.netPlans);
+    m.inlineGraph ??= previous.inlineGraph;
+  }
   if (m.listPaint.isEmpty) {
     m.listLines.addAll(previous.listLines);
     m.listPaint.addAll(previous.listPaint);
@@ -1034,12 +1054,17 @@ bool _paintsDynproFrame(Uint8List f) {
 
 /// An item that (re)paints the dynpro: a DYNT atom family item (18/9/*,
 /// 16/9/2), a 16/10 container item, the program / dynpro name (16/6/13,
-/// 16/6/14) or an inline graph.
+/// 16/6/14) or an inline graph's first item — never the conversation's
+/// later items (a continuation, the bare receive cng9 srv[33]): folded as
+/// a paint they wiped the graph the paint before had just drawn.
 bool _paintsDynpro(DiagItem it) {
   if (it.type == itemSba) return true; // a classic list run
   if (!it.isAppl) return false;
   if (it.id == applDynt && it.sid != 10 && it.sid != 11) return true;
-  if (it.id == applContainer || it.id == applGraph) return true;
+  if (it.id == applContainer) return true;
+  if (it.id == applGraph) {
+    return isInlineGraphHead(it.value);
+  }
   return it.id == applStR3Info && (it.sid == 13 || it.sid == 14);
 }
 
@@ -1208,6 +1233,12 @@ class _FoldState {
   /// decoded in the one declared right before it — 1160 on CNG9).
   String graphCodepage = '4110';
 
+  /// The inline GRAPH conversation this segment continues (the window's
+  /// previous paint's, then each item's), and whether an item of this
+  /// segment opened, extended or closed it.
+  InlineGraphStream? graph;
+  bool graphTouched = false;
+
   /// The TABLE-plane bookkeeping of a cell write (reference client
   /// diag_container_tree / screen_tablecontrol): the first 16/12/6 of the
   /// frame, the container group being declared (16/10/1 OPEN … the next
@@ -1247,16 +1278,50 @@ class _FoldState {
   TcBuilder tc(String name) => tcs.putIfAbsent(name, () => TcBuilder(name));
 }
 
+/// One inline GRAPH item 16/2/5: a graph's first item opens the screen's
+/// conversation, a `04`-led item continues an unterminated one (its graph
+/// parsed once the stream ends: gral_netzocx1_java srv[38] + srv[39]), the
+/// close message ends it; the server's bare receive (`04`, cng9 srv[33])
+/// and any other message leave it as it is.
+void _foldInlineGraph(ScreenModel m, Uint8List v, _FoldState st) {
+  // the profile (INI) service shares the item and is no graphic: it leaves
+  // the conversation as it is (xxl_excel_word_demos srv[21] BPROF / srv[22]
+  // KPROF — drawn, it was the "network graph without nodes" of XXLSTEST)
+  if (isInlineProfileMessage(v)) return;
+  final opened = InlineGraphStream.open(v, st.graphCodepage);
+  final was = st.graph;
+  final InlineGraphStream? now;
+  if (opened != null) {
+    now = opened;
+  } else if (was != null && inlineGraphCloses(v, was.interface)) {
+    now = null;
+  } else {
+    now = was?.extend(v);
+    if (now == null) return;
+  }
+  st
+    ..graph = now
+    ..graphTouched = true;
+  m.inlineGraph = now;
+  m.netPlans.removeWhere((g) => g.shell == null);
+  // the first item is parsed as it is (a one-item graph, cng9 srv[32]); a
+  // continued one once complete — never a classic BUSG / STAT graphic (its
+  // raw stream stays on [ScreenModel.inlineGraph] for its renderer)
+  final g = now != null &&
+          now.kind != InlineGraphKind.business &&
+          now.kind != InlineGraphKind.statistics &&
+          (opened != null || now.complete)
+      ? now.model
+      : null;
+  if (g != null) m.netPlans.add(g);
+}
+
 void _foldAppl(ScreenModel m, DiagItem it, _FoldState st) {
   if (it.id == applStR3Info && it.sid == 35) {
     st.graphCodepage =
         netPlanCodepageOf(Uint8List.fromList(it.value)) ?? st.graphCodepage;
   } else if (it.id == applGraph && it.sid == 5) {
-    final g = parseNetPlanInline(
-      Uint8List.fromList(it.value),
-      codepage: st.graphCodepage,
-    );
-    if (g != null) m.netPlans.add(g);
+    _foldInlineGraph(m, Uint8List.fromList(it.value), st);
     return;
   }
   switch (it.id) {

@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:office_doc/office_doc.dart';
 
 import 'office_platform.dart';
+import 'sap_chart_view.dart';
 import 'sap_form_view.dart';
 import 'sap_grid_view.dart';
 
@@ -12,7 +13,8 @@ import 'sap_grid_view.dart';
 ///
 /// * an Excel workbook: the server's .xlsx through the package reader, else
 /// the spreadsheet interface's cells (SetRangesData …) — a grid per
-/// sheet, sheet tabs when there are several;
+/// sheet, a chart sheet as its column chart (a created `Excel.Chart`:
+/// Excel's default chart object), sheet tabs when there are several;
 /// * a Word document: RTF (SO10 / SmartForms text) or .docx as styled,
 /// selectable text;
 /// * anything else (a binary .doc / .xls, an Adobe form …): what arrived,
@@ -125,7 +127,8 @@ class _SapOfficeViewState extends State<SapOfficeView> {
             '${error == null ? '' : ' — not readable: $error'}',
       _ => null,
     };
-    if (model != null && model.sheets.any((s) => s.cells.isNotEmpty)) {
+    if (model != null &&
+        model.sheets.any((s) => s.cells.isNotEmpty || s.isChart)) {
       return _SheetBody(
         model,
         note: received == null
@@ -388,10 +391,16 @@ class _SapOfficeViewState extends State<SapOfficeView> {
             ),
           ),
         Expanded(
-          child: SapSheetGrid(
-            key: ValueKey('office-sheet-${sheet.name}'),
-            sheet: sheet,
-          ),
+          child: switch (sheet.chart) {
+            final chart? => SapSheetChart(
+              key: ValueKey('office-chart-${sheet.name}'),
+              chart: chart,
+            ),
+            null => SapSheetGrid(
+              key: ValueKey('office-sheet-${sheet.name}'),
+              sheet: sheet,
+            ),
+          },
         ),
         if (visible.length > 1)
           Container(
@@ -408,6 +417,9 @@ class _SapOfficeViewState extends State<SapOfficeView> {
                     ),
                     child: ChoiceChip(
                       key: ValueKey('office-tab-$i'),
+                      avatar: book.sheets[i].isChart
+                          ? const Icon(Icons.bar_chart, size: 16)
+                          : null,
                       label: Text(book.sheets[i].name),
                       selected: i == _sheet,
                       visualDensity: VisualDensity.compact,
@@ -456,19 +468,32 @@ class _SapOfficeViewState extends State<SapOfficeView> {
 }
 
 /// The DOI spreadsheet model (doi.dart's [Document]: the cells the
-/// spreadsheet interface's SetRangesData calls wrote, per sheet) as a
-/// [Workbook]: numbers typed as numbers, empty values dropped.
+/// spreadsheet interface's SetRangesData calls wrote, per sheet; a created
+/// chart object's chart sheet + data sheet) as a [Workbook]: numbers typed
+/// as numbers, empty values dropped, a chart sheet with its chart.
 Workbook workbookOfDoiDocument(Document d) {
-  final names = d.sheets.keys.toList();
+  final sheets = officeSheetsOf(d);
+  final names = [for (final s in sheets) s.name];
   return Workbook(
     [
-      for (final n in names)
+      for (final s in sheets)
         Worksheet(
-          n,
+          s.name,
           cells: {
-            for (final e in d.sheets[n]!.entries)
-              if (e.value.isNotEmpty && e.key.$1 > 0 && e.key.$2 > 0)
-                e.key: SheetCell.guess(e.value),
+            for (final MapEntry(key: at, value: v) in s.cells.entries)
+              if (at.$1 > 0 && at.$2 > 0)
+                at: switch (v) {
+                  final num n => SheetCell(
+                    d.cell(at.$1, at.$2, s.name),
+                    kind: CellKind.number,
+                    number: n,
+                  ),
+                  _ => SheetCell.guess('$v'),
+                },
+          },
+          chart: switch (s.chart) {
+            null => null,
+            final c => _sheetChartOf(c),
           },
         ),
     ],
@@ -476,6 +501,59 @@ Workbook workbookOfDoiDocument(Document d) {
         ? names.indexOf(d.activeSheet)
         : 0,
   );
+}
+
+/// A DOI chart as the workbook's [SheetChart]: the resolved series with
+/// the cell references they were read from.
+SheetChart _sheetChartOf(SapOfficeChart c) {
+  String ref(DoiCellRange r) =>
+      sheetRangeRef(r.sheet, CellRange(r.top, r.left, r.bottom, r.right));
+  return SheetChart(
+    type: switch (c.type) {
+      DoiChartType.clusteredColumn => SheetChartType.clusteredColumn,
+    },
+    gapWidth: c.gapWidth,
+    overlap: c.overlap,
+    series: [
+      for (final s in c.series)
+        ChartSeries(
+          name: s.name,
+          categories: s.categories,
+          values: s.values,
+          nameRef: ref(s.source.name),
+          categoriesRef: ref(s.source.categories),
+          valuesRef: ref(s.source.values),
+        ),
+    ],
+  );
+}
+
+/// A chart sheet read-only: its clustered column chart (a column per
+/// series and category, the legend, the value and category axes) in the
+/// app's chart view, themed like the rest of the screen.
+class SapSheetChart extends StatelessWidget {
+  const SapSheetChart({super.key, required this.chart});
+
+  final SheetChart chart;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+      child: SapChartView(
+        type: switch (chart.type) {
+          SheetChartType.clusteredColumn => 'Columns',
+        },
+        title: '',
+        categories: chart.categories,
+        series: [
+          for (final s in chart.series)
+            ChartSeriesData(s.name, [for (final v in s.values) v?.toDouble()]),
+        ],
+        gapWidth: chart.gapWidth,
+      ),
+    );
+  }
 }
 
 /// One worksheet read-only in GuiGo's grid ([SapGridView]): column letters

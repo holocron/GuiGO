@@ -343,6 +343,7 @@ class DpContent {
 /// The raw content a DP_PUT delivers for its DESURL (dp_put_content port):
 /// the DATAASC/DATABIN column's LZH object, bounded by TOTALSIZE when set.
 DpContent? dpPutContent(Uint8List seg) {
+  seg = _queueReassembled(seg);
   final (name, dims, cells) = dpColumnCells(seg, 'DATAASC');
   var column = name;
   var blobs = cells;
@@ -354,16 +355,137 @@ DpContent? dpPutContent(Uint8List seg) {
     blobs = b.$3;
     (w, cnt) = b.$2;
   }
-  if (blobs.isEmpty) return null;
-  final joined = _concat(blobs);
+  Uint8List joined;
+  if (blobs.isEmpty) {
+    // no cell the strict walk reads: the column's ONE LZH object under the
+    // cell segmentation (the reference client's _lzh_object_in). On the real wire
+    // the strict walk reads every BDS push once the queue-row headers are
+    // out (a recorded session srv[5..11] / [28] / [37]); this
+    // path exists for the scrubbed a recorded session
+    // srv[52] (DATABIN 1022 x 83, a 20 974-B object of 84 826 B whose
+    // chain lost one slot header at 10.7 KB, see [_columnObject]); whole
+    // only when it decodes to its declared size
+    final obj = _columnObject(seg, 'DATABIN') ?? _columnObject(seg, 'DATAASC');
+    if (obj == null) return null;
+    (column, (w, cnt), joined) = obj;
+  } else {
+    joined = _concat(blobs);
+  }
   final url = _scalarText(seg, 'DESURL') ?? '';
   final expected = totalsize > 0 ? totalsize : (w > 0 && cnt > 0 ? w * cnt : joined.length);
+  // the last fixed-width record is padded past the file: TOTALSIZE bounds
+  // it (the reference client's dp_put_content) — the BDS template's 1022 x 83 records
+  // hold its 83 968 B (a recorded session srv[52]), OAOR's
+  // RTF 3 x 1024 its 2 145 B (srv[191])
+  if (totalsize > 0 && joined.length > totalsize) {
+    joined = Uint8List.sublistView(joined, 0, totalsize);
+  }
   return DpContent(
       url: url,
       content: joined,
       expected: expected,
       column: column,
       complete: joined.length == expected);
+}
+
+/// The column [name]'s single LZH object decoded through its cell
+/// segmentation ([dcObject]: the `03 05 03 05 <len>` reframes stripped),
+/// bounded by the next column of the push: (name, dims, bytes), null when
+/// none decodes WHOLE (to the length its own header declares).
+(String, (int, int), Uint8List)? _columnObject(Uint8List seg, String name) {
+  final anchor = Uint8List.fromList([
+    0x03, 0x01,
+    (name.length >> 8) & 0xff, name.length & 0xff,
+    ...name.codeUnits,
+    0x03, 0x01,
+  ]);
+  final i = _indexOf(seg, anchor, 0);
+  if (i < 0) return null;
+  var ds = i + anchor.length;
+  final bd = seg.buffer.asByteData(seg.offsetInBytes, seg.lengthInBytes);
+  var dims = (0, 0);
+  if (ds + 12 <= seg.length &&
+      seg[ds] == 0x03 &&
+      seg[ds + 1] == 0x02 &&
+      bd.getUint16(ds + 2) >= 8) {
+    dims = _boundedDims(bd.getUint32(ds + 4), bd.getUint32(ds + 8));
+    ds += 4 + bd.getUint16(ds + 2) + 2;
+  }
+  if (ds + 2 > seg.length || seg[ds] != 0x03 || seg[ds + 1] != 0x05) {
+    return null;
+  }
+  var end = seg.length;
+  for (final next in const ['FORMAT', 'PROPS', 'DATAASC', 'DATABIN']) {
+    if (next == name) continue;
+    final k = _indexOf(
+      seg,
+      Uint8List.fromList([0x03, 0x01, 0x00, next.length, ...next.codeUnits]),
+      ds,
+    );
+    if (k >= 0 && k < end) end = k;
+  }
+  // the chain: `03 05 <u16 len> <payload>` then `03 05 03 05 <u16 len>
+  // <payload>` per segment, a bare `03 05` closing it. On the real wire
+  // EVERY 256-B slot is headed once the 68-B queue-row headers are out
+  // ([_queueReassembled]; a recorded session DECODE §1: 37 +
+  // 5 + 573 markers, stride 256 throughout). A headerless slot of exactly
+  // 256 B is tolerated, as payload — the scrub artefact of a recorded session
+  // alv_excel_inplace, whose re-deflate rewrote the slots straddling a
+  // queue-row boundary (srv[52] at 10 706, 4 B before the 5th; the RTF of
+  // srv[178..181] at 10 705 and 76 753; reference client complaint F3). Anything
+  // else is a damaged chain: the walk stops, the object does not decode.
+  final flat = BytesBuilder(copy: false);
+  var j = ds + 2;
+  while (j + 2 <= end) {
+    final sl = bd.getUint16(j);
+    if (j + 2 + sl > end) break;
+    flat.add(Uint8List.sublistView(seg, j + 2, j + 2 + sl));
+    var k = j + 2 + sl;
+    if (_startsWith(seg, k, const [0x03, 0x05, 0x03, 0x05])) {
+      j = k + 4;
+      continue;
+    }
+    if (_startsWith(seg, k, const [0x03, 0x05])) break;
+    const slot = 256; // 6-B `03 05 03 05 <u16>` header + 250-B segment
+    if (k + slot + 4 > end ||
+        !_startsWith(seg, k + slot, const [0x03, 0x05, 0x03, 0x05])) {
+      break;
+    }
+    flat.add(Uint8List.sublistView(seg, k, k + slot));
+    j = k + slot + 4;
+  }
+  final f = flat.takeBytes();
+  var m = -1;
+  for (var k = 5; k + 1 < f.length; k++) {
+    if (f[k] == 0x1f && f[k + 1] == 0x9d) {
+      m = k;
+      break;
+    }
+  }
+  if (m < 5) return null;
+  final cs = Uint8List.sublistView(f, m - 5);
+  final hdr = parseCsHeader(cs);
+  final out = hdr == null ? null : lzhInflate(cs);
+  if (out == null || out.length != hdr!.declaredLen) return null;
+  return (name, dims, out);
+}
+
+/// [seg] with the RFC-queue row headers out when it is still the queue's
+/// own rows (a caller handing an RFC_QUEUE blob, not [_scanPushes]'
+/// reassembled element): [queueElements] at the row width — the distance
+/// to the next header of the same queue id — so a deframe never meets the
+/// 68-B header that widens every 7th slot of the chain to 324 B
+/// (a recorded session raw srv[38], reference client DECODE §1). [seg]
+/// itself otherwise.
+Uint8List _queueReassembled(Uint8List seg) {
+  if (!isQueueRowHeader(seg)) return seg;
+  final id = Uint8List.sublistView(seg, 0, 30); // `<24 hex>SAPGUI`
+  final next = _indexOf(seg, id, queueRowHeader);
+  final elems = queueElements(seg, next > 0 ? next : seg.length);
+  for (final e in elems) {
+    if (_desurlOf(e) != null) return e;
+  }
+  return elems.isEmpty ? seg : elems.first;
 }
 
 /// The push's TOTALSIZE scalar (u32 LE) — the content length when the

@@ -201,6 +201,10 @@ class _WindowState {
   final DoiState doi = DoiState();
   final Map<String, PropertySink> propertySinks = {};
   final Set<String> loadedSinks = {};
+
+  /// loaded sink -> the pushed table the object was filled from
+  /// (client_table_pull.loadedObjectSourcesOf)
+  final Map<String, String> loadedSources = {};
   final Map<String, List<String>> expandedKeys = {};
 
   /// tree shell -> its selected node keys (SelectionKeys read-backs)
@@ -249,6 +253,9 @@ class _WindowState {
   String? chartBaseKey;
 
   final SapNetPlanTracker netPlans = SapNetPlanTracker();
+
+  /// the SAPbarc.OCX bar charts (sap_session_barchart.dart)
+  final SapBarChartTracker barCharts = SapBarChartTracker();
 
   /// the picture controls' urls, display modes and pushed pictures
   final SapPictureTracker pictureTracker = SapPictureTracker();

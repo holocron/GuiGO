@@ -20,7 +20,9 @@
 /// dynpro paint (a recorded session srv[32]/[36]): NUL-separated
 /// tokens, a section header `T$NAME`, each field `C<value>`, decoded in
 /// the codepage the paint's preceding 16/6/35 declared (1160 =
-/// windows-1252 there). No control is created for it.
+/// windows-1252 there). No control is created for it. A graph over
+/// ~16 kB continues in the next frames' `04`-led items
+/// ([InlineGraphStream]; a recorded session srv[38]/[39]).
 ///
 /// Record arity (the stream's own grammar, verified on all four oracles):
 /// /$NODES (id, format, highlight); /$NVALS (id, key, value) with key 0 =
@@ -54,6 +56,7 @@ import '../framing/envelope.dart';
 import '../session/actions.dart';
 import '../session/frames.dart';
 import '../session/frontend_profile.dart';
+import 'netplan_format.dart';
 import 'screen_model.dart';
 
 // ---------------------------------------------------------------------------
@@ -183,10 +186,12 @@ class SapNetPlanModel {
     List<NetPlanNode>? nodes,
     List<NetPlanEdge>? edges,
     Map<String, Map<String, String>>? highlights,
+    NetPlanDecor? decor,
   }) : palette = palette ?? [],
        nodes = nodes ?? [],
        edges = edges ?? [],
-       highlights = highlights ?? {};
+       highlights = highlights ?? {},
+       decor = decor ?? NetPlanDecor();
 
   /// The hosting NetPlanGraphics control's kernel shell (`119`); null for
   /// the inline GRAPH carrier.
@@ -214,6 +219,10 @@ class SapNetPlanModel {
   /// the box line / border, `s` = shadow, plus `p` / `y` / `t` style codes
   /// (values are JNet colour names: `BLUE_3`, `DARKGREEN`, `GRAY_1`, …).
   Map<String, Map<String, String>> highlights;
+
+  /// The graph's look: box formats, frames, boxes, legend, options
+  /// (netplan_format.dart).
+  NetPlanDecor decor;
 
   NetPlanNode? node(String id) {
     for (final n in nodes) {
@@ -295,6 +304,15 @@ _Sections _inlineSections(String text) {
   return out;
 }
 
+/// The DataProvider-push lexer ([_pushSections]), shared with the bar
+/// chart's `sapbarc-stream` (sap_barchart.dart): `/$NAME` -> its `:` fields.
+Map<String, List<String>> netPlanPushSections(String text) =>
+    _pushSections(text);
+
+/// The inline GRAPH-item lexer ([_inlineSections]), shared likewise.
+Map<String, List<String>> netPlanInlineSections(String text) =>
+    _inlineSections(text);
+
 List<List<String>> _group(List<String>? f, int n) => [
   if (f != null)
     for (var i = 0; i + n <= f.length; i += n) f.sublist(i, i + n),
@@ -312,11 +330,13 @@ class _Graph {
   final Map<String, NetPlanNode> nodes = {};
   final List<NetPlanEdge> edges = [];
   final Map<String, Map<String, String>> highlights = {};
+  final NetPlanDecor decor = NetPlanDecor();
 
   bool get isEmpty => nodes.isEmpty && edges.isEmpty;
 
   /// Fold one stream's sections in: [full] (a /$GTYPE stream) resets first.
   void apply(_Sections s, {required bool full}) {
+    decor.apply(s, full: full);
     if (full) {
       title = '';
       gtype = '';
@@ -467,6 +487,7 @@ class _Graph {
     nodes: [for (final n in nodes.values) n._copy()],
     edges: [for (final e in edges) e._copy()],
     highlights: {for (final h in highlights.entries) h.key: Map.of(h.value)},
+    decor: decor.copy(),
   );
 }
 
@@ -542,10 +563,315 @@ SapNetPlanModel? parseNetPlanInline(
   final text = switch (codepage) {
     '4110' => utf8.decode(value, allowMalformed: true),
     '1160' => _cp1252(value),
+    '1127' => _macRoman(value), // the Java GUI's (gral_netzocx1_java srv[38])
     _ => latin1.decode(value, allowInvalid: true),
   };
   final g = _Graph()..apply(_inlineSections(text), full: true);
   return g.isEmpty ? null : g.model();
+}
+
+/// The ceiling of one inline GRAPH transmission (its items joined): past
+/// it no continuation is taken and the stream counts as complete.
+const int maxInlineGraphBytes = 4 << 20;
+
+/// The end of every inline GRAPH message: the `E` and `R` framing tokens
+/// (a recorded session srv[32] `… T$BRACKET C0 E R`, srv[34] `… KNETZ E
+/// R`; a recorded session srv[39] `… T$BRACKET C0 E R`).
+const List<int> _inlineGraphEnd = [0x00, 0x45, 0x00, 0x52, 0x00];
+
+/// The kind byte every inline GRAPH item leads with: `05` a chunk more
+/// follow (a recorded session srv[16], NETZ_BO3's 16 016 B; cng9
+/// srv[32] / GRCNETC2 srv[63], followed by an EMPTY last chunk `04` —
+/// srv[33] / srv[64]), `04` the last (NETZ_BO3's continuation srv[17],
+/// 7 411 B; GRBUSG_3's one-chunk business graph srv[71]; the close message
+/// cng9 srv[34] / gfw_demos srv[18]).
+const int _inlineGraphMore = 0x05, _inlineGraphLast = 0x04;
+
+/// The version token right after the kind byte of a transmission's first
+/// chunk (`05 '1V3.4'` / `04 '1V3.4'`, every inline graph of the corpus).
+const List<int> _inlineGraphHead = [0x31, 0x56, 0x33, 0x2e, 0x34, 0x00];
+
+/// Whether [value] is the FIRST chunk of an inline GRAPH transmission —
+/// a network graph's (its `T$GTYPE`) or any other Basis graphic's (the
+/// `1V3.4` head: GRBUSG_3's business graph `04 '1V3.4' … BBUSG`). The
+/// frontend profile (INI) request rides the same head (`04 '1V3.4' 'LF'
+/// 'BPROF'`, a recorded session srv[21]) and is NO
+/// graphic: [isInlineProfileMessage].
+bool isInlineGraphHead(Uint8List value) {
+  if (isInlineNetPlan(value)) return true;
+  if (value.length <= _inlineGraphHead.length) return false;
+  for (var i = 0; i < _inlineGraphHead.length; i++) {
+    if (value[i + 1] != _inlineGraphHead[i]) return false;
+  }
+  return !isInlineProfileMessage(value);
+}
+
+/// The 16/2/5 interface of the frontend profile (INI) service — XXL asks
+/// `Lotus.ini` for a key through it (a recorded session
+/// srv[21] `04 '1V3.4' 'LF' 'BPROF' 'D,' 'IPROF' 'D,' '13' '$V01'
+/// 'CMODE = GET' 'CSTRINGS =Lotus.ini,Lotus Applications,Common Directory'
+/// 'E' 'R'`, then srv[22] `04 'KPROF' 'E' 'R'`).
+const String inlineProfileInterface = 'PROF';
+
+/// Whether the 16/2/5 item [v] is a message of the profile service — its
+/// `BPROF` / `IPROF` request or its `KPROF` close — never a graphic.
+bool isInlineProfileMessage(Uint8List v) {
+  for (final t in _inlineGraphPreamble(v, max: 8)) {
+    if (t == 'B$inlineProfileInterface' ||
+        t == 'I$inlineProfileInterface' ||
+        t == 'K$inlineProfileInterface') {
+      return true;
+    }
+  }
+  return false;
+}
+
+/// The client's reply the profile message [v] owes, or null: the request
+/// (`IPROF … CMODE = …`) is answered `00 06 'IPROF' 00 05 00 00 08 00 06
+/// 'RC=1,' 00` — RC 1 = no such key (GuiGo holds no INI file; xxl gui[14],
+/// the real GUI's own answer for the absent Lotus key), the close `KPROF`
+/// with the done reply `D E0` (xxl gui[15]). Only `CMODE = GET` of an
+/// absent key is recorded; a `PUT` gets the same refusal.
+Uint8List? inlineProfileReply(Uint8List v) {
+  if (!isInlineProfileMessage(v)) return null;
+  final toks = _inlineGraphPreamble(v);
+  if (toks.contains('I$inlineProfileInterface') &&
+      toks.any((t) => t.startsWith('CMODE'))) {
+    return inlineGraphMessage(inlineProfileInterface, 0x05, 'RC=1,');
+  }
+  if (toks.contains('K$inlineProfileInterface')) {
+    return inlineGraphDoneMessage();
+  }
+  return null;
+}
+
+/// The classic Basis-Graphik conversation of an inline GRAPH item 16/2/5
+/// (SAPLGRAP/0100): the transmission the paint opened ([open], a `T$GTYPE`
+/// stream) and each continuation item the server sends after it until the
+/// stream ends ([complete]). A graph over ~16 kB rides SEVERAL items, each
+/// in its own frame: GRAL NETZOCX1 / NETZ_BO3 opens with 16 013 B that stop
+/// inside /$FMTS — no node yet — and the /$NODES /$LINES … arrive in the
+/// next frame's `04`-led item (a recorded session srv[38] →
+/// srv[39], 7 nodes / 8 edges joined). Immutable: [extend] returns a new
+/// stream, so a fold never edits the previous paint's.
+final class InlineGraphStream {
+  InlineGraphStream._(this._chunks, this.length, this.codepage,
+      this.interface, this.complete,
+      {this.receiving = false, SapNetPlanModel? parsed})
+      : _parsed = parsed,
+        _isParsed = parsed != null;
+
+  /// The transmission [value] opens (null when it is not a graph's first
+  /// item), decoded later in SAP [codepage] (the 16/6/35 before it).
+  static InlineGraphStream? open(Uint8List value, String codepage) {
+    if (!isInlineGraphHead(value)) return null;
+    final v = value.length > maxInlineGraphBytes
+        ? Uint8List.sublistView(value, 0, maxInlineGraphBytes)
+        : value;
+    return InlineGraphStream._(
+        [v],
+        v.length,
+        codepage,
+        inlineGraphInterface(v),
+        v[0] == _inlineGraphLast || _ends([v]) || v.length != value.length,
+        receiving: v[0] == _inlineGraphLast);
+  }
+
+  final List<Uint8List> _chunks;
+
+  /// The bytes received so far.
+  final int length;
+  final String codepage;
+
+  /// The graphic interface the stream names (its `I` token: `NETZ`, from
+  /// `INETZ`) — what the client's own GRAPH messages name; null when none.
+  final String? interface;
+
+  /// What the stream is, by its [interface]: only [InlineGraphKind.network]
+  /// is a network graph ([model]); the classic business / statistics
+  /// graphics keep their joined [bytes] for a renderer of their own.
+  InlineGraphKind get kind => inlineGraphKindOf(interface);
+
+  /// The transmission ended (its `E R`), or reached [maxInlineGraphBytes].
+  final bool complete;
+
+  /// The transmission's LAST chunk (kind `04`) arrived — its content
+  /// (NETZ_BO3 srv[17], GRBUSG_3 srv[71]) or empty after a one-chunk graph
+  /// (cng9 srv[33], GRCNETC2 srv[64]): the graph waits for the user, its
+  /// step is the current.
+  final bool receiving;
+
+  /// This stream continued by the GRAPH item [value]: null when [value] is
+  /// no continuation (the stream already ended — then it is another message
+  /// of the conversation — or [value] leads with no kind byte). The empty
+  /// last chunk after a complete stream marks it [receiving].
+  InlineGraphStream? extend(Uint8List value) {
+    if (value.isEmpty) return null;
+    final kind = value[0];
+    if (kind != _inlineGraphLast && kind != _inlineGraphMore) return null;
+    if (value.length == 1) {
+      if (kind != _inlineGraphLast) return null;
+      return complete && !receiving
+          ? InlineGraphStream._(_chunks, length, codepage, interface, true,
+              receiving: true, parsed: model)
+          : null;
+    }
+    if (complete) return null;
+    var part = Uint8List.sublistView(value, 1);
+    final room = maxInlineGraphBytes - length;
+    final capped = part.length >= room;
+    if (capped) part = Uint8List.sublistView(part, 0, room);
+    final chunks = [..._chunks, part];
+    return InlineGraphStream._(chunks, length + part.length, codepage,
+        interface, kind == _inlineGraphLast || capped || _ends(chunks),
+        receiving: kind == _inlineGraphLast);
+  }
+
+  /// The whole transmission so far, joined.
+  Uint8List get bytes {
+    if (_chunks.length == 1) return _chunks.single;
+    final b = BytesBuilder(copy: false);
+    for (final c in _chunks) {
+      b.add(c);
+    }
+    return b.takeBytes();
+  }
+
+  SapNetPlanModel? _parsed;
+  bool _isParsed;
+
+  /// The graph the stream holds so far ([parseNetPlanInline]), memoized.
+  SapNetPlanModel? get model {
+    if (!_isParsed) {
+      _isParsed = true;
+      _parsed = parseNetPlanInline(bytes, codepage: codepage);
+    }
+    return _parsed;
+  }
+
+  /// Whether [chunks] end with the `E R` tokens (split across them or not).
+  static bool _ends(List<Uint8List> chunks) {
+    var k = _inlineGraphEnd.length;
+    for (var c = chunks.length - 1; c >= 0 && k > 0; c--) {
+      final b = chunks[c];
+      for (var i = b.length - 1; i >= 0 && k > 0; i--) {
+        if (b[i] != _inlineGraphEnd[--k]) return false;
+      }
+    }
+    return k == 0;
+  }
+}
+
+/// The classic Basis graphic an inline GRAPH stream carries, by its
+/// interface token (`I<interface>`): `NETZ` the network graph (GRAL
+/// NETZ_BO3 / GRCNETC2, CNG9), `BUSG` the business graphic (GRBUSG_3),
+/// `STAT` the statistics graphic (GRSTAT_1); anything else (or none)
+/// [other]. The profile (INI) service `PROF` is no graphic and never
+/// opens a stream ([isInlineProfileMessage]).
+enum InlineGraphKind { network, business, statistics, other }
+
+/// The [InlineGraphKind] of the stream naming [interface].
+InlineGraphKind inlineGraphKindOf(String? interface) => switch (interface) {
+      'NETZ' => InlineGraphKind.network,
+      'BUSG' => InlineGraphKind.business,
+      'STAT' => InlineGraphKind.statistics,
+      _ => InlineGraphKind.other,
+    };
+
+/// The framing tokens of an inline GRAPH message: its NUL-separated tokens
+/// up to the first `T$` section, the lead control byte stripped (`05 '1V3.4'`,
+/// `04 'INETZ'`). At most [max] tokens.
+List<String> _inlineGraphPreamble(Uint8List v, {int max = 32}) {
+  final out = <String>[];
+  var start = 0;
+  while (start < v.length && v[start] < 0x20) {
+    start++;
+  }
+  for (var i = start; i <= v.length && out.length < max; i++) {
+    if (i < v.length && v[i] != 0) continue;
+    final tok = String.fromCharCodes(Uint8List.sublistView(v, start, i));
+    if (tok.startsWith(r'T$')) break;
+    out.add(tok);
+    start = i + 1;
+  }
+  return out;
+}
+
+/// The graphic interface an inline GRAPH message names — `NETZ` of its
+/// `INETZ` token (cng9 srv[32] `… 'D,' 'INETZ' 'D,' '13' …`, srv[34]
+/// `04 'INETZ' …`), or null.
+String? inlineGraphInterface(Uint8List v) {
+  for (final t in _inlineGraphPreamble(v)) {
+    if (t.length > 1 && t.length <= 16 && t.startsWith('I')) {
+      return t.substring(1);
+    }
+  }
+  return null;
+}
+
+/// Whether the inline GRAPH message [v] owes the client's done reply
+/// ([inlineGraphDoneMessage]): its preamble's `G1` — the close message
+/// `04 'INETZ' 'D,' '13' '$V01' '$A' 'G1' 'KNETZ' 'E' 'R'` (cng9 srv[34],
+/// answered by gui[34]); the graph data's `G0` (srv[32]) is answered by
+/// nothing.
+bool inlineGraphReplyOwed(Uint8List v) =>
+    v.isNotEmpty &&
+    !isInlineGraphHead(v) &&
+    _inlineGraphPreamble(v).contains('G1');
+
+/// Whether the inline GRAPH message [v] closes the graph window of
+/// [interface]: its `K<interface>` token (`KNETZ`, cng9 srv[34] — the
+/// server's answer to the graph's Back).
+bool inlineGraphCloses(Uint8List v, String? interface) =>
+    interface != null &&
+    !isInlineGraphHead(v) &&
+    _inlineGraphPreamble(v).contains('K$interface');
+
+/// The client's GRAPH message reporting the graph window's function code
+/// [code] (`ABCK`, the Back that leaves the graph) for [interface]: two
+/// u16-length-prefixed NUL-terminated token groups around `01 00` —
+/// `00 06 'INETZ' 00 01 00 00 08 00 06 'CABCK' 00` (a recorded session
+/// gui[33] / gui[36], both graphs left the same way).
+Uint8List inlineGraphEventMessage(String interface, String code) =>
+    inlineGraphMessage(interface, 0x01, 'C$code');
+
+/// A client GRAPH message for [interface]: the `I<interface>` group, the
+/// block [kind] (`01` a function code, `05` the profile service's return
+/// code — xxl gui[14] `… 'IPROF' 00 05 00 00 08 00 06 'RC=1,' 00`), then
+/// [token] as one u16-length-prefixed group.
+Uint8List inlineGraphMessage(String interface, int kind, String token) {
+  final iface = latin1.encode('I$interface\x00');
+  final fc = latin1.encode('$token\x00');
+  return Uint8List.fromList([
+    iface.length >> 8 & 0xff, iface.length & 0xff, ...iface,
+    kind & 0xff, 0x00,
+    (fc.length + 2) >> 8 & 0xff, (fc.length + 2) & 0xff,
+    fc.length >> 8 & 0xff, fc.length & 0xff, ...fc,
+  ]);
+}
+
+/// The client's done reply `00 05 'D' 00 'E<exit>' 00`: `E0` to a GRAPH
+/// message that owes one ([inlineGraphReplyOwed]: cng9 gui[34] / gui[37],
+/// gfw_demos NETZ_BO3 g[14], GRCNETC2 g[51]); `E3` the business graphic's
+/// own exit (GRBUSG_3 g[55]).
+Uint8List inlineGraphDoneMessage({int exit = 0}) => Uint8List.fromList(
+    [0x00, 0x05, 0x44, 0x00, 0x45, 0x30 + exit % 10, 0x00]);
+
+/// A Windows client GRAPH round carrying [message]: Step, an SES with no
+/// event (the window pixels' low bytes), the 16/2/5 item, two EOMs — no
+/// codepage, no OK event, no geometry (a recorded session gui[33] / [34]).
+List<Uint8List> windowsInlineGraphItems(ActionContext ctx, Uint8List message) {
+  final ses = Uint8List(16);
+  ses[7] = ctx.modalNo & 0xff;
+  ses[14] = ctx.winPxHeight & 0xff;
+  ses[15] = ctx.winPxWidth & 0xff;
+  return [
+    stepItem(ctx.step),
+    Uint8List.fromList([itemSes, ...ses]),
+    buildApplItem(applGraph, 5, message),
+    eomBytes,
+    eomBytes,
+  ];
 }
 
 /// The SAP codepage number a 16/6/35 codepage declaration names
@@ -568,6 +894,17 @@ const List<int> _cp1252High = [
 
 String _cp1252(Uint8List b) => String.fromCharCodes([
   for (final c in b) c >= 0x80 && c < 0xA0 ? _cp1252High[c - 0x80] : c,
+]);
+
+/// Mac Roman 0x80..0xFF (SAP 1127, declared with an empty name).
+const String _macRomanHigh =
+    'ÄÅÇÉÑÖÜáàâäãåçéèêëíìîïñóòôöõúùûü'
+    '†°¢£§•¶ß®©™´¨≠ÆØ∞±≤≥¥µ∂∑∏π∫ªºΩæø'
+    '¿¡¬√ƒ≈∆«»… ÀÃÕŒœ–—“”‘’÷◊ÿŸ⁄€‹›ﬁﬂ'
+    '‡·‚„‰ÂÊÁËÈÍÎÏÌÓÔÒÚÛÙıˆ˜¯˘˙˚¸˝˛ˇ';
+
+String _macRoman(Uint8List b) => String.fromCharCodes([
+  for (final c in b) c >= 0x80 ? _macRomanHigh.codeUnitAt(c - 0x80) : c,
 ]);
 
 // ---------------------------------------------------------------------------
@@ -816,6 +1153,9 @@ class SapNetPlanTracker {
           if (seg == null) continue;
           final body = netPlanStreamBytes(seg);
           if (body.isEmpty) continue;
+          // a push to another known control (the bar chart's sapbarc-stream,
+          // sap_barchart.dart) is not a graph's, whatever NetPlan is alive
+          if (_isOtherControl(b.shell ?? b.owner, shellOf)) continue;
           final shell = _netPlanOf(b.shell ?? b.owner, shellOf, isLive);
           if (shell == null) continue;
           final full = _indexOf(body, _gtypeMark) >= 0;
@@ -943,8 +1283,19 @@ class SapNetPlanTracker {
     return s != null && classOf.containsKey(s) && !_isNetPlan(s);
   }
 
-  /// Whether [url] is a NetPlan read-back sink [answerPull] owns.
-  bool hasSink(String url) => _sinks.containsKey(url);
+  /// Whether [url] is (or was just answered as) a NetPlan read-back sink
+  /// [answerPull] owns — the session's generic client-table pass over the
+  /// same frame runs AFTER [answerPullsOf] and must not answer the pull a
+  /// second time (it did: two DP answers to one pull).
+  bool hasSink(String url) =>
+      _sinks.containsKey(url) || _answered.contains(url);
+
+  /// The sink urls [answerPull] answered lately (bounded).
+  final Set<String> _answered = {};
+
+  /// Give up the read-back sink [url] (another control's tracker — the bar
+  /// chart's — owns it).
+  void dropSink(String url) => _sinks.remove(url);
 
   /// Arm the next stream read-back of [shell] with [command] (one shot).
   void queueCommand(String shell, String command) {
@@ -959,6 +1310,8 @@ class SapNetPlanTracker {
     if (url == null) return null;
     final shell = _sinks.remove(url);
     if (shell == null) return null;
+    _answered.add(url);
+    if (_answered.length > 64) _answered.remove(_answered.first);
     final p = _pending;
     if (p != null && (shell.isEmpty || p.$1 == shell)) {
       _pending = null;
