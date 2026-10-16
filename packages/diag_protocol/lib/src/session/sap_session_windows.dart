@@ -300,6 +300,25 @@ class _WindowTable {
   /// open window continues the conversation (never parked).
   bool followNext = false;
 
+  /// An action is out and the server has not yet ADDRESSED the window it
+  /// was sent from ([frameAddressesWindow]): a frame addressing another
+  /// open window now is the server's answer, given in that window — the
+  /// hand-back ([SapSessionWindows._handBack]).
+  bool awaitingReply = false;
+
+  /// This action was handed to another window: the conversation follows
+  /// the server's addressing frames from here on, until the action ends.
+  bool handedBack = false;
+
+  /// The window the awaited action's frames were last parked on — where
+  /// the conversation went when the server falls silent with no frame
+  /// addressing the action's own window ([SapSessionWindows._handBackToParked]).
+  _WindowState? lastParked;
+
+  /// A hand-back put the window's parked frames (and the frame itself) back
+  /// on the inbox: the receive reads on instead of ending the turn.
+  bool requeued = false;
+
   /// The window each received frame was routed to.
   final Expando<_WindowState> frameWindow = Expando('frameWindow');
 
@@ -348,6 +367,34 @@ bool modeControlEndsTurn(Uint8List f) =>
 /// GUI sends nothing more.
 bool modeControlEndsConversation(Uint8List f) =>
     isModeControlFrame(f) && f[1] & comFlagTermEoc != 0;
+
+/// Whether a step-bearing server frame ADDRESSES its window — the server
+/// holds the dialog step there: an SES (a dialog step's screen header), a
+/// paint, or any RFC_TR item but the asynchronous sid-6 front-end tick (a
+/// synchronous flush / DP pull / front-end RFC the kernel waits on, a
+/// stream paint). The sid-6 `SAPGUI_PROGRESS_INDICATOR` tick is a window's
+/// BACKGROUND traffic: the real GUI paints its status bar, answers nothing
+/// and keeps the input where it was — the debuggee's ticks in mode 0 while
+/// the debugger (mode 1) holds the conversation (a recorded session
+/// s[25] / s[33], each followed by the next mode-1 frame and the next
+/// client round in mode 1, g[23] / g[25]; a recorded session
+/// s[49], s[78], s[94..122]). The debuggee's own dialog step, by contrast,
+/// starts with an SES frame in ITS mode (a recorded session s[40]
+/// mode 0 step 35 then the SE38 repaint s[42]; a recorded session
+/// s[123] step 122 then s[124]) — and the real GUI's next round goes out
+/// there (g[28] / g[76], mode 0).
+bool frameAddressesWindow(Uint8List frame) {
+  if (frameFacts(frame)?.paintsScreen ?? false) return true;
+  final dec = decompressFrame(frame);
+  if (dec == null) return false;
+  for (final it in dec.walk.items) {
+    if (it.type == itemSes) return true;
+    if (!it.isAppl || it.id != 8) continue;
+    if (it.sid == 6 && isFrontendCall(it.value, 6)) continue; // the tick
+    return true;
+  }
+  return false;
+}
 
 final RegExp _windowNumberRx = RegExp(r'\((\d{1,3})\)');
 
@@ -519,21 +566,29 @@ extension SapSessionWindows on SapSession {
     if (step == null || frame.length < diagHeaderLen) return _modes.live;
     final m = frame[0];
     var win = _modes.open[m];
+    final addresses = frameAddressesWindow(frame);
     if (win == null) {
       win = _bornWindow(m, step);
     } else if (m != _modes.liveMode) {
       if (!_modes.followNext) {
-        win.queue.add(payload);
-        _parkedQueued(win);
-        _trace(
-          '[mode] frame of window (${win.number}) (DIAG mode $m, step '
-          '$step) parked while window (${_modes.live.number}) is addressed',
-        );
-        return null;
+        if ((_modes.awaitingReply || _modes.handedBack) && addresses) {
+          if (_handBack(win, payload, step)) return null; // re-read
+        } else {
+          win.queue.add(payload);
+          _parkedQueued(win);
+          if (_modes.awaitingReply) _modes.lastParked = win;
+          _trace(
+            '[mode] frame of window (${win.number}) (DIAG mode $m, step '
+            '$step) parked while window (${_modes.live.number}) is addressed',
+          );
+          return null;
+        }
+      } else {
+        _follow(win);
       }
-      _follow(win);
     }
     _modes.followNext = false;
+    if (addresses) _modes.awaitingReply = false;
     final close = _modes.close;
     if (close != null && identical(close.parent, win)) {
       close.parentRepainted = true;
@@ -578,6 +633,8 @@ extension SapSessionWindows on SapSession {
       screenCols: screenCols,
       parentMode: _modes.liveMode,
     );
+    // the frontend's listbox value sets are the connection's, not a window's
+    win.ea.valueSets = parent.ea.valueSets;
     // the client's own window facts carry over; the paint mirror does not
     win.ctx
       ..winPxHeight = parent.ctx.winPxHeight
@@ -613,6 +670,70 @@ extension SapSessionWindows on SapSession {
       '[mode] following the server into window (${win.number}) '
       '(DIAG mode ${win.mode})',
     );
+  }
+
+  /// The server answered the action in ANOTHER open window [win]: the frame
+  /// addresses [win] ([frameAddressesWindow]) while nothing addressed the
+  /// window the action was sent from — the debuggee's dialog step after a
+  /// debugger key (a recorded session g[27] F8 in mode 1 -> s[40]
+  /// mode 0 step 35, s[42] the SE38 repaint; the real GUI's next round is
+  /// mode 0's, g[28]), or a breakpoint hit again in a debugger window that
+  /// stayed open while its debuggee had the input. The conversation
+  /// follows [win]; the window left keeps its screen and stays OPEN (a
+  /// window ends only with its `0m 09` close). [win]'s parked frames came
+  /// first on the wire: they are put back on the inbox ahead of this one
+  /// and read again (returns true — the receive reads on).
+  bool _handBack(_WindowState win, Uint8List payload, int step) {
+    final left = _modes.live;
+    _trace(
+      '[mode] the server answered in window (${win.number}) (DIAG mode '
+      '${win.mode}, step $step), not in window (${left.number}) (DIAG mode '
+      '${left.mode}): following it — window (${left.number}) stays open',
+    );
+    _follow(win);
+    _modes
+      ..awaitingReply = false
+      ..handedBack = true
+      ..lastParked = null;
+    if (win.queue.isEmpty) return false;
+    _inbox.addFirst(payload);
+    for (final p in win.queue.reversed) {
+      _inbox.addFirst(p);
+    }
+    win.queue.clear();
+    _modes.requeued = true;
+    return true;
+  }
+
+  /// The action's server went silent and nothing addressed the window it
+  /// was sent from, but frames of another open window were parked
+  /// meanwhile: the conversation is THERE (the server waits on that
+  /// window, never on the silent one) — follow it and read its parked
+  /// frames as the action's (they are read again, routed to it). Returns
+  /// whether there was such a window.
+  bool _handBackToParked() {
+    final win = _modes.lastParked;
+    _modes.lastParked = null;
+    if (!_modes.awaitingReply || win == null) return false;
+    if (!identical(_modes.open[win.mode], win) ||
+        win.mode == _modes.liveMode) {
+      return false;
+    }
+    _trace(
+      '[mode] no reply in window (${_modes.live.number}) and the server is '
+      'silent: its last frames went to window (${win.number}) — following '
+      'it',
+    );
+    _follow(win);
+    _modes
+      ..awaitingReply = false
+      ..handedBack = true;
+    for (final p in win.queue.reversed) {
+      _inbox.addFirst(p);
+    }
+    win.queue.clear();
+    _notifyWindows();
+    return true;
   }
 
   /// Classify one 8-byte mode-control frame (reference client raw_transport

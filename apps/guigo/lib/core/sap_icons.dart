@@ -35,8 +35,23 @@ class SapIconAtlas {
         if (name != null) names[c] = name;
       }
     });
+    // a code whose glyph in the bundled font draws another icon is drawn
+    // with the font's glyph of the icon it names (the font itself is kept)
+    glyphOf.forEach((code, drawnAs) {
+      final cp = codes[drawnAs];
+      if (cp != null && codes.containsKey(code)) codes[code] = cp;
+    });
     return SapIconAtlas._(codes, names);
   }
+
+  /// Codes drawn with ANOTHER code's glyph of the bundled font: `9S`
+  /// ICON_ARROW_LEFT — the "previous" arrow of a control toolbar (PA20's
+  /// object manager `SEARCH_PREV` "Résultat recherche précédent", PPOSE's
+  /// `NM_BACK` "Faire défiler vers l'arrière"; a recorded session
+  /// srv[184], a recorded session srv[17]) — is drawn pointing RIGHT
+  /// in the font, beside its `9T` ICON_ARROW_RIGHT: the pair read as two
+  /// "forward" buttons. It takes `2M` ICON_SYSTEM_BACK's left arrow.
+  static const Map<String, String> glyphOf = {'9S': '2M'};
 
   /// The codepoint for a wire code (without the @ delimiters), or null.
   /// Folded to upper case only when the code is not found as given.

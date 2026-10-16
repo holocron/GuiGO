@@ -541,6 +541,9 @@ extension SapSessionFields on SapSession {
     // the reference client's remote-logon submit forces it (remote_login.build_submit
     // `pl["RSYST-BCODE"]["invisible"] = True`)
     final attr = s.secret ? f.attr | attrInvisible : f.attr;
+    // a dropdown listbox's KEY field is its declared length, not the box
+    // (key + text) it is painted in (sap_session_listbox.dart)
+    final keyLen = f.listbox?.keyLength ?? 0;
     return FieldWrite(
       f.wireRow,
       f.wireCol,
@@ -548,8 +551,8 @@ extension SapSessionFields on SapSession {
       area: f.area,
       block: f.block,
       group: f.group,
-      mx: f.maxnrchars > 0 ? f.maxnrchars : null,
-      mlen: f.mlen > 0 ? f.mlen : null,
+      mx: keyLen > 0 ? keyLen : (f.maxnrchars > 0 ? f.maxnrchars : null),
+      mlen: keyLen > 0 ? keyLen : (f.mlen > 0 ? f.mlen : null),
       attr: attr,
       routing: f.routing,
     );

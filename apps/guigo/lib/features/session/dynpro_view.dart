@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/sap_icons.dart';
 import 'dynpro_grid.dart';
+import 'dynpro_listbox_view.dart';
 import 'sap_list_pager.dart';
 import 'sap_list_view.dart';
 import 'session_busy.dart';
@@ -132,6 +133,8 @@ class DynproView extends StatefulWidget {
     this.onFocusField,
     this.onContextMenu,
     this.onDoubleClick,
+    this.listboxValueSet,
+    this.onListboxPick,
   });
 
   final ScreenModel model;
@@ -209,6 +212,15 @@ class DynproView extends StatefulWidget {
   /// focus, a button fires its function code); a pushbutton has no
   /// double-click of its own (its first click fires it).
   final Future<void> Function(ScreenField f)? onDoubleClick;
+
+  /// The entries of dropdown listbox [f] ([FieldKind.combobox]) the session
+  /// holds (`SapSession.listboxValueSet`), null while none — the box then
+  /// shows its bare key.
+  final ValueSet? Function(ScreenField f)? listboxValueSet;
+
+  /// An entry KEY picked in listbox [f] (`SapSession.pickListbox`); null =
+  /// listboxes are display-only.
+  final Future<void> Function(ScreenField f, String key)? onListboxPick;
 
   @override
   State<DynproView> createState() => _DynproViewState();
@@ -1205,8 +1217,9 @@ class _DynproViewState extends State<DynproView> {
           // the glyph and its quick info, not the token's text
           child = _doubleTappable(f, _iconOutput(f, icons, font, ch));
         case FieldKind.input:
-        case FieldKind.combobox:
           child = _doubleTappable(f, _gridInput(f, font, cw, width: w));
+        case FieldKind.combobox:
+          child = _doubleTappable(f, _listbox(f, font, monospace: true));
         case FieldKind.pushbutton:
           child = _gridButton(f, icons, font);
         case FieldKind.tabstrip:
@@ -1417,6 +1430,28 @@ class _DynproViewState extends State<DynproView> {
     // stands in for either
     return a >= 0.5 && a <= 0.75 ? a : 0.62;
   }();
+
+  /// A dropdown listbox (dynpro_listbox_view.dart): key and text, the
+  /// arrow, its entries on tap when it is not display-only.
+  Widget _listbox(
+    ScreenField f,
+    double font, {
+    bool monospace = false,
+    double? height,
+  }) =>
+      _leaf(
+        (busy) => DynproListboxView(
+          field: f,
+          valueSet: widget.listboxValueSet?.call(f),
+          onPick: widget.onListboxPick == null
+              ? null
+              : (key) => widget.onListboxPick!(f, key),
+          busy: busy,
+          fontSize: font,
+          monospace: monospace,
+          height: height,
+        ),
+      );
 
   Widget _gridInput(ScreenField f, double font, double cw, {double? width}) {
     final key = '${f.area}:${f.row}:${f.col}';
@@ -1942,10 +1977,23 @@ class _DynproViewState extends State<DynproView> {
       case FieldKind.input when isIconOutput(f):
         return _doubleTappable(f, _iconOutput(f, icons, 15, 26));
       case FieldKind.input:
-      case FieldKind.combobox:
         return _doubleTappable(
           f,
           _input(f, layout.captionOf.containsKey(f), maxWidth),
+        );
+      case FieldKind.combobox:
+        return _doubleTappable(
+          f,
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              minWidth: 64,
+              maxWidth: (_inputChars(f) * 9.0 + 40).clamp(
+                64.0,
+                maxWidth.clamp(64.0, 440.0),
+              ),
+            ),
+            child: _listbox(f, 14, height: 36),
+          ),
         );
       case FieldKind.checkbox:
         return _leaf(

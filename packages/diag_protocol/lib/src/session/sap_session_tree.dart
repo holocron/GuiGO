@@ -226,6 +226,17 @@ extension SapSessionTree on SapSession {
     return c.hierarchy.heading.trim();
   }
 
+  /// Whether tree [shell] is a LIST tree (`ListDisplay(1)`,
+  /// CL_GUI_LIST_TREE): a node shows its items side by side
+  /// ([SapTreeNode.listText]) — SMARTFORMS' Form Builder tree, `%PAGE1
+  /// Nouvelle page` (a recorded session srv[14] verb 71).
+  bool treeIsListTree(String shell) {
+    final f = _treeColumnsOf[_w];
+    if (f == null) return false;
+    final c = f[shell] ?? f[_ea.shellAlias[shell] ?? ''];
+    return c != null && c.listDisplay;
+  }
+
   /// The tree a column declaration / HeaderNames assignment addresses by
   /// [token]: a tree shell, the shell a handle the session minted stands
   /// for — else (a handle the session never minted: a replayed recording
@@ -542,11 +553,27 @@ extension SapSessionTree on SapSession {
     };
     if (!call.verbs.any(verbs.contains)) return;
     final meta = verbMeta(call);
+    // a tree CREATED in this very call is addressed by its CreateControl's
+    // result row, its object token still blank: PPOSE's launch wave
+    // creates the structure tree 148 (result row 160) and expands its
+    // nodes `1` and `2` by `ABAPExpandNodes` on row 160 (a recorded session
+    // basic_data srv[17] v357) after filling the search tree 126 by handle
+    // in the same call — read as "the tree the call fills", the keys went
+    // to 126, whose EXPANDER folder `1` then drew open with no children
+    final kinds = _layoutState.registry.kinds();
+    final createdIn = <String, String>{
+      for (var i = 1; i <= call.verbs.length && i <= meta.length; i++)
+        if (call.verbs[i - 1].startsWith('CreateControl') &&
+            (meta[i - 1].result ?? '').trim().isNotEmpty)
+          meta[i - 1].result!.trim():
+              (verbNamedArgs(call, i)['#1'] ?? '').trim(),
+    }..removeWhere((_, sh) => kinds[sh] != 'tree');
     for (var i = 1; i <= call.verbs.length && i <= meta.length; i++) {
       final verb = call.verbs[i - 1];
       if (!verbs.contains(verb)) continue;
       final tok = meta[i - 1].objValue;
       final sh = (tok.trim().isEmpty ? null : _treeShellOfToken(tok)) ??
+          (tok.trim().isEmpty ? createdIn[meta[i - 1].obj.trim()] : null) ??
           _treeFilledBy(call, tok);
       if (sh == null) continue;
       final tree = trees[sh];
@@ -714,7 +741,14 @@ extension SapSessionTree on SapSession {
     // scrolled: a recorded session gui[61] `%_GC 152 18`
     // + 152 {TopNodeKey = 15}); between the item key and the item name,
     // the OCX's order of the ITEM request's selection (sfp gui[12])
-    final top = _treeTopNodeDelta(shell);
+    // once only: the selection delta may carry it already (an item
+    // selection on a tree that registered TopNodeKey) — a property named
+    // twice is a malformed DATAMANAGER the guard refuses (live SMARTFORMS
+    // ZSD_QRCODE 2026-10-15: CONTROL 151 `TopNodeKey` twice, the click
+    // not sent)
+    final top = picked.any((p) => p.$1 == topNodeKeyProp)
+        ? null
+        : _treeTopNodeDelta(shell);
     final at = picked.indexWhere((p) => p.$1 == selItemNameProp);
     final selection = top == null
         ? picked

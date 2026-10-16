@@ -40,6 +40,7 @@ import '../screen/sap_calendar.dart';
 import '../screen/sap_canvas.dart';
 import '../screen/sap_chart.dart';
 import '../screen/grid_rows.dart';
+import '../screen/listbox_valueset.dart';
 import '../screen/sap_grid.dart';
 import '../screen/sap_netplan.dart';
 import '../screen/sap_picture.dart';
@@ -92,6 +93,7 @@ part 'sap_session_grid_rows.dart';
 part 'sap_session_html.dart';
 part 'sap_session_layout.dart';
 part 'sap_session_list_scroll.dart';
+part 'sap_session_listbox.dart';
 part 'sap_session_liveness.dart';
 part 'sap_session_menu.dart';
 part 'sap_session_office.dart';
@@ -905,6 +907,12 @@ class SapSession {
         // the window this frame belongs to (null: parked on another one)
         final win = _routeFrame(payload, frame);
         if (win == null) {
+          // a hand-back put its window's parked frames back ahead of this
+          // one (sap_session_windows.dart _handBack): read them now
+          if (_modes.requeued) {
+            _modes.requeued = false;
+            continue;
+          }
           if (_turnComplete(payload)) break;
           continue;
         }
@@ -1782,6 +1790,13 @@ class SapSession {
           '(${DateTime.now().difference(_lastPayloadAt).inMilliseconds}ms '
           'after the last server frame) ${_frameTrace(frame)}');
       _actionSentAt = DateTime.now();
+      // the server answers in some window: this one, unless a frame
+      // addressing another one comes first (sap_session_windows.dart
+      // _handBack — the debuggee's window after a debugger key)
+      _modes
+        ..awaitingReply = true
+        ..handedBack = false
+        ..lastParked = null;
       await _send(frame);
       if (staged != null) _gridStateFlushed();
       final all = <Uint8List>[];
@@ -1796,6 +1811,11 @@ class SapSession {
         // an offline replay has every frame of the exchange queued already:
         // nothing left means the server's part is done (no idle wait)
         if (offlineReplay && all.isNotEmpty && _inbox.isEmpty) break;
+        // ... and nothing read for this window yet, with frames parked on
+        // another: the conversation went there (the timeout case below)
+        if (offlineReplay && all.isEmpty && _inbox.isEmpty) {
+          if (_handBackToParked()) continue;
+        }
         List<Uint8List> got;
         PartialTurnTimeout? part;
         try {
@@ -1808,6 +1828,14 @@ class SapSession {
         } on TimeoutException catch (e) {
           _throwIfAnswerOwed(failuresBefore, e);
           if (all.isNotEmpty) break; // the server finished; nothing more came
+          // the server went silent after parking its last frames on another
+          // window: it waits THERE, never on this one — follow it and read
+          // them as this action's (live the test system 2026-10-16: F6 in the debugger,
+          // window (2), answered only by a mode-0 frame; waited forever)
+          if (_handBackToParked()) {
+            i--; // the hand-back is not a turn
+            continue;
+          }
           if (!offlineReplay &&
               _sockError == null &&
               state != SessionState.closed &&
@@ -1856,6 +1884,9 @@ class SapSession {
       // before anything else is read (its reply re-lays the screen out); a
       // wave that painted nothing owes none (reference client raw_settle, 37e6240)
       await _maybeLayoutRound(painted: _paintsScreen(all));
+      // the classic listboxes' value sets the frontend does not hold
+      // (sap_session_listbox.dart), asked for once, right after the paint
+      await _maybeValueSetRequest(painted: _paintsScreen(all));
       _splitRelayedWall(all); // a relayed wall is the user's to answer
       await _drainPending();
       final late = _modes.close; // a close the drain read
@@ -1868,7 +1899,11 @@ class SapSession {
     } finally {
       // in-flight state never outlives its action, failed or not: a stale
       // command misattributes the next server-born window
-      _modes.actionCommand = null;
+      _modes
+        ..actionCommand = null
+        ..awaitingReply = false
+        ..handedBack = false
+        ..lastParked = null;
     }
   }
 

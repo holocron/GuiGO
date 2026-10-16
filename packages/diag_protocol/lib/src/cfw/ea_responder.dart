@@ -10,6 +10,7 @@ import '../codepages.dart';
 import '../framing/diag_frame.dart';
 import '../framing/envelope.dart';
 import '../lzh/lzh.dart';
+import '../screen/listbox_valueset.dart' show ValueSetStore, isValueSetPush;
 import '../screen/sap_barchart.dart' show barChartCuaCodeAnswer;
 import '../screen/sap_calendar.dart'
     show calendarHeldInterval, calendarIntervalAnswer;
@@ -128,7 +129,17 @@ class EaSession {
     // content (the kernel reuses SAPR3:// urls): the stale binding goes
     final sh = dpUrlShell[url];
     if (sh != null && destroyedControls.contains(sh)) dpUrlShell.remove(url);
+    // a listbox value set is folded AT INGEST: it outlives the url cache's
+    // sweep of unbound pushes (reference client screen_valueset.push_observer)
+    final seg = dpCache.byUrl[url];
+    if (seg != null && isValueSetPush(seg)) valueSets.ingest(seg);
   }
+
+  /// The classic dynpro listboxes' value sets pushed to this session
+  /// (`application/x-sapvaluesets`), backed by the cross-session cache
+  /// (screen/listbox_valueset.dart). One store per connection: every
+  /// window of a logon shares its first window's (sap_session_windows.dart).
+  ValueSetStore valueSets = ValueSetStore();
 
   void _pushEvicted(String url) {
     dpUrlShell.remove(url);

@@ -10,6 +10,7 @@ import '../framing/diag_frame.dart';
 import '../framing/envelope.dart';
 import '../items/dynt_atom.dart';
 import 'field_routing.dart';
+import 'listbox_valueset.dart';
 import 'menu_entries.dart';
 import 'sap_netplan.dart';
 import 'table_controls.dart';
@@ -119,6 +120,10 @@ class ScreenField {
   /// MATCHCODE bit (0x10), or the F4-button COMBOSTYLE bit (0x80) on a cell
   /// that is no listbox (etype 126) — reference client screen_atoms `f4`.
   bool hasF4 = false;
+
+  /// A dropdown LISTBOX (etype 126): its value-set id, function code,
+  /// with-key flag and painted KEY ([text] is the key); null otherwise.
+  ListboxAtom? listbox;
 
   /// The field is armed for TYPE-AHEAD (server proposals while typing):
   /// the etype-120 XMLPROP property bag of its cell carries
@@ -1771,6 +1776,7 @@ void _buildFields(ScreenModel m, List<_PlacedAtom> placed) {
         group: a.group,
       );
     } else if (etypeCombo.contains(a.etype)) {
+      final lb = decodeListboxAtom(a.value);
       f =
           ScreenField(
               kind: FieldKind.combobox,
@@ -1779,15 +1785,23 @@ void _buildFields(ScreenModel m, List<_PlacedAtom> placed) {
               wireRow: a.row,
               wireCol: a.col,
               container: p.container,
-              text: _comboText(a),
+              // the KEY only — never the payload's binary prefix or its
+              // value-set id (listbox_valueset.dart)
+              text: lb?.key.trim() ?? '',
               // the listbox's visible box width (20 / 40 cells)
-              mlen: _comboPayload(a.value ?? Uint8List(0))?.$2 ?? 0,
+              mlen: lb?.width ?? 0,
+              // a display-mode listbox paints PROTECTED (attr c1): the
+              // frontend refuses a pick locally (a recorded session)
+              isProtected: a.isProtected,
+              invisible: a.isInvisible,
+              attr: a.attr,
               area: a.area,
               block: a.block,
               group: a.group,
             )
             ..name = names[key]
-            ..label = _labelFor(labels, p);
+            ..label = _labelFor(labels, p)
+            ..listbox = lb;
     } else if (a.etype == etypeFrame1) {
       m.frames.add(
         ScreenFrame(
@@ -1824,32 +1838,6 @@ String _labelFor(Map<_Line, List<(int, String)>> labels, _PlacedAtom p) {
     if (l.$1 < a.col && (best == null || l.$1 >= best.$1)) best = l;
   }
   return best?.$2 ?? '';
-}
-
-String _comboText(DyntAtom a) {
-  final v = a.value;
-  if (v == null || v.isEmpty) return '';
-  final cb = _comboPayload(v);
-  if (cb != null) return cb.$1.trim();
-  return wireDecode(v);
-}
-
-/// The etype-126 dropdown listbox payload (reference client screen_atoms
-/// _combobox_payload): a 17-byte prefix — `01`, u16 0, u16 fcode offset
-/// (twice), u8 fcode length, u16 value offset, u16 value length (twice),
-/// u8 the box's visible width, u16 — then FIELDNAME PROGRAM FCODE VALUE
-/// with no separators (ME21N's BSART: `=MEDOCTYPE`, `NB `, width 20).
-/// (value, width), or null when the offsets do not tile the strings.
-(String, int)? _comboPayload(Uint8List v) {
-  const prefix = 17;
-  if (v.length < prefix || v[0] != 0x01) return null;
-  final offFc = (v[3] << 8) | v[4];
-  final fcLen = v[7];
-  final offVal = (v[8] << 8) | v[9];
-  final valLen = (v[10] << 8) | v[11];
-  final strs = v.length - prefix;
-  if (offFc + fcLen != offVal || offVal + valLen != strs) return null;
-  return (wireDecode(Uint8List.sublistView(v, prefix + offVal)), v[14]);
 }
 
 /// The table controls of a window and their visible cells as fields

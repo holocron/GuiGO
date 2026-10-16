@@ -74,8 +74,10 @@ class SapTreeView extends StatefulWidget {
     this.onTopNode,
     this.columns,
     this.headerStrip,
+    this.listItems = false,
     this.charWidth,
     this.paneCols,
+    this.paneRows,
     this.icons,
     this.onItemClick,
     this.onItemActivate,
@@ -104,6 +106,12 @@ class SapTreeView extends StatefulWidget {
   /// strip in the real GUI, no column headings); null = none.
   final String? headerStrip;
 
+  /// A LIST tree (SapSessionTree.treeIsListTree: `ListDisplay(1)`,
+  /// CL_GUI_LIST_TREE): a node shows its items side by side
+  /// ([SapTreeNode.listText]) and its own icon — SMARTFORMS' Form Builder
+  /// tree, `%PAGE1 Nouvelle page`, `MAIN Fenêtre principale`.
+  final bool listItems;
+
   /// Points per declared character of a column width: the composer's cell
   /// width. Null: the pane's width over [paneCols] when given, else 7 (the
   /// dynpro renderer's cell).
@@ -112,6 +120,11 @@ class SapTreeView extends StatefulWidget {
   /// The pane's width in window cells (the composed region's columns): the
   /// character width is the pane's width over it.
   final int? paneCols;
+
+  /// The pane's height in window rows (the composed region's rows): a
+  /// simple tree too tall for a short pane draws a row per window row
+  /// ([denseRowExtent]). Null: natural rows.
+  final int? paneRows;
 
   /// The SAP icon font's codemap (the items' and nodes' `@xx@` icons).
   final SapIconAtlas? icons;
@@ -180,6 +193,30 @@ class SapTreeView extends StatefulWidget {
   /// key — the tree control's `TopNodeKey` (SapSessionTree.noteTreeTopNode).
   final void Function(String nodeKey)? onTopNode;
 
+  /// The row extent of a DENSE simple tree, or null for the natural rows
+  /// (32-point rows under an 8-point top padding): a pane of
+  /// [paneRows] window rows [paneHeight] points tall that cannot show
+  /// [rows] natural rows (and a [headerStrip]) and holds fewer than three
+  /// draws one row per window row, as SAP GUI's tree does. PA20's object
+  /// manager "Recherche de" (a recorded session srv[184]: `Personne`
+  /// and its three search links in a 5-row pane under the toolbar): the
+  /// header strip and the first natural row filled the pane — `Personne`
+  /// open, its children below the pane's edge. Never under 12 points.
+  static double? denseRowExtent({
+    required double paneHeight,
+    required int? paneRows,
+    required int rows,
+    required bool headerStrip,
+  }) {
+    if (paneRows == null || paneRows <= 0 || !paneHeight.isFinite) return null;
+    final head = headerStrip ? _SapTreeViewState.headerHeight : 0.0;
+    const natural = _SapTreeViewState.naturalRowHeight;
+    const pad = _SapTreeViewState._padTop;
+    if (head + pad + rows * natural <= paneHeight) return null;
+    if (head + pad + 3 * natural <= paneHeight) return null;
+    return (paneHeight / paneRows).clamp(12.0, natural);
+  }
+
   @override
   State<SapTreeView> createState() => _SapTreeViewState();
 }
@@ -224,6 +261,15 @@ class _SapTreeViewState extends State<SapTreeView> {
   String? _top;
 
   static const double _padTop = 8;
+
+  /// A simple tree's natural row: the 32-point expander beside the node's
+  /// 20-point icon and text in 6-point paddings.
+  static const double naturalRowHeight = 32;
+
+  /// The list's paddings as last built (a dense tree has none on top):
+  /// [_reportTop] reads the rows' extent from them.
+  double _padTopNow = _padTop;
+  double _padBottomNow = 96;
 
   /// A column tree's row and header heights, and its scroll controllers:
   /// the two row lists (hierarchy area, item area) scroll up and down
@@ -312,11 +358,40 @@ class _SapTreeViewState extends State<SapTreeView> {
     if (cols != null && _itemColumns.isNotEmpty) {
       return _columnTree(context, rows, cols);
     }
+    final strip = widget.headerStrip;
+    if (widget.paneRows == null) return _plainTree(context, rows, strip, null);
+    return LayoutBuilder(
+      builder: (context, cons) => _plainTree(
+        context,
+        rows,
+        strip,
+        SapTreeView.denseRowExtent(
+          paneHeight: cons.maxHeight,
+          paneRows: widget.paneRows,
+          rows: rows.length,
+          headerStrip: strip != null,
+        ),
+      ),
+    );
+  }
+
+  /// A simple tree's list (under its header strip), its rows [dense]
+  /// points tall when given ([denseRowExtent]).
+  Widget _plainTree(
+    BuildContext context,
+    List<(SapTreeNode, int)> rows,
+    String? strip,
+    double? dense,
+  ) {
+    _padTopNow = dense == null ? _padTop : 0;
+    _padBottomNow = dense ?? 96;
     final list = ListView.builder(
-      padding: const EdgeInsets.fromLTRB(8, _padTop, 8, 96),
+      padding: EdgeInsets.fromLTRB(8, _padTopNow, 8, _padBottomNow),
       itemCount: rows.length,
+      itemExtent: dense,
       itemBuilder: (context, i) => _busyLeaf(
-        (context, busy) => _row(context, rows[i].$1, rows[i].$2, busy: busy),
+        (context, busy) =>
+            _row(context, rows[i].$1, rows[i].$2, busy: busy, extent: dense),
       ),
     );
     final Widget body = widget.onTopNode == null
@@ -328,15 +403,15 @@ class _SapTreeViewState extends State<SapTreeView> {
             },
             child: list,
           );
-    final strip = widget.headerStrip;
     if (strip == null) return body;
     final scheme = Theme.of(context).colorScheme;
+    final labelStyle = Theme.of(context).textTheme.labelMedium;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Container(
           key: const ValueKey('tree-header-strip'),
-          height: headerHeight,
+          height: dense ?? headerHeight,
           padding: const EdgeInsets.symmetric(horizontal: 8),
           alignment: Alignment.centerLeft,
           decoration: BoxDecoration(
@@ -347,7 +422,12 @@ class _SapTreeViewState extends State<SapTreeView> {
             strip,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: Theme.of(context).textTheme.labelMedium,
+            style: dense == null
+                ? labelStyle
+                : labelStyle?.copyWith(
+                    fontSize: (dense * 0.7).clamp(8.0, 12.0),
+                    height: 1,
+                  ),
           ),
         ),
         Expanded(child: body),
@@ -526,10 +606,14 @@ class _SapTreeViewState extends State<SapTreeView> {
     final cb = widget.onTopNode;
     final rows = _rows;
     if (cb == null || rows.isEmpty || m.axis != Axis.vertical) return;
-    final content = m.maxScrollExtent + m.viewportDimension - _padTop - 96;
+    final content =
+        m.maxScrollExtent + m.viewportDimension - _padTopNow - _padBottomNow;
     if (content <= 0) return;
     final extent = content / rows.length;
-    final i = ((m.pixels - _padTop) / extent).floor().clamp(0, rows.length - 1);
+    final i = ((m.pixels - _padTopNow) / extent).floor().clamp(
+      0,
+      rows.length - 1,
+    );
     final key = rows[i].$1.key;
     if (key == _top) return;
     _top = key;
@@ -905,6 +989,17 @@ class _SapTreeViewState extends State<SapTreeView> {
     );
   }
 
+  /// The item a simple tree draws as node [n]'s label: its hierarchy
+  /// item, else its item `1`, else the first item carrying its text.
+  static SapTreeItem? _labelItem(SapTreeNode n) {
+    final c = n.cells[SapTreeColumns.hierarchyItem] ?? n.cells['1'];
+    if (c != null) return c;
+    for (final c in n.cells.values) {
+      if (c.text.isNotEmpty && c.text == n.text) return c;
+    }
+    return null;
+  }
+
   /// A node key / item name as a widget key spells it: its blank padding
   /// cut, inner runs of blanks one (`tree-cell-1-C 20`).
   static String _keyText(String s) => s.trim().replaceAll(_blanks, ' ');
@@ -1008,9 +1103,14 @@ class _SapTreeViewState extends State<SapTreeView> {
     int depth, {
     bool columnMode = false,
     bool busy = false,
+    double? extent,
   }) {
     final scheme = Theme.of(context).colorScheme;
     final open = _open.contains(n.key);
+    // a dense row ([SapTreeView.denseRowExtent]): its icons and text sized
+    // to the window row it is drawn in
+    final iconSize = extent == null ? 20.0 : (extent * 0.85).clamp(10.0, 20.0);
+    final fontSize = extent == null ? null : (extent * 0.72).clamp(9.0, 14.0);
     final folder = _isFolder(n);
     final tcode = folder ? null : tcodeOfText(n.text);
     final selected = _selected == n.key;
@@ -1023,28 +1123,45 @@ class _SapTreeViewState extends State<SapTreeView> {
           ? Icons.play_circle_outline
           : Icons.description_outlined;
     }
-    // a column tree's rows carry their own icons (N_IMAGE / EXP_IMAGE:
-    // /AIF/IFMON's namespace folder `@U8@`, its interfaces `@7P@`)
-    final nodeImage = !columnMode
-        ? null
-        : _iconGlyph(
-            open && n.expandedImage.isNotEmpty ? n.expandedImage : n.image,
-            20,
-            null,
-          );
-    // the hierarchy column's text: its `&Hierarchy` item's, else the
-    // node's label
+    // a node's own icons as the server sends them (N_IMAGE / EXP_IMAGE),
+    // the front end's folder / leaf when it sends none: /AIF/IFMON's
+    // namespace folder `@U8@`, SMARTFORMS' windows `@89@`, the HR object
+    // manager's `Personne` `@5W\QPersonne@` and its search links `@13@`
+    // (a recorded session srv[184]), the Easy Access favorites `@6D@`
+    final nodeImage = _iconGlyph(
+      open && n.expandedImage.isNotEmpty ? n.expandedImage : n.image,
+      iconSize,
+      null,
+    );
+    // the hierarchy column's text: its `&Hierarchy` item's; a list
+    // tree's items side by side; else the node's label
     final hier = n.cells[SapTreeColumns.hierarchyItem]?.text;
+    final listed = !columnMode && widget.listItems ? n.listText : '';
     final label = columnMode && hier != null && hier.isNotEmpty
         ? hier
+        : listed.isNotEmpty
+        ? listed
         : (n.text.isEmpty ? n.key : n.text);
+    // a simple tree's LINK leaf (its label item CLASS 5): drawn as the
+    // real GUI's hyperlink, underlined, its tap the item's click (LINKCLICK
+    // 35 when registered: PPOSE's `Recherche structurelle`, a recorded session
+    // basic_data g23 `%_GC 126 35` PARAM1 `&Hierarchy`) — the object
+    // manager's `Aide à la recherche groupée`, `Critère de recherche`,
+    // `Recherche libre` under `Personne`, whose own link item (a folder)
+    // is drawn plain
+    final labelItem = columnMode || widget.listItems ? null : _labelItem(n);
+    final link = labelItem != null && labelItem.isLink && !folder;
+    final itemClick = widget.onItemClick;
+    final linkColor = n.disabled || (labelItem?.disabled ?? false)
+        ? null
+        : (selected ? scheme.onSecondaryContainer : scheme.primary);
 
     final menu = widget.onContextMenu;
     // the expander: a folder's arrow in a finger-wide hit area of its own
     // (a disabled folder still opens: SapTree.doExpand has no enabled gate)
     final expander = SizedBox(
       width: SapTreeView.expanderHitWidth,
-      height: 32,
+      height: extent ?? 32,
       child: folder
           ? InkWell(
               key: ValueKey('tree-expander-${n.key}'),
@@ -1052,7 +1169,7 @@ class _SapTreeViewState extends State<SapTreeView> {
               onTap: () => _toggle(n),
               child: Icon(
                 open ? Icons.expand_more : Icons.chevron_right,
-                size: 20,
+                size: iconSize,
                 color: scheme.onSurfaceVariant,
               ),
             )
@@ -1066,31 +1183,42 @@ class _SapTreeViewState extends State<SapTreeView> {
         borderRadius: BorderRadius.circular(6),
       ),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+        padding: EdgeInsets.symmetric(
+          horizontal: 6,
+          vertical: extent == null ? 6 : 0,
+        ),
         child: Row(
           children: [
             nodeImage ??
                 Icon(
                   icon,
-                  size: 20,
+                  size: iconSize,
                   color: folder
                       ? scheme.primary
                       : (tcode != null
                             ? scheme.tertiary
                             : scheme.onSurfaceVariant),
                 ),
-            const SizedBox(width: 10),
+            SizedBox(width: extent == null ? 10 : 6),
             Expanded(
               child: Text(
                 label,
+                key: link ? ValueKey('tree-link-${n.key}') : null,
+                maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
+                  fontSize: fontSize,
+                  height: extent == null ? null : 1.1,
                   fontWeight: depth == 0
                       ? FontWeight.w600
                       : FontWeight.normal,
                   color: n.disabled
                       ? scheme.outline
+                      : link
+                      ? linkColor
                       : (selected ? scheme.onSecondaryContainer : null),
+                  decoration: link ? TextDecoration.underline : null,
+                  decorationColor: link ? linkColor : null,
                 ),
               ),
             ),
@@ -1116,7 +1244,13 @@ class _SapTreeViewState extends State<SapTreeView> {
           ? face
           : _taps(
               n: n,
-              click: () => _select(n),
+              click: link && itemClick != null && !labelItem.disabled
+                  ? () {
+                      if (_busyNow) return;
+                      setState(() => _selected = n.key);
+                      itemClick(n.key, labelItem.name);
+                    }
+                  : () => _select(n),
               doubleClick: () => _doubleClick(n),
               child: face,
             ),

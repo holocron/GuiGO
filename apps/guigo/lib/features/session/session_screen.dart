@@ -1289,6 +1289,8 @@ class _SessionScreenState extends State<SessionScreen>
             onListCell: _stageListCell,
             onListScroll: _listScroll,
             onDoubleClick: _doubleClick,
+            listboxValueSet: _listboxValueSet,
+            onListboxPick: _pickListbox,
             model: base,
             busy: modalActive,
             controls: _hostedControls(),
@@ -1773,6 +1775,8 @@ class _SessionScreenState extends State<SessionScreen>
           onListCell: _stageListCell,
           onListScroll: _listScroll,
           onDoubleClick: _doubleClick,
+          listboxValueSet: _listboxValueSet,
+          onListboxPick: _pickListbox,
           model: base,
           busy: modal,
           cell: cell,
@@ -1979,7 +1983,13 @@ class _SessionScreenState extends State<SessionScreen>
           // a tree with no item column whose header the server switched
           // on (GFW_DEMO_HIER3's trees): the blank strip over it
           headerStrip: _session?.treeHeaderStrip(shell),
+          // a list tree (SMARTFORMS' Form Builder): a node's items side by
+          // side, `%PAGE1 Nouvelle page`
+          listItems: _session?.treeIsListTree(shell) ?? false,
           paneCols: cells.width.round(),
+          // a short pane (PA20's object manager search area, 5 rows under
+          // its toolbar) draws a row per window row
+          paneRows: cells.height.round(),
           icons: _icons,
           onItemClick: (key, item) =>
               _run(() async => _session!.clickTreeItem(shell, key, item)),
@@ -2414,6 +2424,16 @@ class _SessionScreenState extends State<SessionScreen>
 
   /// The field whose last typed value the session refused ([_stageEdit]).
   String? _stageRefused;
+
+  /// The entries of dropdown listbox [f] the session holds (null: none
+  /// yet — the box shows its bare key).
+  ValueSet? _listboxValueSet(ScreenField f) => _session?.listboxValueSet(f);
+
+  /// A key picked in dropdown listbox [f]: its own PAI when the listbox
+  /// carries a function code, else held for the next round
+  /// (`SapSession.pickListbox`).
+  Future<void> _pickListbox(ScreenField f, String key) =>
+      _run(() async => _session!.pickListbox(f, key));
 
   /// F4 on a field with value help: the hit list / restriction dialog
   /// comes back as a popup. F4 on a field showing a date that brings no
@@ -3343,6 +3363,8 @@ class _SessionScreenState extends State<SessionScreen>
                   onListCell: !wallPrompt ? _stageListCell : null,
                   onListScroll: !wallPrompt ? _listScroll : null,
                   onDoubleClick: !wallPrompt ? _doubleClick : null,
+                  listboxValueSet: _listboxValueSet,
+                  onListboxPick: !wallPrompt ? _pickListbox : null,
                   model: m,
                   content: composedModal?.$1,
                   contentWidth: composedModal?.$2,

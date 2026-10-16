@@ -235,6 +235,14 @@ class SapTreeNode {
   bool disabled = false;
   String text = '';
 
+  /// The node row's own TEXT: a SIMPLE tree's label (CL_GUI_SIMPLE_TREE,
+  /// node structure MTREESNODE = TREEV_NODE + TEXT, `Structures.Text
+  /// .TableColumnName`); '' for an item tree, whose TREEV_NODE has no TEXT
+  /// and whose label is an item's. ST22's dump-text tree 166 (RABAX_TREE,
+  /// a recorded session scrubbed srv[142]): `Kap1` TEXT `Causes`, no item
+  /// table at all.
+  String nodeText = '';
+
   /// The node's icons (TREEV_NODE N_IMAGE / EXP_IMAGE: an `@xx@` code,
   /// '' for the front end's default folder / leaf image) and STYLE.
   String image = '';
@@ -251,6 +259,16 @@ class SapTreeNode {
   final List<SapTreeNode> children = [];
 
   bool get hasChildren => children.isNotEmpty || expander;
+
+  /// The node as a LIST tree draws it (CL_GUI_LIST_TREE: `ListDisplay(1)`,
+  /// SapTreeColumns.listDisplay): its items side by side in arrival order,
+  /// the blank, hidden and quick-info-only ones left out — SMARTFORMS'
+  /// `%PAGE1 Nouvelle page`, `MAIN Fenêtre principale`.
+  String get listText => [
+    for (final c in cells.values)
+      if (!c.hidden && !c.textIsQuickInfo && c.text.trim().isNotEmpty)
+        c.text.trim(),
+  ].join(' ');
 
   @override
   String toString() => 'SapTreeNode($key, "$text", ${children.length} children)';
@@ -287,13 +305,41 @@ class SapTreeModel {
         final item = r['ITEM_NAME'] ?? '';
         final text = r['TEXT'] ?? '';
         n.items[item] = text;
-        if (item == '1' || n.text.isEmpty) n.text = text;
         final c = n.cells[item] ??= SapTreeItem(item);
         _setItem(c, r, (_) => true);
+        _relabel(n);
       }
       return true;
     }
     return false;
+  }
+
+  /// The node's label ([SapTreeNode.text]): its node row's own TEXT
+  /// ([SapTreeNode.nodeText], a simple tree's: ST22's `Kap1` `Causes`,
+  /// a recorded session scrubbed srv[142] RABAX_TREE — the tree pushes no
+  /// item table, and without it the view drew the key `Kap1`); else its
+  /// item `1`'s text (the Easy Access menu's one item), else its first
+  /// item's in arrival order — a BLANK item's never. SMARTFORMS' list tree
+  /// (SSFTREEIT, SAPLSTXB) pushes each page / window / text node's items
+  /// `2` (`%PAGE1`), `3` (`Nouvelle page`) and then a blank `1`
+  /// (a recorded session srv[14], a recorded session
+  /// srv[14] / [31] / [41]): read as the label, the blank `1` left the node
+  /// without text and the view drew its key (` 1`, ` 2`, …) instead of the
+  /// name.
+  static void _relabel(SapTreeNode n) {
+    if (n.nodeText.trim().isNotEmpty) {
+      n.text = n.nodeText;
+      return;
+    }
+    final one = n.items['1'];
+    if (one != null && one.trim().isNotEmpty) {
+      n.text = one;
+      return;
+    }
+    n.text = n.items.values.firstWhere(
+      (t) => t.trim().isNotEmpty,
+      orElse: () => '',
+    );
   }
 
   /// An `UpdateR3Table` / `UpdateItemTable` row changes what its `U_*`
@@ -314,13 +360,16 @@ class SapTreeModel {
         _setItem(cell, r, (f) => all || r[f] == 'X', text: false);
         if (!changes('U_TEXT') || !t.columns.contains('TEXT')) continue;
         final text = r['TEXT'] ?? '';
-        final was = n.items[item];
         n.items[item] = text;
         cell.text = text;
-        // the node's label is its first item's text (item '1', a column
-        // tree's hierarchy column): follow it when it is that item
-        if (item == '1' || n.text.isEmpty || n.text == was) n.text = text;
+        // the node's label follows its label item ([_relabel])
+        _relabel(n);
         continue;
+      }
+      // a simple tree's node text (node_set_text: U_TEXT on the node row)
+      if (changes('U_TEXT') && r.containsKey('TEXT')) {
+        n.nodeText = r['TEXT'] ?? '';
+        _relabel(n);
       }
       if (changes('U_HIDDEN')) n.hidden = r['HIDDEN'] == 'X';
       if (changes('U_DISABLED')) n.disabled = r['DISABLED'] == 'X';
@@ -390,6 +439,11 @@ class SapTreeModel {
       ..image = r['N_IMAGE'] ?? ''
       ..expandedImage = r['EXP_IMAGE'] ?? ''
       ..style = int.tryParse(r['STYLE'] ?? '') ?? 0;
+    // a simple tree's node row carries its label (MTREESNODE TEXT)
+    if (r.containsKey('TEXT')) {
+      n.nodeText = r['TEXT'] ?? '';
+      _relabel(n);
+    }
     if (existing != null) return; // a re-push updates flags, keeps placement
     nodes[key] = n;
 

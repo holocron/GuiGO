@@ -13,7 +13,7 @@ import '../codepages.dart';
 import '../framing/diag_frame.dart';
 import '../framing/envelope.dart';
 import '../items/dynt_atom.dart';
-import '../screen/field_routing.dart' show windowsTabstripState;
+import '../screen/field_routing.dart' show FieldRouting, windowsTabstripState;
 import 'actions.dart';
 import 'frames.dart';
 import 'grid_edit_actions.dart' show uiEventControlAt;
@@ -2008,6 +2008,196 @@ List<Uint8List> windowsPushbuttonItems(
       buildApplItem(9, 11, dynproCursor)
     else if (noCursor)
       buildApplItem(9, 10, Uint8List(0)),
+    eomBytes,
+  ];
+}
+
+// --------------------------------------------------------------------------
+// Classic dynpro LISTBOX (etype-126 dropdown) rounds — SAP GUI for Windows.
+// The paint carries only {value-set id, fcode, KEY}; the entries ride an
+// `application/x-sapvaluesets` DataProvider push the Windows GUI ASKS for
+// when it does not hold the id (screen/listbox_valueset.dart).
+
+/// The `<DATAMANAGER>` document of the value-set REQUEST for [ids], in the
+/// OCX's exact spacing (a recorded session gui[14], a recorded session
+/// enjoy gui[119] / gui[155], a recorded session gui[33]
+/// — two ids `id="0"`, `id="1"` in one BLOBS block).
+///
+/// [controls] = the CONTROLS section the OCX writes before the BLOBS on a
+/// screen with live controls (` <CONTROLS> <CONTROL …></CONTROLS>` — the
+/// grids' first-visible GENERIC, the splitter sizes: a recorded session
+/// load_history gui[26]), '' for none.
+String windowsValueSetRequestXml(List<String> ids, {String controls = ''}) {
+  final b = StringBuffer('<?xml version="1.0" encoding="sap*"?>'
+      '<DATAMANAGER>$controls <BLOBS id="blobs">');
+  for (var i = 0; i < ids.length; i++) {
+    b.write('  <REQUEST id="$i" KEY ="${ids[i]}" NAMESPACE ="SAPR3LB"/>');
+  }
+  b.write('</BLOBS></DATAMANAGER>');
+  return b.toString();
+}
+
+/// The SAP GUI for WINDOWS value-set request round (SAPfront.dll
+/// `CMainFrame::PutValuesetRequest`): the system okcode `%_GS 0 1` sent
+/// right after the paint that shows listboxes whose value-set ids the
+/// frontend does not hold, its focus the PAINTED cursor echoed with the
+/// container echo of a pushbutton round ([windowsPushbuttonItems] without
+/// its 16/15/1 — no element was touched), the request in item 17
+/// ([windowsValueSetRequestXml]). Oracles: a recorded session
+/// gui[14] (SE11/T000 tabstrip page, OK 0x0d, 16/10/8 + 16/9/15 `%HEAD`
+/// `MAIN`), a recorded session gui[119] (ME23N, two nested strips)
+/// and gui[155] (PA20), a recorded session gui[30] (main)
+/// and gui[33] (modal: 16/4/36, OK 0x05, no 16/12/8).
+List<Uint8List> windowsValueSetRequestItems(
+  ActionContext ctx,
+  List<String> ids, {
+  String controls = '',
+}) {
+  if (ids.isEmpty) throw ArgumentError('a value-set request names an id');
+  final control = ctx.paintedControlFocus;
+  final painted = ctx.paintedFocus;
+  final cursor = painted == null ? null : windowsClientCursor(painted);
+  final modal = ctx.modalNo != 0;
+  final dynproCursor = control == null ? cursor : null;
+  final echo = windowsCursorEcho(ctx, dynproCursor);
+  final okMode = windowsOkMode(ctx,
+      cursor: dynproCursor != null,
+      fallback: dynproCursor != null
+          ? (modal ? winOkModePlain : winOkModeNested)
+          : (modal ? winOkModeModal : winOkModeControlFocus));
+  final geometry = modal ? ctx.paintedTopWindowGeometry : null;
+  return [
+    stepItem(ctx.step),
+    _winSesItem(ctx),
+    buildApplItem(6, 35, winCodepageValue),
+    buildApplItem(12, 4, wireText('%_GS 0 1')),
+    if (windowsModalWindowRectOwed(ctx))
+      buildApplItem(4, 36, windowsWindowRect(ctx)),
+    for (final (sid, value) in winIdentity) buildApplItem(4, sid, value),
+    buildApplItem(5, 1, Uint8List(22)..[1] = okMode),
+    if (!modal) buildApplItem(12, 8, _winPxValue(ctx)),
+    buildApplItem(
+        12,
+        6,
+        geometry != null
+            ? Uint8List.fromList(geometry)
+            : windowsPaintedGeometry(
+                ctx, _screenScrollInfos2(ctx.screenRows, ctx.screenCols))),
+    ...echo,
+    if (control != null)
+      buildApplItem(9, 18, wireText(control))
+    else if (dynproCursor != null)
+      buildApplItem(9, 11, dynproCursor)
+    else
+      buildApplItem(9, 10, Uint8List(0)),
+    xmlBlobItem(
+        wireText(windowsValueSetRequestXml(ids, controls: controls))),
+    eomBytes,
+  ];
+}
+
+/// The etype-121 EFIELD_1 atom a LISTBOX pick carries (a recorded session
+/// nodecreate_pick gui[35] atom C, `14 00 00 79 00 01 00 00 02 00 2a c0 00
+/// 02 1e 00 1e 54 49`): the listbox's painted plane and cell, attributes
+/// COMBOSTYLE | YES3D (`c0`), flag 0, dlen = the KEY's bytes, mlen =
+/// maxnrchars = the painted width, text = the KEY — never the entry text
+/// (reference client listbox_pick.value_atom).
+Uint8List listboxValueAtom({
+  required int row,
+  required int col,
+  required String key,
+  required int width,
+  int area = 0,
+  int block = 1,
+  int group = 0,
+}) {
+  final t = wireText(key);
+  if (t.length > 0xff) {
+    throw ArgumentError('listbox key of ${t.length} bytes exceeds 255');
+  }
+  final w = width > 0 ? width : (t.isEmpty ? 1 : t.length);
+  final len = 13 + 1 + 4 + t.length;
+  final b = BytesBuilder(copy: false)
+    ..add([len >> 8 & 0xff, len & 0xff, 0, 0, etypeEField1])
+    ..add([area & 0xff, block & 0xff, group & 0xff])
+    ..add([row >> 8 & 0xff, row & 0xff, col >> 8 & 0xff, col & 0xff])
+    ..addByte(attrCombostyle | attrYes3d)
+    ..addByte(0) // flag1
+    ..add([t.length, w & 0xff, w >> 8 & 0xff, w & 0xff])
+    ..add(t);
+  return b.takeBytes();
+}
+
+/// The 16/15/1 of a listbox pick: VALUECHANGED (0x0a) on a FIELD (0x01) at
+/// the cell, [buttonEventSource]'s layout (gui[35] `02 000a 0001 00000000
+/// 0200 2a00 01 00`).
+Uint8List listboxValueChangedSource(int row, int col, List<int> path) =>
+    buttonEventSource(row, col, path)
+      ..[2] = 0x0a
+      ..[4] = 0x01;
+
+/// The SAP GUI for WINDOWS pick of a key in a LISTBOX whose painted
+/// etype-126 atom carries a function code: its OWN PAI round (reference client
+/// listbox_pick, a recorded session gui[35], modal
+/// SAPLSTXB/2001 `LIST_CHILD` <- `TI`): okcode = the listbox's [fcode],
+/// OK 0x05 (the acked paint's cursor half), the zero 16/10/1 (or the
+/// field's routing cluster) + ONE 16/9/2 with the etype-121 [atoms]
+/// ([listboxValueAtom], after any other changed values of the plane), the
+/// VALUECHANGED source and the 16/9/11 cursor at the cell (offset 0). A
+/// MAIN-window pick has no oracle: it keeps the okcode round's 16/12/8 and
+/// the painted geometry (reference client listbox_pick.round_items).
+List<Uint8List> windowsListboxPickItems(
+  ActionContext ctx, {
+  required String fcode,
+  required Uint8List atoms,
+  required int row,
+  required int col,
+  int area = 0,
+  FieldRouting? routing,
+}) {
+  final modal = ctx.modalNo != 0;
+  final path = routing?.path ?? [area & 0xff];
+  final cursor = Uint8List(9 + path.length);
+  cursor[0] = path.length;
+  cursor.buffer.asByteData()
+    ..setUint16(1, row)
+    ..setUint16(3, col);
+  cursor.setRange(9, cursor.length, path);
+  final geometry = modal ? ctx.paintedTopWindowGeometry : null;
+  return [
+    stepItem(ctx.step),
+    _winSesItem(ctx),
+    buildApplItem(6, 35, winCodepageValue),
+    buildApplItem(12, 4, wireText(fcode)),
+    if (windowsModalWindowRectOwed(ctx))
+      buildApplItem(4, 36, windowsWindowRect(ctx)),
+    for (final (sid, value) in winIdentity) buildApplItem(4, sid, value),
+    buildApplItem(
+        5,
+        1,
+        Uint8List(22)
+          ..[1] = windowsOkMode(ctx, cursor: true, fallback: winOkModePlain)),
+    if (!modal) buildApplItem(12, 8, _winPxValue(ctx)),
+    buildApplItem(
+        12,
+        6,
+        geometry != null
+            ? Uint8List.fromList(geometry)
+            : windowsPaintedGeometry(
+                ctx, _screenScrollInfos2(ctx.screenRows, ctx.screenCols))),
+    if (routing == null)
+      buildApplItem(10, 1, Uint8List(9))
+    else ...[
+      for (final l in routing.pre) buildApplItem(l.id, l.sid, l.value),
+      if (routing.scroll != null &&
+          !(routing.pre.isNotEmpty &&
+              routing.pre.last.id == 12 &&
+              routing.pre.last.sid == 6))
+        buildApplItem(12, 6, routing.scroll!),
+    ],
+    buildApplItem(9, 2, atoms),
+    buildApplItem(15, 1, listboxValueChangedSource(row, col, path)),
+    buildApplItem(9, 11, cursor),
     eomBytes,
   ];
 }

@@ -94,6 +94,13 @@ class SapTreeColumns {
   /// the trees were drawn as two-column trees, "Gerr | Germany").
   String hierarchyName = hierarchyItem;
 
+  /// `ListDisplay(1)` on the tree: a LIST tree (CL_GUI_LIST_TREE) — no
+  /// item columns; each node's items are drawn side by side after its
+  /// hierarchy (SapTreeNode.listText). SMARTFORMS' Form Builder tree
+  /// (SAPLSTXB, a recorded session srv[14] verb 71: the hierarchy header
+  /// "Formulaire", 200 characters, a blank `ListItems` header).
+  bool listDisplay = false;
+
   /// Whether the server declared any item column.
   bool get isEmpty => byName.isEmpty;
 
@@ -155,6 +162,7 @@ class SapTreeColumns {
     withHeader = true;
     withHeaderDeclared = false;
     hierarchyName = hierarchyItem;
+    listDisplay = false;
   }
 
   void remove(String name) {
@@ -233,6 +241,9 @@ Set<String> foldTreeColumns(
           cols
             ..withHeader = _value(call, i) != '0'
             ..withHeaderDeclared = true;
+        } else if (verb == 'ListDisplay') {
+          final v = _value(call, i).trim();
+          cols.listDisplay = v.isNotEmpty && v != '0';
         } else if (verb == 'LastHierarchyItemName') {
           final n = _value(call, i).trimRight();
           if (n.trim().isNotEmpty) _renameHierarchy(cols, n);
@@ -315,6 +326,7 @@ const Set<String> _columnVerbs = {
   'Headers',
   'InsertHierarchy',
   'AddEx2',
+  'ListDisplay',
 };
 
 /// A property put's value: its first non-reserved argument.

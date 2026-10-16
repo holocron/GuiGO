@@ -125,9 +125,17 @@ class _ToolbarMetrics {
     required this.separator,
     required this.bottomGap,
     required this.padding,
+    this.flat = false,
   });
 
   final double button, icon, font, arrow, separator, bottomGap, padding;
+
+  /// A row of one window cell (a docked pane's toolbar: PA20's object
+  /// manager, `SEARCH_PREV @9S@` … `COLLAPSE_ALL @69@`, a recorded session
+  /// enjoy srv[184]): SAP GUI's flat buttons — the glyph fills the
+  /// button, no frame, a disabled one greyed but legible. Framed, an 11-
+  /// point line glyph at 38 % in a 13-point box drew as an empty box.
+  final bool flat;
 
   static const natural = _ToolbarMetrics(
     button: 30,
@@ -144,14 +152,16 @@ class _ToolbarMetrics {
     if (h == null || h >= SapControlToolbarView.naturalHeight) return natural;
     final gap = h >= 28 ? 4.0 : 1.0;
     final b = h - gap;
+    final flat = b < 24;
     return _ToolbarMetrics(
+      flat: flat,
       button: b,
-      icon: (b * 0.85).clamp(9.0, 18.0),
+      icon: (b * (flat ? 1.0 : 0.85)).clamp(9.0, 18.0),
       font: (b * 0.68).clamp(8.0, 13.0),
       arrow: (b * 0.9).clamp(10.0, 18.0),
       separator: (b * 0.75).clamp(8.0, 22.0),
       bottomGap: gap,
-      padding: b < 20 ? 4 : 6,
+      padding: b < 20 ? (flat ? 2 : 4) : 6,
     );
   }
 }
@@ -202,7 +212,7 @@ class _ToolbarButton extends StatelessWidget {
     final enabled = !(busy || SessionBusy.of(context)) && b.enabled;
     final fg = enabled
         ? scheme.onSurface
-        : scheme.onSurface.withValues(alpha: 0.38);
+        : scheme.onSurface.withValues(alpha: metrics.flat ? 0.5 : 0.38);
     final token = SapIconAtlas.tokenRx.firstMatch(b.icon);
     final cp = token != null ? icons?.codepoint(token.group(1)!) : null;
     final text = (icons?.stripTokens(b.text) ?? b.text)
@@ -234,7 +244,9 @@ class _ToolbarButton extends StatelessWidget {
     );
     final arrow = Icon(Icons.arrow_drop_down, size: metrics.arrow, color: fg);
     final radius = BorderRadius.circular(4);
-    final border = Border.all(color: scheme.outlineVariant);
+    final border = metrics.flat
+        ? null
+        : Border.all(color: scheme.outlineVariant);
     final selected = b.checked;
     final bg = selected ? scheme.secondaryContainer : Colors.transparent;
 

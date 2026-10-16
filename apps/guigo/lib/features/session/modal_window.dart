@@ -35,6 +35,8 @@ class ModalDynproWindow extends StatelessWidget {
     this.onFocusField,
     this.onContextMenu,
     this.onDoubleClick,
+    this.listboxValueSet,
+    this.onListboxPick,
   });
 
   final ScreenModel model;
@@ -63,6 +65,8 @@ class ModalDynproWindow extends StatelessWidget {
   final void Function(ScreenField f)? onFocusField;
   final void Function(Offset at, ScreenField? field)? onContextMenu;
   final Future<void> Function(ScreenField f)? onDoubleClick;
+  final ValueSet? Function(ScreenField f)? listboxValueSet;
+  final Future<void> Function(ScreenField f, String key)? onListboxPick;
 
   @override
   Widget build(BuildContext context) {
@@ -155,6 +159,8 @@ class ModalDynproWindow extends StatelessWidget {
                   onFocusField: onFocusField,
                   onContextMenu: onContextMenu,
                   onDoubleClick: onDoubleClick,
+                  listboxValueSet: listboxValueSet,
+                  onListboxPick: onListboxPick,
                   model: model,
                   busy: busy,
                   compact: true,

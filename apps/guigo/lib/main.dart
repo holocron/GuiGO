@@ -8,6 +8,10 @@ import 'features/session/type_ahead.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final history = await InputHistoryStore.create();
+  // the listboxes' value sets are held in memory for the app session only:
+  // a set can hold personal data (PA20's contract list), so the on-disk
+  // cache SAP GUI keeps (ValueSetDiskCache.attach) stays off until the
+  // user opts in
   runApp(GuiGoApp(history: history));
 }
 
