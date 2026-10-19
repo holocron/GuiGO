@@ -90,25 +90,57 @@ List<MenuEntry> menuChildren(
 }) {
   final depth = parent.length;
   if (depth == 0 || depth >= 4) return const [];
-  bool under(MenuEntry e) {
-    final p = e.position;
-    // a hand-built entry may carry fewer than the wire's four levels: the
-    // missing ones are 0 (never a RangeError)
-    int at(int i) => i < p.length ? p[i] : 0;
-    for (var i = 0; i < depth; i++) {
-      if (at(i) != parent[i]) return false;
+  final under = _menuGroups(tree).byParent[parent.join('.')];
+  if (under == null) return const [];
+  return [
+    for (final e in under)
+      if (e.separator ? separators : e.text.isNotEmpty) e,
+  ];
+}
+
+/// [menuChildren]'s grouping of one dropdown tree: every entry under the
+/// one parent its positions name — the levels before its LAST non-zero one
+/// of the wire's four (a hand-built entry's missing levels read 0) — in
+/// paint order. Built once per tree, not a whole-tree scan per parent per
+/// build; rebuilt when the list was refilled ([ScreenModel.menuTree] is
+/// filled in place by its own fold: a refill changes its length or its
+/// end entries — freshly parsed objects).
+class _MenuGroups {
+  _MenuGroups(List<MenuEntry> tree)
+      : length = tree.length,
+        first = tree.isEmpty ? null : tree.first,
+        last = tree.isEmpty ? null : tree.last {
+    for (final e in tree) {
+      final p = e.position;
+      int at(int i) => i < p.length ? p[i] : 0;
+      var lastSet = -1;
+      for (var i = 0; i < 4; i++) {
+        if (at(i) != 0) lastSet = i;
+      }
+      // a top-level entry (or none set) is under no parent [menuChildren]
+      // takes
+      if (lastSet < 1) continue;
+      final key = [for (var i = 0; i < lastSet; i++) at(i)].join('.');
+      (byParent[key] ??= []).add(e);
     }
-    if (at(depth) == 0) return false;
-    for (var i = depth + 1; i < 4; i++) {
-      if (at(i) != 0) return false;
-    }
-    return true;
   }
 
-  return [
-    for (final e in tree)
-      if (under(e) && (e.separator ? separators : e.text.isNotEmpty)) e,
-  ];
+  final int length;
+  final MenuEntry? first, last;
+  final Map<String, List<MenuEntry>> byParent = {};
+
+  bool fits(List<MenuEntry> tree) =>
+      tree.length == length &&
+      (tree.isEmpty ||
+          (identical(tree.first, first) && identical(tree.last, last)));
+}
+
+final Expando<_MenuGroups> _menuGroupMemo = Expando('menu tree groups');
+
+_MenuGroups _menuGroups(List<MenuEntry> tree) {
+  final g = _menuGroupMemo[tree];
+  if (g != null && g.fits(tree)) return g;
+  return _menuGroupMemo[tree] = _MenuGroups(tree);
 }
 
 // pysap SAPDiagMenuEntry flag bits (the byte after position_1..4)

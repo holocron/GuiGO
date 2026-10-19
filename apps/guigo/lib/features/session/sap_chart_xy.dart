@@ -56,7 +56,9 @@ Widget sapChartViewOf(SapChartModel c, {Key? key}) => c.gfw != null
         categories: c.categories,
         xTime: c.xTime,
         yTime: c.yTime,
-        series: [
+        // one list per model: a rebuild with the same model hands the
+        // painters the same series, and their shouldRepaint holds
+        series: _seriesOf[c] ??= [
           for (final s in c.series)
             ChartSeriesData(
               s.label,
@@ -66,6 +68,8 @@ Widget sapChartViewOf(SapChartModel c, {Key? key}) => c.gfw != null
             ),
         ],
       );
+
+final _seriesOf = Expando<List<ChartSeriesData>>();
 
 const List<Color> _auto = [
   Color(0xFF5B9BD5), Color(0xFFED7D31), Color(0xFF70AD47), Color(0xFFFFC000),

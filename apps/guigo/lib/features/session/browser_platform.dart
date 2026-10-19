@@ -13,10 +13,11 @@ enum BrowserOpened {
 }
 
 /// The host side of a server's browser launch (ios/Runner/AppDelegate.swift,
-/// android/…/MainActivity.kt) over one method channel, `guigo/browser`:
+/// android/…/MainActivity.kt, macos/Runner/AppDelegate.swift) over one
+/// method channel, `guigo/browser`:
 ///
 /// * `openExternal` {url} — the system browser (iOS UIApplication.open:
-/// Safari; Android ACTION_VIEW). What the real SAP GUI does with
+/// Safari; Android ACTION_VIEW; macOS NSWorkspace.open). What the real SAP GUI does with
 /// ShowURLInDetachedBrowser / ShellExecute / openDocumentOrApplication
 /// when no SSO was armed. Answers whether the browser took it.
 /// * `openSso` {serviceUrl, url, body} — the launch the server ARMED with
@@ -28,6 +29,8 @@ enum BrowserOpened {
 /// web view only and redirects to [url]. "Open in Safari / browser"
 /// hands the page on (signed off: Safari / Custom Tabs cannot receive
 /// the session's cookie). The host re-checks: both https, one host.
+/// A host without it (macOS) leaves the method unimplemented and the
+/// launch goes to the system browser, signed off.
 ///
 /// Why not the system browser for SSO: the token must be POSTed (a url
 /// would leave it in history and server logs), and neither Safari /
@@ -43,12 +46,17 @@ abstract final class BrowserPlatform {
   static Future<BrowserOpened> open(BrowserLaunch launch) async {
     final sso = launch.sso;
     if (sso != null && ssoEligible(sso.serviceUrl, launch.url)) {
-      await channel.invokeMethod<bool>('openSso', {
-        'serviceUrl': sso.serviceUrl.toString(),
-        'url': launch.urlText,
-        'body': sso.formBody(launch.urlText),
-      });
-      return BrowserOpened.signedOn;
+      try {
+        await channel.invokeMethod<bool>('openSso', {
+          'serviceUrl': sso.serviceUrl.toString(),
+          'url': launch.urlText,
+          'body': sso.formBody(launch.urlText),
+        });
+        return BrowserOpened.signedOn;
+      } on MissingPluginException {
+        // a host without the in-app view (macos/Runner/AppDelegate.swift):
+        // the system browser, signed off — what the real GUI does unarmed
+      }
     }
     final ok = await channel.invokeMethod<bool>('openExternal', {
       'url': launch.urlText,

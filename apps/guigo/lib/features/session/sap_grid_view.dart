@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart' show CustomSemanticsAction;
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
 import '../../core/sap_icons.dart';
 import 'dynpro_view.dart' show SapIconAtlasStrip, iconQuickInfo, sapIconText;
@@ -31,6 +34,7 @@ class SapGridView extends StatefulWidget {
     this.hotspotCells = const {},
     this.onHotspotTap,
     this.modifiedCells = const {},
+    this.onContextMenu,
   });
 
   final List<String> columns;
@@ -86,8 +90,152 @@ class SapGridView extends StatefulWidget {
   /// committed (1-based line -> column id -> value), drawn marked.
   final Map<int, Map<String, String>> modifiedCells;
 
+  /// The grid's own context menu — GridView.ocx's right-click, event 9
+  /// (SapSession.requestGridContextMenu): a long press on a loaded data
+  /// cell gives its 1-based [line] and column id, on a column heading the
+  /// column alone (line null). The owner asks the server for the menu and
+  /// shows it at [at] (global); null, and the long press opens the view's
+  /// own menu (value help, row details; the heading's local sort / filter
+  /// menu through [onColumnAction]).
+  final void Function(int? line, String? columnId, Offset at)? onContextMenu;
+
   @override
   State<SapGridView> createState() => _SapGridViewState();
+}
+
+/// Column [i]'s heading: its title when the catalog gave one, else its id.
+String gridColumnHeading(List<String> columns, List<String> titles, int i) =>
+    i < titles.length && titles[i].trim().isNotEmpty
+    ? titles[i].trim()
+    : columns[i];
+
+/// The client-side counterpart of the ALV toolbar's Details (&DETAIL)
+/// dialog: every column of [row] (grid line [line], 1-based) as heading ->
+/// full value, served from the rows the client already holds, no server
+/// round — a phone has no hover to read a cell cut by its column's width.
+/// [pressed] (a column index) leads the list with the cell that was
+/// pressed, so the truncated value is answered first; every value copies.
+Future<void> showGridRowDetails(
+  BuildContext context, {
+  required List<String> columns,
+  required List<String> titles,
+  required List<String> row,
+  required int line,
+  int? pressed,
+}) {
+  final order = [
+    ?pressed,
+    for (var i = 0; i < columns.length; i++)
+      if (i != pressed) i,
+  ];
+  String valueOf(int i) {
+    final v = i < row.length ? row[i].trimRight() : '';
+    return SapIconAtlas.tokenRx.hasMatch(v) ? iconQuickInfo(v) ?? v : v;
+  }
+
+  return showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    builder: (sheet) {
+      final scheme = Theme.of(sheet).colorScheme;
+      final messenger = ScaffoldMessenger.maybeOf(sheet);
+      Future<void> copy(String text) async {
+        await Clipboard.setData(ClipboardData(text: text));
+        messenger?.showSnackBar(
+          const SnackBar(
+            content: Text('Copied'),
+            duration: Duration(seconds: 1),
+          ),
+        );
+      }
+
+      return DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.6,
+        minChildSize: 0.3,
+        maxChildSize: 0.95,
+        builder: (sheet, controller) => Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 8, 4),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Row $line',
+                      style: Theme.of(sheet).textTheme.titleMedium,
+                    ),
+                  ),
+                  TextButton.icon(
+                    key: const ValueKey('sap-grid-row-copy'),
+                    onPressed: () => copy(
+                      [
+                        for (var i = 0; i < columns.length; i++)
+                          '${gridColumnHeading(columns, titles, i)}\t${valueOf(i)}',
+                      ].join('\n'),
+                    ),
+                    icon: const Icon(Icons.copy_all, size: 18),
+                    label: const Text('Copy row'),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+            Expanded(
+              child: ListView.builder(
+                controller: controller,
+                itemCount: order.length,
+                itemBuilder: (_, k) {
+                  final i = order[k];
+                  final head = gridColumnHeading(columns, titles, i);
+                  final v = valueOf(i);
+                  return ListTile(
+                    key: ValueKey('sap-grid-detail-${columns[i]}'),
+                    dense: true,
+                    title: Text(head, style: const TextStyle(fontSize: 12)),
+                    // the column id when the title hides it
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (head != columns[i])
+                          Text(
+                            columns[i],
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: scheme.onSurfaceVariant,
+                            ),
+                          ),
+                        SelectableText(
+                          v,
+                          style: TextStyle(
+                            fontFamily: 'Menlo',
+                            fontFamilyFallback: const [
+                              'Courier New',
+                              'monospace',
+                            ],
+                            fontSize: 13,
+                            color: scheme.onSurface,
+                          ),
+                        ),
+                      ],
+                    ),
+                    trailing: IconButton(
+                      tooltip: 'Copy',
+                      icon: const Icon(Icons.copy, size: 18),
+                      onPressed: v.isEmpty ? null : () => copy(v),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      );
+    },
+  );
 }
 
 /// Each column's width in character cells.
@@ -100,9 +248,7 @@ List<int> gridColumnCells(
   return [
     for (var i = 0; i < columns.length; i++)
       () {
-        final head = i < titles.length && titles[i].trim().isNotEmpty
-            ? titles[i].trim()
-            : columns[i];
+        final head = gridColumnHeading(columns, titles, i);
         var n = i < widths.length && widths[i] > 0 ? widths[i] : 0;
         if (n == 0) {
           for (final r in rows) {
@@ -208,9 +354,7 @@ class GridColumnCells {
     _cells = [
       for (var i = 0; i < columns.length; i++)
         () {
-          final head = i < titles.length && titles[i].trim().isNotEmpty
-              ? titles[i].trim()
-              : columns[i];
+          final head = gridColumnHeading(columns, titles, i);
           var n = i < widths.length && widths[i] > 0 ? widths[i] : 0;
           if (n == 0) n = longest[i] ?? 0;
           return math.max(n, head.length).clamp(3, 40);
@@ -263,6 +407,17 @@ class _SapGridViewState extends State<SapGridView> {
 
   bool _fetching = false;
 
+  /// Lines on screen are still owed (a missing line was found and not yet
+  /// delivered): the fetch bar under the heading shows while it is true.
+  /// A notifier, not a setState: the bar's leaf redraws alone, never the
+  /// rows (the grid is virtualized for a reason, rebuild_scoping_test).
+  final _pendingN = ValueNotifier<bool>(false);
+
+  /// The session refused the fetch (busy with the user's own action) this
+  /// many times in a row; from three on the row-count line says so.
+  int _busyRetries = 0;
+  final _waitingN = ValueNotifier<bool>(false);
+
   /// A missing line was built: fetch what is on screen once the scrolling
   /// pauses (never from inside build) — a fling past hundreds of lines asks
   /// for the lines it stops on, not every window it crossed.
@@ -297,7 +452,12 @@ class _SapGridViewState extends State<SapGridView> {
         break;
       }
     }
-    if (line == null) return;
+    _pendingN.value = line != null;
+    if (line == null) {
+      _busyRetries = 0;
+      _waitingN.value = false;
+      return;
+    }
     _fetching = true;
     bool ran;
     try {
@@ -309,9 +469,15 @@ class _SapGridViewState extends State<SapGridView> {
     }
     if (!mounted) return;
     if (!ran) {
-      _schedule(const Duration(milliseconds: 400)); // busy: try again
+      // busy with the user's own action (the app bar's spinner is on for
+      // it): try again once it is done — and say so after a while
+      _busyRetries++;
+      if (_busyRetries >= 3) _waitingN.value = true;
+      _schedule(const Duration(milliseconds: 400));
       return;
     }
+    _busyRetries = 0;
+    _waitingN.value = false;
     _asked.add(line);
     setState(() {});
     _schedule(Duration.zero); // more of the screen may still be missing
@@ -320,6 +486,8 @@ class _SapGridViewState extends State<SapGridView> {
   @override
   void dispose() {
     _settle?.cancel();
+    _pendingN.dispose();
+    _waitingN.dispose();
     _v.dispose();
     _h.dispose();
     super.dispose();
@@ -331,12 +499,46 @@ class _SapGridViewState extends State<SapGridView> {
     _h.addListener(_onHScroll);
   }
 
+  /// The row height and the row-number column's width: a finger's on a
+  /// touch platform (Apple's 44 points, Material's 48; one value for both
+  /// keeps one code path), SAP GUI's denser 30 on a desktop. The grid is a
+  /// free-form CFW control, not bound to the dynpro's character cell like a
+  /// table control's rows, so its row is GuiGo's to size. Instance values:
+  /// [_fetchVisible] reads them outside build.
+  static const double _touchRowH = 44, _deskRowH = 30;
+  static const double _touchNumW = 52, _deskNumW = 44;
+  double _rowH = _deskRowH;
+  double _numW = _deskNumW;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Theme.of's platform honours ThemeData(platform:) and the test
+    // override alike
+    final touch = switch (Theme.of(context).platform) {
+      TargetPlatform.iOS ||
+      TargetPlatform.android ||
+      TargetPlatform.fuchsia => true,
+      _ => false,
+    };
+    final rowH = touch ? _touchRowH : _deskRowH;
+    final numW = touch ? _touchNumW : _deskNumW;
+    if (rowH == _rowH && numW == _numW) return;
+    _rowH = rowH;
+    _numW = numW;
+    // the column lefts start after the row-number column: measured again
+    _cellsKey = null;
+    _cellsOf = null;
+  }
+
   @override
   void didUpdateWidget(SapGridView old) {
     super.didUpdateWidget(old);
     // a re-push (sort, filter, refresh) may drop lines: ask again then
     if (!identical(old.rowAt, widget.rowAt) && widget.rowAt != null) {
       _asked.removeWhere((l) => widget.rowAt!(l - 1) != null);
+      _busyRetries = 0;
+      _waitingN.value = false;
     }
   }
 
@@ -361,13 +563,119 @@ class _SapGridViewState extends State<SapGridView> {
     ]);
   }
 
+  /// Cell [i] of row [r] ([child]) with its own gestures: the long press's
+  /// menu (the grid's context menu, else value help and the row's
+  /// details), and — when it has a tap of its own (a hotspot click, the
+  /// grid's double-click) — its taps, counted by a SERIAL tap recognizer
+  /// (the pattern of SapListLineView; it wins over the row's InkWell). A
+  /// double-tap recognizer held every single tap for the double-tap
+  /// timeout; here the first tap acts at once (the hotspot click, else the
+  /// row toggle) and a second tap in time is the double-click, the first
+  /// tap's toggle undone. A hotspot's click already went to the server:
+  /// its second tap is not also a double-click. A line the grid has not
+  /// delivered has no gestures at all: the session refuses every action
+  /// on it (RangeError), and its row is blank.
+  ///
+  /// A screen reader gets the same: the tap action is the cell's click
+  /// (the hotspot, else the row toggle) and the double-click a custom
+  /// action, VoiceOver / TalkBack having no double tap of their own; the
+  /// long press comes with its recognizer.
+  Widget _cellGestures({
+    required int r,
+    required int i,
+    required bool hot,
+    required bool loaded,
+    required Widget child,
+  }) {
+    final doubleTap = loaded ? widget.onCellDoubleTap : null;
+    final column = widget.columns[i];
+    final gestures = RawGestureDetector(
+      behavior: HitTestBehavior.opaque,
+      gestures: {
+        if (loaded && (hot || doubleTap != null))
+          SerialTapGestureRecognizer:
+              GestureRecognizerFactoryWithHandlers<SerialTapGestureRecognizer>(
+                SerialTapGestureRecognizer.new,
+                (g) => g.onSerialTapUp = (d) {
+                  if (d.count == 1) {
+                    hot ? widget.onHotspotTap!(r + 1, column) : _toggleRow(r);
+                  } else if (d.count == 2 && !hot && doubleTap != null) {
+                    _toggleRow(r);
+                    doubleTap(r + 1, column);
+                  }
+                },
+              ),
+        if (loaded)
+          LongPressGestureRecognizer:
+              GestureRecognizerFactoryWithHandlers<LongPressGestureRecognizer>(
+                LongPressGestureRecognizer.new,
+                (g) => g.onLongPressStart = (d) =>
+                    _cellMenu(r, i, d.globalPosition),
+              ),
+      },
+      child: child,
+    );
+    if (!loaded) return gestures;
+    return Semantics(
+      onTap: hot
+          ? () => widget.onHotspotTap!(r + 1, column)
+          : () => _toggleRow(r),
+      customSemanticsActions: doubleTap == null || hot
+          ? null
+          : {
+              const CustomSemanticsAction(label: 'Open'): () {
+                _toggleRow(r);
+                doubleTap(r + 1, column);
+              },
+            },
+      child: gestures,
+    );
+  }
+
+  /// The long press on a loaded cell: the grid's context menu when the
+  /// owner serves one ([SapGridView.onContextMenu], the server's entries;
+  /// the owner leads it with the value help and the row details), else
+  /// the view's own: value help (F4) and the row's details.
   Future<void> _cellMenu(int r, int i, Offset at) async {
+    final serverMenu = widget.onContextMenu;
+    if (serverMenu != null) {
+      serverMenu(r + 1, widget.columns[i], at);
+      return;
+    }
+    final help = widget.onCellValueHelp;
     final action = await showMenu<String>(
       context: context,
       position: RelativeRect.fromLTRB(at.dx, at.dy, at.dx, at.dy),
-      items: const [PopupMenuItem(value: 'f4', child: Text('Value help (F4)'))],
+      items: [
+        if (help != null)
+          const PopupMenuItem(value: 'f4', child: Text('Value help (F4)')),
+        const PopupMenuItem(value: 'details', child: Text('Row details')),
+      ],
     );
-    if (action == 'f4') widget.onCellValueHelp?.call(r + 1, widget.columns[i]);
+    if (!mounted) return;
+    switch (action) {
+      case 'f4':
+        help?.call(r + 1, widget.columns[i]);
+      case 'details':
+        _rowDetails(r, i);
+    }
+  }
+
+  /// The row's details sheet ([showGridRowDetails]) for 0-based row [r],
+  /// led by column [pressed] when the press was on a cell.
+  void _rowDetails(int r, int? pressed) {
+    final row = widget.rowAt != null
+        ? widget.rowAt!(r)
+        : (r < widget.rows.length ? widget.rows[r] : null);
+    if (row == null) return; // not delivered: nothing to show
+    showGridRowDetails(
+      context,
+      columns: widget.columns,
+      titles: widget.titles,
+      row: row,
+      line: r + 1,
+      pressed: pressed,
+    );
   }
 
   Future<void> _columnMenu(int i, Offset at) async {
@@ -400,8 +708,6 @@ class _SapGridViewState extends State<SapGridView> {
   }
 
   static const double _cw = 8.6; // points per character cell
-  static const double _rowH = 30;
-  static const double _numW = 44;
 
   @override
   Widget build(BuildContext context) {
@@ -491,16 +797,23 @@ class _SapGridViewState extends State<SapGridView> {
             GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: () => _toggleColumn(i),
-              onLongPressStart: widget.onColumnAction == null
+              // the heading's long press: the grid's own menu on the
+              // column (the server's sort / filter / totals entries) when
+              // served, else the view's sort / filter menu
+              onLongPressStart: widget.onContextMenu != null
+                  ? (d) => widget.onContextMenu!(
+                      null,
+                      widget.columns[i],
+                      d.globalPosition,
+                    )
+                  : widget.onColumnAction == null
                   ? null
                   : (d) => _columnMenu(i, d.globalPosition),
               child: Semantics(
                 label: widget.columns[i],
                 selected: _cols.contains(i),
                 child: cell(
-                  i < widget.titles.length && widget.titles[i].trim().isNotEmpty
-                      ? widget.titles[i].trim()
-                      : widget.columns[i],
+                  gridColumnHeading(widget.columns, widget.titles, i),
                   widths[i],
                   style: const TextStyle(
                     fontWeight: FontWeight.w600,
@@ -523,21 +836,38 @@ class _SapGridViewState extends State<SapGridView> {
             if (mounted) _onHScroll();
           });
         }
-        // a short pane (the DBA cockpit's 3-row message strip) keeps its
-        // heading and rows, not the row-count line
-        final roomy = !cons.maxHeight.isFinite || cons.maxHeight >= 120;
+        // a short pane (the DBA cockpit's 3-row message strip: under four
+        // rows) keeps its heading and rows, not the row-count line; one
+        // shorter than the heading itself (that strip at a phone's cell:
+        // 23 points) shows what fits of it, clipped, never overflowing
+        final roomy = !cons.maxHeight.isFinite || cons.maxHeight >= 4 * _rowH;
+        final chrome = _rowH + 3; // the heading, its rule, the fetch slot
+        final short = cons.maxHeight.isFinite && cons.maxHeight < chrome;
+        final noteStyle = TextStyle(
+          color: scheme.onSurfaceVariant,
+          fontSize: 12,
+        );
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             if (roomy)
               Padding(
                 padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
-                child: Text(
-                  '$count ${count == 1 ? 'row' : 'rows'} · ${widget.columns.length} columns',
-                  style: TextStyle(
-                    color: scheme.onSurfaceVariant,
-                    fontSize: 12,
-                  ),
+                child: Row(
+                  children: [
+                    Text(
+                      '$count ${count == 1 ? 'row' : 'rows'} · ${widget.columns.length} columns',
+                      style: noteStyle,
+                    ),
+                    // the fetch refused three times running: the session
+                    // is busy with the user's own action, the rows wait
+                    ValueListenableBuilder<bool>(
+                      valueListenable: _waitingN,
+                      builder: (_, waiting, _) => waiting
+                          ? Text(' · waiting for the server…', style: noteStyle)
+                          : const SizedBox.shrink(),
+                    ),
+                  ],
                 ),
               ),
             Expanded(
@@ -549,99 +879,126 @@ class _SapGridViewState extends State<SapGridView> {
                   scrollDirection: Axis.horizontal,
                   child: SizedBox(
                     width: total,
-                    child: Column(
-                      children: [
-                        header,
-                        Divider(height: 1, color: scheme.outline),
-                        Expanded(
-                          child: ListView.builder(
-                            padding: const EdgeInsets.only(bottom: 96),
-                            controller: _v,
-                            itemCount: widget.rowCount ?? widget.rows.length,
-                            itemExtent: _rowH,
-                            itemBuilder: (context, r) {
-                              final loaded = widget.rowAt != null
-                                  ? widget.rowAt!(r)
-                                  : (r < widget.rows.length
-                                        ? widget.rows[r]
-                                        : null);
-                              if (loaded == null) {
-                                _need(r, (r - 12).clamp(0, r));
-                              }
-                              final row = loaded ?? const <String>[];
-                              final sel = _rows.contains(r);
-                              final modified = widget.modifiedCells[r + 1];
-                              return Material(
-                                color: sel
-                                    ? scheme.secondaryContainer
-                                    : (r.isOdd
-                                          ? scheme.surfaceContainerLow
-                                          : scheme.surface),
-                                child: InkWell(
-                                  onTap: () => _toggleRow(r),
-                                  child: Row(
-                                    children: [
-                                      cell(
-                                        '${r + 1}',
-                                        _numW,
-                                        style: numStyle,
-                                        align: Alignment.centerRight,
-                                      ),
-                                      if (skip > 0) SizedBox(width: skip),
-                                      for (var i = c0; i < c1; i++)
-                                        if (_isHotspot(r, i) case final hot)
-                                        GestureDetector(
-                                          behavior: HitTestBehavior.opaque,
-                                          // a hotspot cell's single tap is
-                                          // its own (the inner detector
-                                          // wins over the row's InkWell)
-                                          onTap: loaded != null && hot
-                                              ? () => widget.onHotspotTap!(
-                                                  r + 1,
-                                                  widget.columns[i],
-                                                )
-                                              : null,
-                                          onDoubleTap:
-                                              loaded == null ||
-                                                  widget.onCellDoubleTap == null
-                                              ? null
-                                              : () => widget.onCellDoubleTap!(
-                                                  r + 1,
-                                                  widget.columns[i],
-                                                ),
-                                          onLongPressStart:
-                                              widget.onCellValueHelp == null
-                                              ? null
-                                              : (d) => _cellMenu(
-                                                  r,
-                                                  i,
-                                                  d.globalPosition,
-                                                ),
-                                          child: cell(
-                                            i < row.length
-                                                ? row[i].trimRight()
-                                                : '',
-                                            widths[i],
-                                            style: hot ? hotspotStyle : mono,
-                                            fill:
-                                                modified?.containsKey(
+                    height: short ? cons.maxHeight : null,
+                    child: _clippedWhen(
+                      short,
+                      height: chrome,
+                      child: Column(
+                        children: [
+                          header,
+                          Divider(height: 1, color: scheme.outline),
+                          // the fetch bar: lines on screen are owed to the
+                          // server (a slot of constant height: the rows
+                          // never shift; a leaf of its own: the rows never
+                          // rebuild for it). Static, not an indeterminate
+                          // animation — the busy poll runs while a test
+                          // settles, and the app bar's spinner already
+                          // turns for the round itself.
+                          SizedBox(
+                            height: 2,
+                            child: ValueListenableBuilder<bool>(
+                              valueListenable: _pendingN,
+                              builder: (_, pending, _) => pending
+                                  ? ColoredBox(
+                                      key: const ValueKey('sap-grid-fetching'),
+                                      color: scheme.primary,
+                                    )
+                                  : const SizedBox.shrink(),
+                            ),
+                          ),
+                          Expanded(
+                            child: ListView.builder(
+                              padding: const EdgeInsets.only(bottom: 96),
+                              controller: _v,
+                              itemCount: widget.rowCount ?? widget.rows.length,
+                              itemExtent: _rowH,
+                              itemBuilder: (context, r) {
+                                final loaded = widget.rowAt != null
+                                    ? widget.rowAt!(r)
+                                    : (r < widget.rows.length
+                                          ? widget.rows[r]
+                                          : null);
+                                if (loaded == null) {
+                                  _need(r, (r - 12).clamp(0, r));
+                                }
+                                final row = loaded ?? const <String>[];
+                                final sel = _rows.contains(r);
+                                final modified = widget.modifiedCells[r + 1];
+                                return Material(
+                                  color: sel
+                                      ? scheme.secondaryContainer
+                                      : (r.isOdd
+                                            ? scheme.surfaceContainerLow
+                                            : scheme.surface),
+                                  child: InkWell(
+                                    // a line not delivered yet: no toggle
+                                    // (the session refuses to stage it and
+                                    // the highlight would claim a selection
+                                    // the server never got), no details
+                                    onTap: loaded == null
+                                        ? null
+                                        : () => _toggleRow(r),
+                                    // the row number's long press: the
+                                    // row's details (its tap is SAP GUI's
+                                    // row selector)
+                                    onLongPress: loaded == null
+                                        ? null
+                                        : () => _rowDetails(r, null),
+                                    child: Row(
+                                      key: loaded == null
+                                          ? ValueKey('sap-grid-pending-$r')
+                                          : null,
+                                      children: [
+                                        cell(
+                                          '${r + 1}',
+                                          _numW,
+                                          style: numStyle,
+                                          align: Alignment.centerRight,
+                                        ),
+                                        if (skip > 0) SizedBox(width: skip),
+                                        for (var i = c0; i < c1; i++)
+                                          if (_isHotspot(r, i) case final hot)
+                                            _cellGestures(
+                                              r: r,
+                                              i: i,
+                                              hot: hot,
+                                              loaded: loaded != null,
+                                              child: cell(
+                                                // a line still owed: an
+                                                // ellipsis in its first built
+                                                // cell (column 0 may be
+                                                // scrolled out of the build)
+                                                loaded == null
+                                                    ? (i == c0 ? '…' : '')
+                                                    : i < row.length
+                                                    ? row[i].trimRight()
+                                                    : '',
+                                                widths[i],
+                                                style: loaded == null
+                                                    ? numStyle
+                                                    : hot
+                                                    ? hotspotStyle
+                                                    : mono,
+                                                fill:
+                                                    modified?.containsKey(
                                                           widget.columns[i],
                                                         ) ==
-                                                    true
-                                                ? scheme.tertiaryContainer
-                                                : _cols.contains(i)
-                                                ? selectedFill
-                                                : null,
-                                          ),
-                                        ),
-                                    ],
+                                                        true
+                                                    ? scheme.tertiaryContainer
+                                                    : _cols.contains(i)
+                                                    ? selectedFill
+                                                    : null,
+                                              ),
+                                            ),
+                                      ],
+                                    ),
                                   ),
-                                ),
-                              );
-                            },
+                                );
+                              },
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -652,4 +1009,21 @@ class _SapGridViewState extends State<SapGridView> {
       },
     );
   }
+
+  /// [child] laid out [height] tall and clipped to its box when [short],
+  /// else as it is.
+  static Widget _clippedWhen(
+    bool short, {
+    required double height,
+    required Widget child,
+  }) => short
+      ? ClipRect(
+          child: OverflowBox(
+            alignment: Alignment.topLeft,
+            minHeight: height,
+            maxHeight: height,
+            child: child,
+          ),
+        )
+      : child;
 }

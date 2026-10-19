@@ -80,6 +80,10 @@ class _SapNetPlanViewState extends State<SapNetPlanView> {
     }
   }
 
+  /// The floating overview of a phone-width pane, until hidden from the
+  /// toolbar.
+  bool _overviewShown = true;
+
   @override
   Widget build(BuildContext context) {
     final s = scene;
@@ -88,9 +92,15 @@ class _SapNetPlanViewState extends State<SapNetPlanView> {
     final canvas = GestureDetector(
       key: const ValueKey('netplan-surface'),
       onTapUp: (d) => _tap(d.localPosition),
-      child: CustomPaint(
-        size: s.size * _zoom,
-        painter: NetPlanPainter(g, s, zoom: _zoom),
+      // the graph is its own layer: a scroll frame (the viewport's, the
+      // overview's drag) moves the picture, it lays no label out again; a
+      // zoom or a new graph records a new one (shouldRepaint)
+      child: RepaintBoundary(
+        key: const ValueKey('netplan-canvas'),
+        child: CustomPaint(
+          size: s.size * _zoom,
+          painter: NetPlanPainter(g, s, zoom: _zoom),
+        ),
       ),
     );
     final viewport = ColoredBox(
@@ -115,42 +125,83 @@ class _SapNetPlanViewState extends State<SapNetPlanView> {
         ),
       ),
     );
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _toolbar(context),
-        Expanded(
-          // one Row whether or not the overview shows: the viewport keeps
-          // its element (and its scroll positions) when it comes and goes
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(child: viewport),
-              if (g.decor.overview) ...[
-                const VerticalDivider(width: 1),
-                SizedBox(
-                  width: 168,
-                  child: _NetPlanOverview(
-                    key: const ValueKey('netplan-overview'),
-                    graph: g,
-                    scene: s,
-                    zoom: _zoom,
-                    h: _h,
-                    v: _v,
-                    background: bg,
-                    frame: jnetColor(g.decor.options['NAVFRAME']) ??
-                        Colors.green,
-                  ),
+    return LayoutBuilder(
+      builder: (context, cons) {
+        // a phone-width pane (the app's breakpoint, dynpro_view's 600): the
+        // overview floats over the viewport's corner instead of taking a
+        // third of the width beside it
+        final narrow = cons.maxWidth < 600;
+        final overview = !g.decor.overview
+            ? null
+            : _NetPlanOverview(
+                key: const ValueKey('netplan-overview'),
+                graph: g,
+                scene: s,
+                zoom: _zoom,
+                h: _h,
+                v: _v,
+                background: bg,
+                frame: jnetColor(g.decor.options['NAVFRAME']) ?? Colors.green,
+              );
+        Widget? floating;
+        if (overview != null && narrow && _overviewShown) {
+          // sized by the scene's aspect (a fixed box letterboxes a wide
+          // org chart), inset past the always-shown scroll bars
+          final w = (cons.maxWidth * 0.35).clamp(96.0, 140.0);
+          final room = math.max(48.0, (cons.maxHeight - 32) * 0.35);
+          final h = (w * s.size.height / math.max(1.0, s.size.width))
+              .clamp(48.0, room);
+          floating = Positioned(
+            right: 12,
+            bottom: 12,
+            child: SizedBox(
+              width: w,
+              height: h,
+              child: DecoratedBox(
+                position: DecorationPosition.foreground,
+                decoration: BoxDecoration(
+                  border: Border.all(
+                      color: Theme.of(context).colorScheme.outline),
                 ),
-              ],
-            ],
-          ),
-        ),
-      ],
+                child: overview,
+              ),
+            ),
+          );
+        }
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _toolbar(context, overviewToggle: overview != null && narrow),
+            Expanded(
+              // one tree whether the overview sits beside the viewport,
+              // floats over it or is hidden: the viewport keeps its element
+              // (and its scroll positions) as it comes and goes, and when
+              // the width crosses the breakpoint
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Expanded(
+                    child: Stack(
+                      children: [
+                        Positioned.fill(child: viewport),
+                        ?floating,
+                      ],
+                    ),
+                  ),
+                  if (overview != null && !narrow) ...[
+                    const VerticalDivider(width: 1),
+                    SizedBox(width: 168, child: overview),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 
-  Widget _toolbar(BuildContext context) {
+  Widget _toolbar(BuildContext context, {bool overviewToggle = false}) {
     final t = Theme.of(context).textTheme.bodySmall;
     Widget b(IconData i, String tip, VoidCallback on, {Key? key}) =>
         IconButton(
@@ -177,15 +228,30 @@ class _SapNetPlanViewState extends State<SapNetPlanView> {
                 key: const ValueKey('netplan-zoom-in')),
             b(Icons.crop_free, 'Natural size', () => _setZoom(1)),
             b(Icons.fit_screen, 'Fit', () {
-              final box = context.findRenderObject() as RenderBox?;
-              if (box == null) return;
+              // the viewport's own size: the overview beside it is no part
+              // of it
+              final hp = _h.hasClients ? _h.position : null;
+              final vp = _v.hasClients ? _v.position : null;
+              if (hp == null ||
+                  vp == null ||
+                  !hp.hasViewportDimension ||
+                  !vp.hasViewportDimension) {
+                return;
+              }
               final s = scene.size;
               _setZoom(math.min(
                 1,
-                math.min(box.size.width / (s.width + 8),
-                    (box.size.height - 32) / (s.height + 8)),
+                math.min(hp.viewportDimension / (s.width + 8),
+                    vp.viewportDimension / (s.height + 8)),
               ));
             }),
+            if (overviewToggle)
+              b(
+                Icons.map_outlined,
+                'Overview',
+                () => setState(() => _overviewShown = !_overviewShown),
+                key: const ValueKey('netplan-overview-toggle'),
+              ),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
@@ -246,32 +312,75 @@ class _NetPlanOverview extends StatelessWidget {
         onPanUpdate: (d) => jump(d.localPosition),
         child: ColoredBox(
           color: background,
-          child: AnimatedBuilder(
-            animation: Listenable.merge([h, v]),
-            builder: (context, _) {
-              Rect? seen;
-              if (h.hasClients &&
-                  v.hasClients &&
-                  h.position.hasViewportDimension &&
-                  v.position.hasViewportDimension) {
-                seen = Rect.fromLTWH(
-                  h.offset / zoom,
-                  v.offset / zoom,
-                  h.position.viewportDimension / zoom,
-                  v.position.viewportDimension / zoom,
-                );
-              }
-              return CustomPaint(
-                size: Size(cons.maxWidth, cons.maxHeight),
-                painter: NetPlanPainter(graph, scene,
-                    zoom: k, seen: seen, seenColor: frame, overview: true),
-              );
-            },
+          // the graph and the frame of the visible part are two layers: a
+          // scroll frame repaints the frame, not every shape of the graph
+          child: Stack(
+            children: [
+              RepaintBoundary(
+                child: CustomPaint(
+                  size: Size(cons.maxWidth, cons.maxHeight),
+                  painter: NetPlanPainter(graph, scene,
+                      zoom: k, overview: true),
+                ),
+              ),
+              AnimatedBuilder(
+                animation: Listenable.merge([h, v]),
+                builder: (context, _) {
+                  Rect? seen;
+                  if (h.hasClients &&
+                      v.hasClients &&
+                      h.position.hasViewportDimension &&
+                      v.position.hasViewportDimension) {
+                    seen = Rect.fromLTWH(
+                      h.offset / zoom,
+                      v.offset / zoom,
+                      h.position.viewportDimension / zoom,
+                      v.position.viewportDimension / zoom,
+                    );
+                  }
+                  return CustomPaint(
+                    size: Size(cons.maxWidth, cons.maxHeight),
+                    painter: _SeenFramePainter(seen, zoom: k, color: frame),
+                  );
+                },
+              ),
+            ],
           ),
         ),
       );
     },
   );
+}
+
+/// The overview's frame of the visible part ([seen], control points) at
+/// the overview's [zoom], over its NetPlanPainter's layer.
+class _SeenFramePainter extends CustomPainter {
+  _SeenFramePainter(this.seen, {required this.zoom, required this.color});
+
+  final Rect? seen;
+  final double zoom;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final s = seen;
+    if (s == null) return;
+    canvas
+      ..save()
+      ..scale(zoom)
+      ..drawRect(
+        s,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..color = color
+          ..strokeWidth = 2 / zoom,
+      )
+      ..restore();
+  }
+
+  @override
+  bool shouldRepaint(_SeenFramePainter old) =>
+      old.seen != seen || old.zoom != zoom || old.color != color;
 }
 
 /// The graph's background: its `DISPBACKGR` colour lightened the way the

@@ -52,6 +52,7 @@
 /// PROPS (gui[28]).
 library;
 
+import 'dart:math' show min;
 import 'dart:typed_data';
 
 import '../cfw/dp_cache.dart' show dpColumnCells;
@@ -144,7 +145,7 @@ List<Uint8List> valueHelpEventItems(
     stepItem(ctx.step),
     windowsEventSes(ctx),
     buildApplItem(6, 35, winCodepageValue),
-    buildApplItem(12, 4, wireText('%_GC $shell $eventId')),
+    buildApplItem(12, 4, wireText(cfwGenericEventOkcode(shell, eventId))),
     if (windowsModalWindowRectOwed(ctx, geometry: geometry))
       buildApplItem(4, 36, windowsWindowRect(ctx)),
     for (final (sid, value) in winIdentity) buildApplItem(4, sid, value),
@@ -235,6 +236,10 @@ List<SapValueHelpSelectOption> valueHelpSelectOptions(
   return rows;
 }
 
+/// The widest select-options record [valueHelpSelectOptionsAnswer] lays
+/// out (DDSHSELOPTEX is 573 B): a wire FORMAT past it is hostile.
+const int maxSelectOptionsRecord = 1 << 16;
+
 /// The frontend's answer to the select-options pull [request] (a
 /// DP_GET_CLIENT_TABLE45A RFC value): [rows] laid out by the request's own
 /// FORMAT (DDSHSELOPTEX: SHLPNAME C30, SHLPFIELD C30, SIGN C1, OPTION C2,
@@ -263,7 +268,9 @@ Uint8List valueHelpSelectOptionsAnswer(
     if (off + len > end) end = off + len;
   }
   final (_, (dw, _), _) = dpColumnCells(request, 'DATAASC');
-  final width = dw > 0 ? dw : end;
+  // clamped: [end] sums wire u32s — a hostile FORMAT asked for gigabytes
+  // per row (audit 2026-10-17 P0-7); the real record is 573 B
+  final width = min(dw > 0 ? dw : end, maxSelectOptionsRecord);
   final data = Uint8List(width * rows.length)
     ..fillRange(0, width * rows.length, 0x20);
   for (var r = 0; r < rows.length; r++) {

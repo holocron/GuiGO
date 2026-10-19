@@ -568,4 +568,4 @@ class ContextMenuTracker {
 // Patterns hoisted out of their call sites: a RegExp built per call is
 // compiled per call (audit #7 / zcode P-12).
 final RegExp _singleLetterRx = RegExp(r'^[A-Za-z]$');
-final RegExp _digitsOnlyRx = RegExp(r'^\d+$');
+final RegExp _digitsOnlyRx = RegExp(r'^\d{1,9}$');

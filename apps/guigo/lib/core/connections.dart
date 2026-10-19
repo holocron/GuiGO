@@ -7,7 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// A stored connection: everything except the password lives in plain
 /// preferences; the password sits in the platform secure store (iOS
 /// Keychain, device-only `unlocked_this_device`; Android
-/// `EncryptedSharedPreferences`). With biometrics enrolled it is read only
+/// `EncryptedSharedPreferences`; macOS the login keychain). With biometrics enrolled it is read only
 /// after Face ID / Touch ID / fingerprint succeeds; without, it is used
 /// directly — then protected only by the store (on iOS readable only while
 /// this device is unlocked; on Android encrypted at rest, no unlock gate).
@@ -19,7 +19,7 @@ class ConnectionEntry {
     required this.host,
     this.port = defaultSapPort,
     this.routerString = '',
-    this.client = '100',
+    this.client = defaultLogonClient,
     this.user = '',
     this.language = defaultLogonLanguage,
     this.storePassword = true,
@@ -42,6 +42,11 @@ class ConnectionEntry {
   /// logon) — a second logon is a licensing matter the user decides.
   bool keepOtherSessions;
 
+  /// What the entry is called on screen: its name, or `host:port` when
+  /// it has none (the list, the delete and password prompts, the logon
+  /// dialog — never an empty title).
+  String get label => name.isEmpty ? '$host:$port' : name;
+
   Map<String, dynamic> toJson() => {
         'id': id,
         'name': name,
@@ -61,7 +66,7 @@ class ConnectionEntry {
         host: j['host'] as String? ?? '',
         port: (j['port'] as num?)?.toInt() ?? defaultSapPort,
         routerString: j['router'] as String? ?? '',
-        client: j['client'] as String? ?? '100',
+        client: j['client'] as String? ?? defaultLogonClient,
         user: j['user'] as String? ?? '',
         language: j['language'] as String? ?? defaultLogonLanguage,
         storePassword: j['storePassword'] as bool? ?? true,
@@ -128,12 +133,16 @@ class ConnectionStore {
         key: 'guigo.pw.$id',
         value: password,
         aOptions: _androidOpts,
-        iOptions: _iosOpts);
+        iOptions: _iosOpts,
+        mOptions: _macOpts);
   }
 
   Future<String?> readPassword(String id) async {
     return _secure.read(
-        key: 'guigo.pw.$id', aOptions: _androidOpts, iOptions: _iosOpts);
+        key: 'guigo.pw.$id',
+        aOptions: _androidOpts,
+        iOptions: _iosOpts,
+        mOptions: _macOpts);
   }
 
   /// Whether a password is stored for [id] — asked of the secure store
@@ -142,11 +151,18 @@ class ConnectionStore {
   /// prompt when biometrics are enrolled, directly when none are).
   Future<bool> hasPassword(String id) {
     return _secure.containsKey(
-        key: 'guigo.pw.$id', aOptions: _androidOpts, iOptions: _iosOpts);
+        key: 'guigo.pw.$id',
+        aOptions: _androidOpts,
+        iOptions: _iosOpts,
+        mOptions: _macOpts);
   }
 
   Future<void> deletePassword(String id) async {
-    await _secure.delete(key: 'guigo.pw.$id');
+    await _secure.delete(
+        key: 'guigo.pw.$id',
+        aOptions: _androidOpts,
+        iOptions: _iosOpts,
+        mOptions: _macOpts);
   }
 
   /// Whether the user has seen (and dismissed) the unencrypted-connection
@@ -174,4 +190,11 @@ class ConnectionStore {
   static const _androidOpts = AndroidOptions(encryptedSharedPreferences: true);
   static const _iosOpts =
       IOSOptions(accessibility: KeychainAccessibility.unlocked_this_device);
+
+  /// macOS: the login (file-based) keychain, not the data-protection one —
+  /// that needs a `keychain-access-groups` entitlement, i.e. a build signed
+  /// with a development team; without one every call fails with -34018
+  /// (errSecMissingEntitlement). The login keychain is still per-user,
+  /// encrypted at rest and locked with the Mac's login.
+  static const _macOpts = MacOsOptions(useDataProtectionKeyChain: false);
 }

@@ -7,17 +7,23 @@
 ///
 /// A key is the kind, the step and the value ITSELF: two keys are equal
 /// only when their bytes are (a cheap sampled fingerprint picks the hash
-/// bucket, a full compare decides). A pure-Dart SHA-256 of every answered
-/// value (~16 MB/s: a 200 kB joined batch cost ~12 ms on the UI isolate,
-/// audit zcode P-12) bought the same exactness. The kept values are copies,
-/// bounded by [AnsweredCalls.maxRetainedBytes]: past it the oldest keys
-/// keep the value's SHA-256 instead of its bytes (still exact).
+/// bucket, a full compare decides). A kept key holds the call's own bytes:
+/// they are immutable by the decode memo's contract (decompressFrame's
+/// bodies are never mutated; foldAutomationFrame hands out the item's own
+/// view) and a call joined across chunk frames owns a fresh buffer — only
+/// a small view that pins a much larger body is copied, which frees that
+/// body. The kept bytes are bounded by [AnsweredCalls.maxRetainedBytes]
+/// and [AnsweredCalls.max]: past either the OLDEST keys are forgotten
+/// outright (only the recent keys can recur: a re-read turn's), the newest
+/// always kept so an immediate re-read of an oversize call is still
+/// caught. A pure-Dart SHA-256 once stood in for the shed bytes (~16 MB/s
+/// on the UI isolate: every large flush past the budget froze the app for
+/// 100+ ms — audit perf1 answered-calls); forgetting can only re-answer a
+/// long-past call, never conflate two.
 library;
 
 import 'dart:collection';
 import 'dart:typed_data';
-
-import 'package:pointycastle/digests/sha256.dart';
 
 /// One answered call's exact identity (see [AnsweredCalls.keyOf]).
 final class AnsweredCallKey {
@@ -31,18 +37,12 @@ final class AnsweredCallKey {
   final int length;
   final int _fingerprint;
 
-  /// The value (a copy once the key is kept), null once shed to [_digest].
-  Uint8List? _bytes;
-  String? _digest;
+  /// The value: the call's own immutable bytes (a copy when the view
+  /// pinned a much larger buffer — [AnsweredCalls.add]).
+  Uint8List _bytes;
 
-  String get _sha => _digest ??= _hex(SHA256Digest().process(_bytes!));
-
-  /// Keep the value's digest only (the key stays exact).
-  void _shed() {
-    if (_bytes == null) return;
-    _sha;
-    _bytes = null;
-  }
+  /// The bytes this key keeps alive: its value's whole buffer.
+  int get _pinnedBytes => _bytes.buffer.lengthInBytes;
 
   @override
   int get hashCode => Object.hash(kind, step, length, _fingerprint);
@@ -57,9 +57,7 @@ final class AnsweredCallKey {
         other.kind != kind) {
       return false;
     }
-    final a = _bytes, b = other._bytes;
-    if (a != null && b != null) return _sameBytes(a, b);
-    return _sha == other._sha;
+    return _sameBytes(_bytes, other._bytes);
   }
 
   @override
@@ -67,24 +65,29 @@ final class AnsweredCallKey {
 }
 
 class AnsweredCalls {
-  AnsweredCalls({this.max = 1024, this.maxRetainedBytes = 16 << 20});
+  /// Mobile defaults: re-reads come from the same turn or the next one,
+  /// so a few hundred recent keys and a few MB of their bytes suffice.
+  AnsweredCalls({this.max = 256, this.maxRetainedBytes = 4 << 20});
 
   /// Only the recent keys can recur (a re-read turn): the oldest past
   /// [max] are dropped.
   final int max;
 
-  /// The value bytes the kept keys hold at most; past it the oldest keys
-  /// are shed to their SHA-256.
+  /// The value bytes the kept keys hold at most (each key counted by the
+  /// buffer it pins); past it the oldest keys are dropped, the newest
+  /// always kept.
   final int maxRetainedBytes;
 
   final LinkedHashSet<AnsweredCallKey> _keys = LinkedHashSet();
-  final Queue<AnsweredCallKey> _retained = Queue();
   int _retainedBytes = 0;
 
   int get length => _keys.length;
 
+  /// The bytes the kept keys pin.
+  int get retainedBytes => _retainedBytes;
+
   /// The key of the [kind] call [value] closed at [step]. O(1): the value
-  /// is copied only when the key is kept ([add]).
+  /// is never copied here.
   static AnsweredCallKey keyOf(String kind, int step, Uint8List value) =>
       AnsweredCallKey._(kind, step, value);
 
@@ -93,36 +96,27 @@ class AnsweredCalls {
   /// Records [key]; false when it was already recorded.
   bool add(AnsweredCallKey key) {
     if (_keys.contains(key)) return false;
-    // the kept key owns its bytes: the caller's buffer may be reused
-    if (key._bytes case final b?) {
+    // the value is immutable (the decode memo's contract): kept as it is —
+    // unless it is a small view into a buffer many times its size (an
+    // item of a large decoded frame), which a copy frees
+    final b = key._bytes;
+    if (b.buffer.lengthInBytes > 2 * b.length) {
       key._bytes = Uint8List.fromList(b);
-      _retained.add(key);
-      _retainedBytes += b.length;
     }
     _keys.add(key);
-    if (_keys.length > max) {
-      final gone = _keys.take(_keys.length - max).toList();
-      _keys.removeAll(gone);
-      for (final k in gone) {
-        if (k._bytes case final b?) {
-          _retainedBytes -= b.length;
-          k._bytes = null;
-        }
-      }
-      _retained.removeWhere((k) => k._bytes == null);
-    }
-    while (_retainedBytes > maxRetainedBytes && _retained.isNotEmpty) {
-      final k = _retained.removeFirst();
-      final n = k._bytes?.length ?? 0;
-      k._shed();
-      _retainedBytes -= n;
+    _retainedBytes += key._pinnedBytes;
+    // past either cap the oldest go, the newest stays
+    while (_keys.length > 1 &&
+        (_keys.length > max || _retainedBytes > maxRetainedBytes)) {
+      final k = _keys.first;
+      _keys.remove(k);
+      _retainedBytes -= k._pinnedBytes;
     }
     return true;
   }
 
   void clear() {
     _keys.clear();
-    _retained.clear();
     _retainedBytes = 0;
   }
 }
@@ -158,15 +152,4 @@ bool _sameBytes(Uint8List a, Uint8List b) {
     if (a[i] != b[i]) return false;
   }
   return true;
-}
-
-String _hex(Uint8List d) {
-  const digits = '0123456789abcdef';
-  final out = StringBuffer();
-  for (final b in d) {
-    out
-      ..writeCharCode(digits.codeUnitAt(b >> 4))
-      ..writeCharCode(digits.codeUnitAt(b & 0xf));
-  }
-  return out.toString();
 }

@@ -1,4 +1,5 @@
 import 'package:diag_protocol/diag_protocol.dart';
+import 'package:flutter/gestures.dart' show kTouchSlop;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:office_doc/office_doc.dart';
@@ -32,10 +33,15 @@ class SapOfficeView extends StatefulWidget {
 
   final SapOfficeDocument document;
 
-  /// The user's first touch in the document (once per document): the
-  /// session raises the container's activation event
+  /// The user's first TAP in the document (once per document) — a
+  /// pointer up within [kTouchSlop] of its down; a scroll or a drag is
+  /// not one, nor is a tap on the pane's own header: the session raises
+  /// the container's activation event
   /// ([SapSessionOffice.officeDocumentActivated]), as SAP GUI does when
-  /// the user starts working in the in-place Word / Excel window.
+  /// the user starts working in the in-place Word / Excel window. The
+  /// first finger-down of a scroll through a long text used to cost that
+  /// round (and a busy spell with the toolbar greyed) before the user
+  /// had done anything to the document.
   final VoidCallback? onActivate;
 
   /// The clock export file names are dated with (tests pin it).
@@ -79,13 +85,28 @@ class _SapOfficeViewState extends State<SapOfficeView> {
   /// The document [SapOfficeView.onActivate] fired for (shell, ProgID).
   (String, String)? _activated;
 
+  /// Where the finger went down in the document, until it comes up or
+  /// moves away (a second finger is ignored).
+  Offset? _down;
+
   SapOfficeDocument get _doc => widget.document;
 
-  void _touched(PointerDownEvent _) {
+  void _tapped() {
     final id = (_doc.shell, _doc.progId);
     if (_activated == id || widget.onActivate == null) return;
     _activated = id;
     widget.onActivate!();
+  }
+
+  /// A pointer up within the touch slop of its down: the tap. Read from
+  /// pointer events, not a gesture recognizer: the body already owns the
+  /// arena (the text's selection, the sheet's cells), and an outer
+  /// recognizer would lose it, as DoubleTapListener's comment says.
+  void _onPointerUp(PointerUpEvent e) {
+    final down = _down;
+    _down = null;
+    if (down == null || (e.position - down).distance > kTouchSlop) return;
+    _tapped();
   }
 
   _Body _parse() {
@@ -112,6 +133,16 @@ class _SapOfficeViewState extends State<SapOfficeView> {
         ? null
         : readOfficeDocument(bytes);
     switch (content) {
+      case OfficeText(:final document) when _blank(document):
+        // what the server sent holds no visible text (a SAPscript /
+        // SmartForms text COMPOSE_RTF exported with no lines: its one
+        // default `* ` paragraph) — said so, not a blank pane that reads
+        // as "not loaded"; nothing is made up
+        return _OpaqueBody(
+          'The document holds no text '
+          '(${detectOfficeFormat(bytes!).label}, ${_size(bytes.length)} '
+          'as sent)',
+        );
       case OfficeText(:final document):
         return _TextBody(document);
       case OfficeSheet(:final workbook):
@@ -145,6 +176,9 @@ class _SapOfficeViewState extends State<SapOfficeView> {
     );
   }
 
+  /// No visible character in [doc]: every paragraph and table cell blank.
+  static bool _blank(RichDocument doc) => doc.plainText.trim().isEmpty;
+
   static String _size(int n) => n < 1024
       ? '$n B'
       : n < 1024 * 1024
@@ -159,9 +193,7 @@ class _SapOfficeViewState extends State<SapOfficeView> {
     if (b == null || b.isEmpty) return null;
     var isXdp = d.fileExtension == '.xdp';
     if (!isXdp) {
-      final head = String.fromCharCodes(
-        b.length > 512 ? b.sublist(0, 512) : b,
-      );
+      final head = String.fromCharCodes(b.length > 512 ? b.sublist(0, 512) : b);
       isXdp = head.contains('<?xml') && head.contains('<xdp:xdp');
     }
     if (!isXdp) return null;
@@ -254,25 +286,28 @@ class _SapOfficeViewState extends State<SapOfficeView> {
   @override
   Widget build(BuildContext context) {
     final body = _parse();
-    final pane = Column(
+    return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _header(context, body),
         const Divider(height: 1),
         Expanded(
-        child: switch (body) {
-          _TextBody(:final doc) => SapRichTextView(document: doc),
-          _SheetBody(:final book, :final note) => _sheetPane(book, note),
-          _FormBody(:final form) => SapFormView(form: form),
-          _OpaqueBody(:final message) => _opaque(context, message),
-        },
+          // the document alone: "Open in viewer" and the export are
+          // GuiGo's own chrome, no work in the in-place document
+          child: Listener(
+            behavior: HitTestBehavior.translucent,
+            onPointerDown: (e) => _down ??= e.position,
+            onPointerCancel: (_) => _down = null,
+            onPointerUp: _onPointerUp,
+            child: switch (body) {
+              _TextBody(:final doc) => SapRichTextView(document: doc),
+              _SheetBody(:final book, :final note) => _sheetPane(book, note),
+              _FormBody(:final form) => SapFormView(form: form),
+              _OpaqueBody(:final message) => _opaque(context, message),
+            },
+          ),
         ),
       ],
-    );
-    return Listener(
-      behavior: HitTestBehavior.translucent,
-      onPointerDown: _touched,
-      child: pane,
     );
   }
 
@@ -294,55 +329,74 @@ class _SapOfficeViewState extends State<SapOfficeView> {
       color: scheme.surfaceContainerHigh,
       padding: const EdgeInsets.symmetric(horizontal: 8),
       height: 36,
-      child: Row(
-        children: [
-          Icon(icon, size: 18, color: scheme.onSurfaceVariant),
-          const SizedBox(width: 6),
-          Flexible(
-            child: Text(
-              '$what · ${_doc.progId}'
-              '${_doc.format.isEmpty ? '' : ' (${_doc.format})'}',
-              overflow: TextOverflow.ellipsis,
-              style: theme.textTheme.labelLarge,
-            ),
-          ),
-          if (_doc.readOnly) ...[
+      // a narrow pane (SMARTFORMS' text node beside its tree) drops the
+      // read-only chip and lets the title shrink away: the buttons stay
+      child: LayoutBuilder(
+        builder: (context, box) => Row(
+          children: [
+            Icon(icon, size: 18, color: scheme.onSurfaceVariant),
             const SizedBox(width: 6),
-            Container(
-              key: const ValueKey('office-readonly'),
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-              decoration: BoxDecoration(
-                color: scheme.secondaryContainer,
-                borderRadius: BorderRadius.circular(4),
-              ),
+            Flexible(
               child: Text(
-                'Read-only',
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: scheme.onSecondaryContainer,
+                '$what · ${_doc.progId}'
+                '${_doc.format.isEmpty ? '' : ' (${_doc.format})'}',
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.labelLarge,
+              ),
+            ),
+            if (_doc.readOnly && box.maxWidth >= _chipMinWidth) ...[
+              const SizedBox(width: 6),
+              Container(
+                key: const ValueKey('office-readonly'),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                decoration: BoxDecoration(
+                  color: scheme.secondaryContainer,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  'Read-only',
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: scheme.onSecondaryContainer,
+                  ),
                 ),
               ),
-            ),
+            ],
+            const Spacer(),
+            if (canPreview)
+              IconButton(
+                key: const ValueKey('office-preview'),
+                tooltip: 'Open in viewer',
+                style: _compactButton,
+                iconSize: 18,
+                icon: const Icon(Icons.open_in_new),
+                onPressed: _preview,
+              ),
+            if (OfficePlatform.canExport) _exportButton(body),
           ],
-          const Spacer(),
-          if (canPreview)
-            IconButton(
-              key: const ValueKey('office-preview'),
-              tooltip: 'Open in viewer',
-              visualDensity: VisualDensity.compact,
-              iconSize: 18,
-              icon: const Icon(Icons.open_in_new),
-              onPressed: _preview,
-            ),
-          if (OfficePlatform.canExport) _exportButton(body),
-        ],
+        ),
       ),
     );
   }
+
+  /// The header's narrowest width that still shows the read-only chip.
+  static const double _chipMinWidth = 260;
+
+  /// The header's buttons drawn at 32 points (two of them and the kind
+  /// icon fit the narrowest pane); their touch target is the theme's
+  /// padded 48-point box, 36 tall in this header — a shrink-wrapped
+  /// target left the two actions a phone needs on a document (preview,
+  /// export) at 32 points side by side.
+  static final ButtonStyle _compactButton = IconButton.styleFrom(
+    minimumSize: const Size.square(32),
+    fixedSize: const Size.square(32),
+    padding: EdgeInsets.zero,
+  );
 
   Widget _exportButton(_Body body) {
     return PopupMenuButton<int>(
       key: const ValueKey('office-export'),
       tooltip: 'Download / Export',
+      style: _compactButton,
       icon: const Icon(Icons.download, size: 18),
       itemBuilder: (context) {
         final exports = _exports(body);

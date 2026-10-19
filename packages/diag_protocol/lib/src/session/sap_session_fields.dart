@@ -48,6 +48,8 @@ class StagedListCell {
 /// Any other action (a control event, a radio, a table cell, a list pick)
 /// first sends the staged values as ONE Enter round — the reference client's
 /// deferred_fill rule for actions whose merged frame no capture pins.
+/// A checkbox tick is staged the same way (sap_session_checkbox.dart):
+/// its etype-128 atom rides the typed values' 16/9/2.
 /// Staged values never outlive their screen: a paint of the dynpro or a
 /// change of program / dynpro / window level drops them (an input the
 /// kernel cannot bind on another screen is a "FOCUS DATA" teardown); a
@@ -516,6 +518,7 @@ extension SapSessionFields on SapSession {
     (int, int, List<int>)? button,
     FieldCursor? cursor,
     StagedField? extra,
+    Uint8List? eventSource,
   }) {
     final all = [
       for (final s in _staged)
@@ -529,11 +532,28 @@ extension SapSessionFields on SapSession {
       okcode: okcode,
       button: button,
       cursor: cursor,
+      eventSource: eventSource,
     );
   }
 
   FieldWrite _writeOf(StagedField s) {
     final f = s.field;
+    if (f.kind == FieldKind.checkbox) {
+      // a staged tick: the box's etype-128 value atom, the painted dlg
+      // flags and visible label length echoed (sap_session_checkbox.dart)
+      return FieldWrite.checkbox(
+        f.wireRow,
+        f.wireCol,
+        s.text.trim() == 'X',
+        area: f.area,
+        block: f.block,
+        group: f.group,
+        dlg1: f.dlg1,
+        dlg2: f.dlg2,
+        labelWidth: f.labelWidth,
+        routing: f.routing,
+      );
+    }
     // a secret's value atom always carries the INVISIBLE attribute (0x02):
     // the painted byte already does on every logon paint (0020; the 0029
     // remote logon RSYST-BCODE paints 0x62 — a recorded session
@@ -659,7 +679,9 @@ extension SapSessionFields on SapSession {
       }
       for (final s in rest) {
         final f = m.fields.where((f) => _sameField(f, s.field)).firstOrNull;
-        if (f != null && f.kind == FieldKind.input && !f.isProtected) {
+        if (f != null &&
+            (f.kind == FieldKind.input || f.kind == FieldKind.checkbox) &&
+            !f.isProtected) {
           _staged.add(StagedField(f, s.text));
         } else {
           _trace('staged field ${s.field.name} dropped (not repainted)');

@@ -589,6 +589,11 @@ Uint8List treeEventXml({
   return Uint8List.fromList(b.toString().codeUnits);
 }
 
+/// The OK code that dispatches CFW control event [eventId] of [shell]:
+/// `%_GC <shell> <event id>`.
+String cfwGenericEventOkcode(String shell, int eventId) =>
+    '%_GC $shell $eventId';
+
 /// A tree control event round (the engine's RawDiag.tree_click, oracle
 /// a recorded session gui[11]/[14]): the okcode is `%_GC <shell> <eventId>`,
 /// the node rides the type-17 XML, and 16/9/18 names the shell. In the
@@ -606,7 +611,7 @@ List<Uint8List> treeEventItems(
     stepItem(ctx.step),
     _sesItem(ctx, withKey: false),
     okCodepageItem,
-    buildApplItem(12, 4, wireText('%_GC $shell $eventId')),
+    buildApplItem(12, 4, wireText(cfwGenericEventOkcode(shell, eventId))),
     ..._commonTail(ctx),
     if (eventId == treeEventExpandNoChildren) ...[
       buildApplItem(4, 36, _treeExpand436),
@@ -750,11 +755,44 @@ class FieldWrite {
       this.dlg2 = 0,
       this.attr,
       this.routing})
-      : text = rawText.trimRight().isEmpty ? ' ' : rawText.trimRight();
+      : text = rawText.trimRight().isEmpty ? ' ' : rawText.trimRight(),
+        checkbox = false,
+        labelWidth = 0;
+
+  /// The tick / untick of ONE dynpro checkbox (the TcCellWrite `checkbox`
+  /// precedent of a table-control cell): its segment carries the etype-128
+  /// value atom ([checkboxValueAtom]) in place of a text atom — [text] is
+  /// the state `X` / blank, [labelWidth] and the dlg flags the PAINTED
+  /// ones, echoed. A checkbox write contributes no characters to the
+  /// round's focus offset nor to the OK cursor column (a recorded session
+  /// gui[38]: 16/9/11 offset 0 on the ticked INPLACE).
+  FieldWrite.checkbox(this.row, this.col, bool on,
+      {this.area = 0,
+      this.block = 1,
+      this.group = 0,
+      this.dlg1 = 0,
+      this.dlg2 = 0,
+      this.labelWidth = 0,
+      this.routing})
+      : text = on ? 'X' : ' ',
+        checkbox = true,
+        mx = null,
+        mlen = null,
+        attr = null;
   final int row, col, area, block, group, dlg1, dlg2;
   final int? mx, mlen, attr;
   final FieldRouting? routing;
   final String text;
+
+  /// A checkbox tick ([FieldWrite.checkbox]) rather than a typed value.
+  final bool checkbox;
+
+  /// A checkbox's painted visible label length (its atom's bytes 14-15).
+  final int labelWidth;
+
+  /// The characters the round's focus / OK cursor advances past this
+  /// write: a typed value's length, nothing for a checkbox.
+  int get chars => checkbox ? 0 : text.length;
 
   /// The container plane's identity: writes of one plane share a segment.
   String get planeKey {
@@ -790,13 +828,29 @@ Uint8List buttonEventSource(int row, int col, List<int> path) {
   ]);
 }
 
-/// The Java 16/15/1 of a click on a dynpro RADIO with a function code:
-/// BUTTONPRESSED (0x09) on control type 2 (RADIOBUTTON) at the radio's
-/// cell and container [path] — [buttonEventSource]'s layout (the Java
-/// oracle se39 gui[21]); the Windows GUI sends STATECHANGED 0x0b
-/// (frontend_profile.windowsActionItems).
+/// The Java 16/15/1 of a click on a dynpro CHOICE element with a function
+/// code: BUTTONPRESSED (0x09) on [controlType] — 2 RADIOBUTTON
+/// ([radioElementKind]), 3 CHECKBUTTON ([checkboxElementKind]; pysap
+/// SAPDiagUIEventSource control_type, the reference client's RADIO_ELEMENT_KIND /
+/// CHECKBOX_ELEMENT_KIND) — at the element's cell and container [path]:
+/// [buttonEventSource]'s layout (the Java oracle se39 gui[21]); the
+/// Windows GUI sends STATECHANGED 0x0b (frontend_profile
+/// .windowsActionItems).
+Uint8List choiceEventSource(int row, int col, List<int> path,
+        {required int controlType}) =>
+    buttonEventSource(row, col, path)..[4] = controlType & 0xff;
+
+/// The UI-event control type of a dynpro radio button (a recorded session
+/// radio_wingui gui[5]) and of a checkbox (the radio's rule applied to its
+/// twin: no Windows checkbox event capture exists — reference client raw_checkbox
+/// CHECKBOX_ELEMENT_KIND).
+const int radioElementKind = 2;
+const int checkboxElementKind = 3;
+
+/// The Java 16/15/1 of a click on a dynpro RADIO with a function code
+/// ([choiceEventSource] on control type 2).
 Uint8List radioEventSource(int row, int col, List<int> path) =>
-    buttonEventSource(row, col, path)..[4] = 0x02;
+    choiceEventSource(row, col, path, controlType: radioElementKind);
 
 /// A FIELD ROUND — every changed field of the screen in ONE PAI with the
 /// action that follows (the real GUI's one event list: GuiDataMgr
@@ -816,13 +870,20 @@ Uint8List radioEventSource(int row, int col, List<int> path) =>
 /// 16/10/1, a recorded session gui 10; main + tabstrip planes in
 /// one PAI = two segments, a recorded session);
 /// the segment of the LAST write goes last;
-/// * the 16/9/11 focus on the last write (offset = its value length) or on
-/// [cursor] (offset 0), the OK cursor after it.
+/// * the 16/9/11 focus on the last write (offset = its value length, 0
+/// for a checkbox tick) or on [cursor] (offset 0), the OK cursor after
+/// it;
+/// * [eventSource]: the 16/15/1 of a CHOICE element whose own function
+/// code the round carries as [okcode] — a radio's / a checkbox's
+/// ([choiceEventSource]), in a [button]'s place — the OK event stays
+/// the field submit's 0x05 (a recorded session
+/// g13 / g32).
 List<Uint8List> fieldRoundItems(ActionContext ctx, List<FieldWrite> writes,
     {int vkey = 0,
     String? okcode,
     (int row, int col, List<int> path)? button,
-    FieldCursor? cursor}) {
+    FieldCursor? cursor,
+    Uint8List? eventSource}) {
   if (writes.isEmpty) throw ArgumentError('a field round needs a value');
   // segments by plane, first appearance, the last write's plane last
   final segs = <String, List<FieldWrite>>{};
@@ -841,7 +902,8 @@ List<Uint8List> fieldRoundItems(ActionContext ctx, List<FieldWrite> writes,
   final focusCol = cursor?.col ?? writes.last.col;
   final focusRouting = cursor != null ? cursor.routing : writes.last.routing;
   final focusArea = cursor?.area ?? writes.last.area;
-  final focusText = cursor != null ? '' : writes.last.text;
+  final focusText =
+      cursor != null || writes.last.checkbox ? '' : writes.last.text;
   final chars = focusText.length;
   final path = focusRouting?.path ?? [focusArea & 0xff];
   final focus = Uint8List(9 + path.length);
@@ -878,7 +940,9 @@ List<Uint8List> fieldRoundItems(ActionContext ctx, List<FieldWrite> writes,
     for (final k in order) ..._segment(segs[k]!, c1010),
     // a keyed round's 16/15/1 is the re-spelling's (windowsActionItems)
     if (button != null)
-      buildApplItem(15, 1, buttonEventSource(button.$1, button.$2, button.$3)),
+      buildApplItem(15, 1, buttonEventSource(button.$1, button.$2, button.$3))
+    else if (eventSource != null)
+      buildApplItem(15, 1, eventSource),
     buildApplItem(9, 11, focus),
     xml17Item(),
     eomBytes,
@@ -891,17 +955,7 @@ List<Uint8List> _segment(List<FieldWrite> ws, Uint8List c1010) {
   final routing = ws.first.routing;
   final atoms = BytesBuilder(copy: false);
   for (final w in ws) {
-    final dlg1 =
-        (w.mx != null && w.mlen != null && w.mx! > w.mlen!) ? 4 : w.dlg1;
-    atoms.add(submitAtom(w.row, w.col, w.text,
-        area: w.area,
-        block: w.block,
-        group: w.group,
-        dlg1: dlg1,
-        dlg2: w.dlg2,
-        mx: w.mx,
-        mlen: w.mlen,
-        attr: w.attr));
+    atoms.add(fieldWriteAtom(w));
   }
   return [
     if (routing == null)
@@ -919,6 +973,30 @@ List<Uint8List> _segment(List<FieldWrite> ws, Uint8List c1010) {
 }
 
 int t_byteLen(String text) => wireText(text).length;
+
+/// The value atom of one field write: a typed value's etype-130 atom
+/// ([submitAtom]; a scrollable field's dlg flag 4 when its maxnrchars
+/// exceeds its mlen), a checkbox tick's etype-128 one
+/// ([checkboxValueAtom] — a recorded session gui[38]: a listbox atom and
+/// the INPLACE tick in ONE 16/9/2).
+Uint8List fieldWriteAtom(FieldWrite w) {
+  if (w.checkbox) {
+    return checkboxValueAtom(w.area, w.block, w.group, w.row, w.col,
+        w.text == 'X',
+        labelWidth: w.labelWidth, dlg1: w.dlg1, dlg2: w.dlg2);
+  }
+  final dlg1 =
+      (w.mx != null && w.mlen != null && w.mx! > w.mlen!) ? 4 : w.dlg1;
+  return submitAtom(w.row, w.col, w.text,
+      area: w.area,
+      block: w.block,
+      group: w.group,
+      dlg1: dlg1,
+      dlg2: w.dlg2,
+      mx: w.mx,
+      mlen: w.mlen,
+      attr: w.attr);
+}
 
 /// A radio-group selection PAI: the etype-129 value atoms for the CHANGED
 /// members of the group only — the pick turned on, the previously-on sibling
@@ -980,6 +1058,36 @@ List<Uint8List> radioSelectItems(
     xml17Item(),
     eomBytes,
   ];
+}
+
+/// A CHECKBOX tick / untick PAI — the radio pick's twin ([radioSelectItems])
+/// on the ONE changed box: its etype-128 value atom ([write], a
+/// [FieldWrite.checkbox]) rides the routed field-write envelope with the
+/// typed values [staged] before it ([fieldRoundItems]: one 16/9/2 per plane,
+/// the focus on the box at offset 0 — a recorded session gui[38], the real
+/// Windows GUI's Enter over a listbox pick and the INPLACE tick). [fcode] =
+/// the box's own function code when it has one (the click then fires PAI as
+/// its element event: 16/12/4 + the CHECKBUTTON source, the radio's
+/// `=TOGGLE` shape); [vkey] = the key the tick rides (0 = Enter).
+List<Uint8List> checkboxSelectItems(
+  ActionContext ctx,
+  FieldWrite write, {
+  List<FieldWrite> staged = const [],
+  String? fcode,
+  int vkey = 0,
+}) {
+  if (!write.checkbox) throw ArgumentError('a checkbox write is needed');
+  return fieldRoundItems(
+    ctx,
+    [...staged, write],
+    vkey: vkey,
+    okcode: fcode,
+    eventSource: fcode == null
+        ? null
+        : choiceEventSource(
+            write.row, write.col, write.routing?.path ?? [write.area & 0xff],
+            controlType: checkboxElementKind),
+  );
 }
 
 /// The painted dynpro pushbutton of [screen] whose function code is [cmd]

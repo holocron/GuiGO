@@ -174,6 +174,14 @@ class RawInflate {
   bool _pooled = false;
   bool _inPool = false;
 
+  // the native input buffer [pushParts] copies into, kept across calls (a
+  // pooled inflater serves every `03 05` cell and frame: no malloc + free
+  // per push) and grown on demand up to [_keptInputCap]; a larger input
+  // takes a one-off buffer, so an idle pooled inflater never pins MBs
+  Pointer<Uint8> _inBuf = nullptr;
+  int _inCap = 0;
+  static const int _keptInputCap = 1 << 16;
+
   // the library resolves FIRST: an unavailable zlib throws before any
   // native allocation (nothing to leak)
   RawInflate({int windowBits = -15, Uint8List? dictionary})
@@ -345,7 +353,17 @@ class RawInflate {
     }
     if (total == 0) return zOk;
     final z = _z;
-    final inBuf = malloc<Uint8>(total);
+    final kept = total <= _keptInputCap;
+    if (kept && _inCap < total) {
+      if (_inCap > 0) malloc.free(_inBuf);
+      var cap = 4096;
+      while (cap < total) {
+        cap <<= 1;
+      }
+      _inBuf = malloc<Uint8>(cap);
+      _inCap = cap;
+    }
+    final inBuf = kept ? _inBuf : malloc<Uint8>(total);
     final inView = inBuf.asTypedList(total);
     var at = 0;
     for (final p in parts) {
@@ -393,7 +411,9 @@ class RawInflate {
       }
       return status;
     } finally {
-      malloc.free(inBuf);
+      // zlib keeps no hold on the input past the call: the next push
+      // re-points next_in (a stream that ended or failed takes none)
+      if (!kept) malloc.free(inBuf);
     }
   }
 
@@ -408,6 +428,11 @@ class RawInflate {
     _z.inflateEnd(_strm);
     calloc.free(_strm);
     malloc.free(_outBuf);
+    if (_inCap > 0) {
+      malloc.free(_inBuf);
+      _inBuf = nullptr;
+      _inCap = 0;
+    }
   }
 }
 

@@ -315,6 +315,33 @@ class _SapGraphViewState extends State<SapGraphView> {
   /// What a node not being dragged listens to: never notifies.
   final _still = ValueNotifier<Offset?>(null);
 
+  /// The viewer's viewport and its child (the surface with its margin) as
+  /// last laid out: the bounds of a one-finger pan.
+  Size _viewport = Size.zero;
+  Size _child = Size.zero;
+
+  /// A one-finger pan of the canvas by [delta] (scene units: the detector
+  /// sits inside the viewer's transform): the viewer's matrix moves, kept
+  /// inside the bounds its own pans honour (the child plus the pan
+  /// margin), so a pan cannot lose the graph. Nothing of the graph
+  /// rebuilds, only the viewer's subtree.
+  void _pan(Offset delta) {
+    if (_dragging != null || _linkFrom != null) return;
+    final m = _tc.value.clone()..translateByDouble(delta.dx, delta.dy, 0, 1);
+    final v = _viewport, c = _child;
+    if (v.isFinite && !v.isEmpty) {
+      final s = m.getMaxScaleOnAxis();
+      final t = m.getTranslation();
+      final lo = Offset(v.width - (c.width + _panMargin) * s,
+          v.height - (c.height + _panMargin) * s);
+      const hi = Offset(_panMargin, _panMargin);
+      final tx = lo.dx <= hi.dx * s ? t.x.clamp(lo.dx, hi.dx * s) : t.x;
+      final ty = lo.dy <= hi.dy * s ? t.y.clamp(lo.dy, hi.dy * s) : t.y;
+      m.setTranslationRaw(tx, ty, t.z);
+    }
+    _tc.value = m;
+  }
+
   /// The rubber band's loose end while a link gesture is in flight
   /// (surface coordinates), likewise repainted without a rebuild.
   final _linkEnd = ValueNotifier<Offset?>(null);
@@ -704,6 +731,8 @@ class _SapGraphViewState extends State<SapGraphView> {
                 );
                 _tc.value = Matrix4.identity()..scaleByDouble(fit, fit, 1, 1);
               }
+              _viewport = cons.biggest;
+              _child = Size(size.width + 2 * margin, size.height + 2 * margin);
               return ClipRect(
                 child: InteractiveViewer(
                   transformationController: _tc,
@@ -711,11 +740,31 @@ class _SapGraphViewState extends State<SapGraphView> {
                   boundaryMargin: const EdgeInsets.all(_panMargin),
                   minScale: 0.2,
                   maxScale: 3,
-                  // node drags and link gestures own the pointer while active
+                  // node drags and link gestures own the pointer while
+                  // active (the viewer's trackpad pan stays)
                   panEnabled: _dragging == null && _linkFrom == null,
-                  child: Padding(
-                    padding: const EdgeInsets.all(margin),
-                    child: surface,
+                  // the whole child, opaque: the empty surface and a node
+                  // without a drag of its own (a table the host does not
+                  // let move) pan the canvas at the touch slop — deeper
+                  // than a hosting form's scroll view, which took every
+                  // vertical pan from the viewer's own (pan slop)
+                  // recognizer; node drags and links, deeper still and at
+                  // the same slop, keep winning
+                  child: RawGestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    gestures: <Type, GestureRecognizerFactory>{
+                      _CanvasPanRecognizer: GestureRecognizerFactoryWithHandlers<
+                          _CanvasPanRecognizer>(
+                        () => _CanvasPanRecognizer(debugOwner: this),
+                        (r) => r
+                          ..dragStartBehavior = DragStartBehavior.down
+                          ..onUpdate = (d) => _pan(d.delta),
+                      ),
+                    },
+                    child: Padding(
+                      padding: const EdgeInsets.all(margin),
+                      child: surface,
+                    ),
                   ),
                 ),
               );
@@ -727,16 +776,18 @@ class _SapGraphViewState extends State<SapGraphView> {
   }
 }
 
-/// A node's drag: accepted after the TOUCH slop (18 pt), not the pan slop
-/// (36 pt) a plain [PanGestureRecognizer] waits for. The canvas sits in
-/// zoomable / scrollable parents — the graph's own and the composed
-/// window's InteractiveViewer (scale recognizers, accepting after the pan
-/// slop) and the window's SingleChildScrollView (a vertical drag, after
-/// the touch slop): with the pan slop a vertical drag from a node went to
-/// the scroll view. At the touch slop the node, deepest in the hit path
-/// and so first to see each move, claims the drag before any of them.
-class _NodeDragRecognizer extends PanGestureRecognizer {
-  _NodeDragRecognizer({super.debugOwner});
+/// A drag accepted after the TOUCH slop (18 pt), not the pan slop (36 pt)
+/// a plain [PanGestureRecognizer] waits for: a node's drag, the canvas'
+/// pan. The canvas sits in zoomable / scrollable parents — the graph's
+/// own and the composed window's InteractiveViewer (scale recognizers,
+/// accepting after the pan slop) and the window's / the dynpro's scroll
+/// view (a vertical drag, after the touch slop): with the pan slop a
+/// vertical drag from a node went to the scroll view. At the touch slop
+/// the node, deepest in the hit path and so first to see each move,
+/// claims the drag before any of them; the canvas, next, before the
+/// scroll view.
+class _TouchSlopDragRecognizer extends PanGestureRecognizer {
+  _TouchSlopDragRecognizer({super.debugOwner});
 
   @override
   bool hasSufficientGlobalDistanceToAccept(
@@ -745,6 +796,40 @@ class _NodeDragRecognizer extends PanGestureRecognizer {
   ) =>
       globalDistanceMoved.abs() >
       computeHitSlop(pointerDeviceKind, gestureSettings);
+}
+
+/// The canvas' one-finger pan. A second finger is a pinch and is left to
+/// the viewer's scale recognizer: a drag recognizer tracks every pointer
+/// and, once accepted, claims the next finger at once — so a pinch puts
+/// both fingers down before the first travels 18 pt; one started after
+/// that goes on as a pan.
+class _CanvasPanRecognizer extends _TouchSlopDragRecognizer {
+  _CanvasPanRecognizer({super.debugOwner});
+
+  int _fingers = 0;
+  bool _accepted = false;
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    if (++_fingers > 1) {
+      if (!_accepted) resolve(GestureDisposition.rejected);
+      return;
+    }
+    super.addAllowedPointer(event);
+  }
+
+  @override
+  void acceptGesture(int pointer) {
+    _accepted = true;
+    super.acceptGesture(pointer);
+  }
+
+  @override
+  void didStopTrackingLastPointer(int pointer) {
+    _fingers = 0;
+    _accepted = false;
+    super.didStopTrackingLastPointer(pointer);
+  }
 }
 
 class _NodeBox extends StatelessWidget {
@@ -806,9 +891,9 @@ class _NodeBox extends StatelessWidget {
               },
             ),
       if (onPanStart != null || onPanUpdate != null || onPanEnd != null)
-        _NodeDragRecognizer:
-            GestureRecognizerFactoryWithHandlers<_NodeDragRecognizer>(
-              () => _NodeDragRecognizer(debugOwner: this),
+        _TouchSlopDragRecognizer:
+            GestureRecognizerFactoryWithHandlers<_TouchSlopDragRecognizer>(
+              () => _TouchSlopDragRecognizer(debugOwner: this),
               (r) => r
                 // the node follows the finger from where it touched down:
                 // with the default (start after the slop) the slop's

@@ -51,9 +51,11 @@ Color statCurveColor(StatCurve c, int i) =>
 /// The classic BUSINESS (GRAPH_2D / GRAPH_3D / GRAPH_MATRIX_*) or
 /// STATISTICS (STAT_GRAPH) graphic of an inline GRAPH stream as the screen
 /// body: what the real SAP GUI for Windows opens in a graphics window of
-/// its own. "Légende" and "Options globales" are local: the real GUI's
-/// legend toggle leaves no wire trace (a recorded session
-/// — the only client message is the close, `D E0`).
+/// its own. "Legend" and "Global options" are local — the real GUI for
+/// Windows' own graphics-window buttons ("Légende" / "Options globales"
+/// on the FR capture): the legend toggle leaves no wire trace
+/// (a recorded session — the only client message is the
+/// close, `D E0`).
 class SapBasisGraphicView extends StatefulWidget {
   const SapBasisGraphicView({super.key, required this.graphic});
 
@@ -63,6 +65,11 @@ class SapBasisGraphicView extends StatefulWidget {
   State<SapBasisGraphicView> createState() => _SapBasisGraphicViewState();
 }
 
+/// One series list per graphic: a rebuild with the same graphic (a server
+/// turn that leaves the screen as it was) hands SapChartView's painters the
+/// same list, and their shouldRepaint holds (the sap_chart_xy idiom).
+final _busgSeries = Expando<List<ChartSeriesData>>('busg series');
+
 class _SapBasisGraphicViewState extends State<SapBasisGraphicView> {
   bool _legend = false;
 
@@ -71,11 +78,11 @@ class _SapBasisGraphicViewState extends State<SapBasisGraphicView> {
     showDialog<void>(
       context: context,
       builder: (c) => AlertDialog(
-        title: const Text('Options globales'),
+        title: const Text('Global options'),
         content: SizedBox(
           width: 360,
           child: o.isEmpty
-              ? const Text('(aucune option)')
+              ? const Text('(no options)')
               : ListView(
                   shrinkWrap: true,
                   children: [
@@ -113,13 +120,13 @@ class _SapBasisGraphicViewState extends State<SapBasisGraphicView> {
               OutlinedButton(
                 key: const ValueKey('basis-graphic-options'),
                 onPressed: _showOptions,
-                child: const Text('Options globales'),
+                child: const Text('Global options'),
               ),
               const SizedBox(width: 8),
               OutlinedButton(
                 key: const ValueKey('basis-graphic-legend'),
                 onPressed: () => setState(() => _legend = !_legend),
-                child: const Text('Légende'),
+                child: const Text('Legend'),
               ),
             ],
           ),
@@ -188,7 +195,7 @@ class _SapBasisGraphicViewState extends State<SapBasisGraphicView> {
         type: type,
         title: title,
         categories: g.categories,
-        series: [
+        series: _busgSeries[g] ??= [
           for (final (i, s) in g.values.indexed)
             ChartSeriesData(
                 i < g.seriesLabels.length ? g.seriesLabels[i] : '${i + 1}', s),

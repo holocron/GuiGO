@@ -79,16 +79,53 @@ extension SapSessionEditor on SapSession {
   /// view rides the first round instead. Null when nothing changed or
   /// outside the Windows dialect. A call that registers cached props
   /// itself is answered with the registration's report
-  /// ([_editorCreationAnswer]) when it creates an ABAP editor, else by the
-  /// responder (null).
+  /// ([_editorCreationAnswer]) when it creates an ABAP editor, else with
+  /// the responder's — and the editors' moved props ahead of it: SE38's
+  /// check (Ctrl+F2) creates the error list (a docking container and a
+  /// grid registering their props) and `SetSelectionPosInLine(1, 1)` +
+  /// `FirstVisibleLine(=1)` on the editor in one queue, answered with the
+  /// editor's moved caret and view AND the new controls' state
+  /// (a recorded session s[38] -> g[31],
+  /// a recorded session s[43] -> g[35], s[52] -> g[44]);
+  /// unreported, the next round flushed them again (g[36]: only
+  /// `LastVisibleLine 29`).
   Uint8List? _editorFlushReport(FlushCall call, Set<String> touched) {
     if (answerDialect != GuiDialect.windows) return null;
-    if (call.cachedProps.isNotEmpty) return _editorCreationAnswer(call);
+    if (call.cachedProps.isNotEmpty) {
+      final creation = _editorCreationAnswer(call);
+      if (creation != null) return creation;
+      final moved = _editorMovedReports(touched);
+      if (moved.isEmpty) return null;
+      _traceEditorReports(moved);
+      return controlXml(
+        _ea,
+        call,
+        call.cachedProps,
+        leading: [for (final r in moved) (r.shell, r.props)],
+      );
+    }
     // a tree fill's TopNodeKey rides the same report (sap_session_tree.dart)
-    final reports = _treeTopNodeReports(call).toList();
-    if (touched.isEmpty && reports.isEmpty) return null;
+    final reports = [
+      ..._treeTopNodeReports(call),
+      ..._editorMovedReports(touched),
+    ];
+    if (reports.isEmpty) return null;
+    reports.sort(
+      (a, b) =>
+          (int.tryParse(a.shell) ?? 0).compareTo(int.tryParse(b.shell) ?? 0),
+    );
+    _traceEditorReports(reports);
+    return wireText('${windowsControlsXml(reports)}\u0000');
+  }
+
+  /// The ABAP editors of [touched] whose cached props the server does not
+  /// hold since the call ([_editorFlushReport]), each with those props —
+  /// recorded as reported.
+  List<ControlReport> _editorMovedReports(Set<String> touched) {
+    if (touched.isEmpty) return const [];
     final t = _editorTracker;
     final reg = _layoutState.registry;
+    final out = <ControlReport>[];
     final shells = touched.toList()
       ..sort((a, b) => (int.tryParse(a) ?? 0).compareTo(int.tryParse(b) ?? 0));
     for (final sh in shells) {
@@ -110,19 +147,15 @@ extension SapSessionEditor on SapSession {
       ];
       if (props.isEmpty) continue;
       _noteEditorFlushed(e, props);
-      reports.add(ControlReport(sh, props: props));
+      out.add(ControlReport(sh, props: props));
     }
-    if (reports.isEmpty) return null;
-    reports.sort(
-      (a, b) =>
-          (int.tryParse(a.shell) ?? 0).compareTo(int.tryParse(b.shell) ?? 0),
-    );
-    _trace(
-      'flush answer reports '
-      '${[for (final r in reports) '${r.shell} ${r.props.map((p) => p.$1).join('/')}'].join(', ')}',
-    );
-    return wireText('${windowsControlsXml(reports)}\u0000');
+    return out;
   }
+
+  void _traceEditorReports(List<ControlReport> reports) => _trace(
+    'flush answer reports '
+    '${[for (final r in reports) '${r.shell} ${r.props.map((p) => p.$1).join('/')}'].join(', ')}',
+  );
 
   /// Bind the editors loaded without a linked container to the screen a
   /// paint names.
@@ -477,11 +510,12 @@ extension SapSessionEditor on SapSession {
     );
   }
 
-  /// The client values of [e]'s view / caret / line-count cached props, in
-  /// the OCX's flush order (a recorded session gui[21],
-  /// a recorded session g[55]; the whole order with LineCount,
-  /// TextModified and Version: a recorded session
-  /// g[10], the creation's answer).
+  /// The client values of [e]'s view / caret / line-count / edit cached
+  /// props, in the OCX's flush order (a recorded session
+  /// gui[21], a recorded session g[55]; the whole order with
+  /// LineCount, TextModified and Version: a recorded session
+  /// scrolled g[10], the creation's answer, and the edited editor's F11
+  /// round, a recorded session g[41]).
   List<(String, String)> _editorClientProps(SapTextEditor e) {
     final first = _editorFirstVisible(e);
     final last = _editorLastVisible(e, first);
@@ -492,9 +526,139 @@ extension SapSessionEditor on SapSession {
       ('LineCount', '${e.lines.isEmpty ? 1 : e.lines.length}'),
       ('SelPosEndLine', '${e.selEndLine ?? line}'),
       ('LastVisibleLine', '$last'),
+      ('TextModified', e.textModified ? '1' : '0'),
       ('SelPosStartLine', '$line'),
+      ('Version', '${e.version}'),
       ('SelPosEndCol', '${e.selEndCol ?? col}'),
     ];
+  }
+
+  /// Whether the user may edit [e] in GuiGo: an ABAP editor of the SAP GUI
+  /// for Windows dialect, live, its document loaded and not read-only (the
+  /// server's `SetCurrentDocReadOnly(0)`: change mode). The rest stays
+  /// display-only — a document the server set read-only, and the TextEdit
+  /// control, whose edited state (TextModified, SelIndex*) GuiGo does not
+  /// report: an edit the server never hears of is never pulled, never saved.
+  bool editorEditable(SapTextEditor e) =>
+      answerDialect == GuiDialect.windows &&
+      e.kind == 'ab4' &&
+      !e.readOnly &&
+      _editorTracker[e.shell] == e &&
+      _editorTracker.loaded.contains(e.shell) &&
+      _isLiveEditor(e.shell);
+
+  /// The user's edit of the ABAP editor [e]: its text is now [lines] (one
+  /// entry per line, no line breaks inside — a CR / LF splits the entry),
+  /// the caret at ([caretLine], [caretCol]), 1-based, the selection
+  /// collapsed. Sends nothing, as the real GUI sends nothing while the user
+  /// types (a recorded session: no traffic between the paint
+  /// and the `=CHECK` round): the control's cached props move — TextModified
+  /// 1, LineCount, the caret, Version + [undoSteps] — the undo steps the
+  /// edit opens: 1 for a [newUndoStep] (a Return, a typed character, a
+  /// Delete: a recorded session g[41] 307 -> 308,
+  /// a recorded session g[77] `ab` +2, g[53] three
+  /// Deletes +3; a Return and a line put in one go are Version 2:
+  /// a recorded session g[41], ab4_editor_save g[22] / g[27] /
+  /// g[85]), 0 when [newUndoStep] is false, a paste's
+  /// [ab4InsertUndoSteps] (ab4_editor_save g[32] 4 -> 307, _long g[27]
+  /// 2 -> 8) — and ride
+  /// the NEXT round of any kind ([_pendingEditorControls]): the F11 /
+  /// Ctrl+S that saves (g[41]), a check (`=CHECK`, smartforms gui[35];
+  /// Ctrl+F2, ab4_editor_save_paste g[32]). With TextModified 1 the server
+  /// pulls the text in that round's PAI (`SaveDocToDP` + the sink's DP_GET,
+  /// wda srv[46] / srv[47]), answered from these lines
+  /// ([abapSourcePullAnswer]).
+  ///
+  /// Refused — a [StateError], [e] untouched — when [editorEditable] does
+  /// not hold: a read-only document (display mode: `SetCurrentDocReadOnly
+  /// (1)`), a TextEdit control, a destroyed editor, the Java dialect.
+  void editEditorText(
+    SapTextEditor e,
+    List<String> lines, {
+    required int caretLine,
+    required int caretCol,
+    bool newUndoStep = true,
+    int? undoSteps,
+  }) {
+    if (!editorEditable(e)) {
+      throw StateError(
+        e.readOnly
+            ? 'editor ${e.shell} is read-only (display mode)'
+            : 'editor ${e.shell} (${e.kind}) takes no edit in GuiGo',
+      );
+    }
+    // per keystroke over the whole document: a line without a break (all
+    // but a pasted / Return-split one) is taken as it is, no regex split
+    final doc = <String>[];
+    for (final l in lines) {
+      if (l.contains('\n') || l.contains('\r')) {
+        doc.addAll(l.split(_editLineBreakRx));
+      } else {
+        doc.add(l);
+      }
+    }
+    final n = doc.isEmpty ? 1 : doc.length;
+    final line = caretLine.clamp(1, n);
+    final len = doc.isEmpty ? 0 : doc[line - 1].length;
+    final asked = undoSteps ?? (newUndoStep ? 1 : 0);
+    final steps = asked < 0 ? 0 : asked;
+    e
+      ..lines = doc
+      ..textModified = true
+      // the first edit of a loaded document opens a step whatever it is
+      ..version = e.version + (steps < 1 && e.version == 0 ? 1 : steps);
+    _noteEditorCursor(e, line, caretCol.clamp(1, len + 1));
+    _trace(
+      'editor ${e.shell} edited: ${doc.length} line(s), caret '
+      '${e.cursorLine}/${e.cursorCol}, version ${e.version}',
+    );
+  }
+
+  /// The answer to the server's pull of an editor document sink
+  /// ([SapTextEditorTracker.docSinks]: a `SaveDocToDP` + `SaveDataToUrl`
+  /// pair, a recorded session srv[46]) — the request [request] of
+  /// sink [url]: the editor's lines as the OCX's ABAP_SOURCE document
+  /// ([abapSourcePullAnswer], g[44]). Null when [url] is no editor
+  /// document's sink. The sink is taken: the next save names a new one
+  /// (the smartforms CHECK pulls twice, `…E140000` then `…E142000`).
+  Uint8List? _editorDocPullAnswer(String url, Uint8List request) {
+    final t = _editorTracker;
+    final sh = t.docSinks.remove(url);
+    final e = sh == null ? null : t[sh];
+    if (e == null) return null;
+    _trace(
+      'editor ${e.shell} document pulled ($url, ${e.lines.length} line(s)'
+      '${e.textModified ? ', modified' : ''})',
+    );
+    return abapSourcePullAnswer(request, e.lines);
+  }
+
+  /// The answer to the server's read-back of a TextEdit's text through
+  /// [sink] (`AssignProperty2(<editor>, TextAsR3Table, <obj>, data)` +
+  /// `SaveDataToUrl`, a recorded session srv[31]) — the SAP GUI
+  /// for Java's X-R3ABAP records of the editor's lines ([r3AbapPullAnswer],
+  /// gui[22]); null for another property, an object that is no TextEdit,
+  /// or the Windows dialect, whose TextEdit OCX answer no capture shows
+  /// (the pull keeps the client table's default answer there).
+  Uint8List? _textEditPullAnswer(PropertySink sink, Uint8List request) {
+    if (answerDialect != GuiDialect.java || sink.prop != 'TextAsR3Table') {
+      return null;
+    }
+    final t = _editorTracker;
+    var sh = t.shell(sink.source, (h) => _ea.shellAlias[h]);
+    // a replayed recording keeps the recording client's handles: the one
+    // live TextEdit on screen
+    if (sh == null) {
+      final live = [
+        for (final e in editors)
+          if (e.kind == 'textedit' && _isLiveEditor(e.shell)) e.shell,
+      ];
+      if (live.length == 1) sh = live.single;
+    }
+    final e = sh == null ? null : t[sh];
+    if (e == null || e.kind != 'textedit') return null;
+    _trace('textedit ${e.shell} text read back (${e.lines.length} line(s))');
+    return r3AbapPullAnswer(request, e.lines);
   }
 
   /// The CONTROLS a round on [e] owes: per shell, ascending, the cached
@@ -905,6 +1069,11 @@ extension SapSessionEditor on SapSession {
     final meta = verbMeta(call);
     for (var i = 1; i <= call.verbs.length; i++) {
       final verb = call.verbs[i - 1];
+      if (verb == 'GetMarker') {
+        final at = _editorMarkerAnswer(call, i, meta[i - 1]);
+        if (at != null) out[at.$1] = at.$2;
+        continue;
+      }
       if (!_editorGetters.contains(verb)) continue;
       final m = meta[i - 1];
       final res = int.tryParse(m.result?.trim() ?? '');
@@ -930,13 +1099,44 @@ extension SapSessionEditor on SapSession {
         'SelPosEndLine' => e.selEndLine ?? line,
         'SelPosEndCol' => e.selEndCol ?? col,
         'LineCount' => e.lines.length,
-        _ => 0, // TextModified, Version
+        // the edit state: 0 / 0 for the unedited document
+        // (a recorded session srv[43] -> gui[40] `0` after the
+        // reload), 1 once the user edited it
+        'TextModified' => e.textModified ? 1 : 0,
+        'Version' => e.version,
+        _ => 0,
       };
       // the server holds the answered value now: no later flush owes it
       _noteEditorFlushed(e, [(verb, '$value')]);
       out[res - 1] = Uint8List.fromList('$value'.codeUnits);
     }
     return out;
+  }
+
+  /// `GetMarker(<kind>)` (verb [i] of [call]): the lines of the editor
+  /// carrying that marker kind as the server set them, ascending, comma
+  /// separated (`12,40`; blank for none) — CL_GUI_SOURCEEDIT=>GET_MARKER
+  /// SPLITs it AT ',' into a table of integers. SE38's activation reads the
+  /// session (2) and external (4) breakpoints back to re-set them on the
+  /// saved source (CL_WB_EDITOR=>RESTORE_BREAKPOINTS_AFTER_SAVE). A leading
+  /// comma — the SetMarker argument's shape — would read as line 0.
+  (int, Uint8List)? _editorMarkerAnswer(FlushCall call, int i, VerbMeta m) {
+    final res = int.tryParse(m.result?.trim() ?? '');
+    if (res == null || res < 1) return null;
+    final kind = int.tryParse(
+      verbArgText(call, i, '#1')?.trim() ?? '',
+    );
+    final t = _editorTracker;
+    final sh = t.editorOfHandle(
+      m.objValue,
+      shellOf: (h) => _ea.shellAlias[h],
+      isLive: _isLiveEditor,
+    );
+    final e = sh == null ? null : t[sh];
+    final lines = kind == null || e == null
+        ? const <int>[]
+        : ([...?e.markers[kind]]..sort());
+    return (res - 1, Uint8List.fromList(lines.join(',').codeUnits));
   }
 
   /// shell -> line count of every live editor with a delivered body (the
@@ -962,15 +1162,24 @@ const Set<String> _editorGetters = {
 };
 
 /// The ABAP editor's cached props a server METHOD moves on the client (the
-/// caret by `SetSelectionPosInLine`, the line count by a document load):
-/// what a flush's answer reports ([SapSessionEditor._editorFlushReport]).
+/// caret by `SetSelectionPosInLine`, the line count by a document load, the
+/// edit state by `SetSavePoint` / a reload): what a flush's answer reports
+/// ([SapSessionEditor._editorFlushReport]; a recorded session g[45]
+/// `TextModified 0` after SetSavePoint(0), g[51] `Version 0` after the
+/// reload).
 const Set<String> _methodMovedProps = {
   'SelPosStartCol',
   'LineCount',
   'SelPosEndLine',
   'SelPosStartLine',
   'SelPosEndCol',
+  'TextModified',
+  'Version',
 };
+
+/// The line breaks an edited line is split at ([SapSessionEditor.
+/// editEditorText]).
+final RegExp _editLineBreakRx = RegExp('\r\n|\r|\n');
 
 final Expando<SapTextEditorTracker> _editorTrackers = Expando('editorTracker');
 

@@ -33,11 +33,12 @@ extension SapSessionBarCharts on SapSession {
     ];
     final inline = s?.inlineGraph;
     if (inline != null && inline.complete) {
-      final bytes = inline.bytes;
-      if (inline.interface == 'BARC' || isInlineBarChart(bytes)) {
-        final m = parseBarChartInline(bytes, codepage: inline.codepage);
-        if (m != null) out.add(m);
-      }
+      // parsed once per stream object (a stream is never changed — a
+      // continuation builds a new one): the app reads [barCharts] per build
+      final m = (_inlineBarCharts[inline] ??=
+              _InlineBarChart(_parseInlineBarChart(inline)))
+          .model;
+      if (m != null) out.add(m);
     }
     return out;
   }
@@ -76,4 +77,21 @@ extension SapSessionBarCharts on SapSession {
       _barCharts.bindUnbound(screen);
     }
   }
+}
+
+SapBarChartModel? _parseInlineBarChart(InlineGraphStream inline) {
+  final bytes = inline.bytes;
+  if (inline.interface != 'BARC' && !isInlineBarChart(bytes)) return null;
+  return parseBarChartInline(bytes, codepage: inline.codepage);
+}
+
+/// The inline bar chart of each complete [InlineGraphStream] ([SapSession
+/// BarCharts.barCharts]).
+final Expando<_InlineBarChart> _inlineBarCharts =
+    Expando('inline bar chart');
+
+/// A parsed inline bar chart, null included (an Expando holds no null).
+class _InlineBarChart {
+  const _InlineBarChart(this.model);
+  final SapBarChartModel? model;
 }

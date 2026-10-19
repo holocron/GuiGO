@@ -7,6 +7,13 @@ import 'session_busy.dart';
 /// restriction pages as tabs, each page's inputs, the search / close
 /// buttons, the server's status line and the hit list; a tapped row is the
 /// pick (the server then fills the field and tears the dialog down).
+///
+/// Over a hit list a filter field narrows the rows shown — on the client,
+/// no round: a case-insensitive substring over the shown columns (the
+/// desktop's Ctrl+F in the hit list; 500 hits are twenty phone screens).
+/// It narrows what the server delivered and no more (the status line
+/// says when more exist than the max hits: the restriction search is the
+/// way to those), and a pick still sends the row's wire index.
 class SapValueHelpView extends StatefulWidget {
   const SapValueHelpView({
     super.key,
@@ -47,6 +54,47 @@ class _SapValueHelpViewState extends State<SapValueHelpView> {
   @visibleForTesting
   int measured = 0;
 
+  /// The hit-list filter: its field, and the rows' haystacks (the shown
+  /// columns joined, lowercased) built once per result list and column
+  /// set — the dialog rebuilds every session turn, 500 x N cells are not
+  /// lowercased per build.
+  final _filter = TextEditingController();
+  List<List<String>>? _haystackRows;
+  List<int> _haystackShown = const [];
+  List<String> _haystack = const [];
+
+  List<String> _haystackOf(List<List<String>> rows, List<int> shown) {
+    if (identical(rows, _haystackRows) && _sameInts(shown, _haystackShown)) {
+      return _haystack;
+    }
+    _haystackRows = rows;
+    _haystackShown = shown;
+    return _haystack = [
+      for (final r in rows)
+        [
+          for (final i in shown)
+            if (i < r.length) r[i],
+        ].join('\u0000').toLowerCase(),
+    ];
+  }
+
+  static bool _sameInts(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  @override
+  void didUpdateWidget(SapValueHelpView old) {
+    super.didUpdateWidget(old);
+    // a new search's hits (another list): a stale filter would hide them
+    if (!identical(old.dialog.resultRows, widget.dialog.resultRows)) {
+      _filter.clear();
+    }
+  }
+
   double _measure(String text, TextStyle style, TextScaler scaler) {
     if (scaler != _measuredAt || _widths.length > 20000) {
       _widths.clear();
@@ -73,6 +121,7 @@ class _SapValueHelpViewState extends State<SapValueHelpView> {
         c.dispose();
       }
     }
+    _filter.dispose();
     super.dispose();
   }
 
@@ -248,6 +297,20 @@ class _SapValueHelpViewState extends State<SapValueHelpView> {
         if (heading.isEmpty || heading.containsKey(d.resultFields[i])) i,
     ];
     final key = d.keyColumn;
+    // the filter: the rows whose shown cells hold the typed text, as
+    // their ORIGINAL indexes (a pick sends the wire row); the widths stay
+    // the unfiltered rows' so the table does not reflow per keystroke
+    final q = _filter.text.trim().toLowerCase();
+    final all = d.resultRows;
+    final visible = q.isEmpty
+        ? [for (var i = 0; i < all.length; i++) i]
+        : () {
+            final hay = _haystackOf(all, shown);
+            return [
+              for (var i = 0; i < all.length; i++)
+                if (hay[i].contains(q)) i,
+            ];
+          }();
     const pad = 16.0 + 4; // the cell's padding and a little air
     final natural = <int, double>{
       for (final i in shown)
@@ -281,7 +344,7 @@ class _SapValueHelpViewState extends State<SapValueHelpView> {
         ),
       ),
     );
-    return LayoutBuilder(
+    final table = LayoutBuilder(
       builder: (context, box) {
         // the columns at their natural widths; spare width goes to the last
         final sum = natural.values.fold<double>(0, (a, b) => a + b);
@@ -311,32 +374,45 @@ class _SapValueHelpViewState extends State<SapValueHelpView> {
                     ),
                   ),
                   Expanded(
-                    child: ListView.builder(
-                      itemCount: d.resultRows.length,
-                      itemBuilder: (context, r) {
-                        final row = d.resultRows[r];
-                        return Material(
-                          color: r.isOdd
-                              ? theme.colorScheme.surfaceContainerLow
-                              : theme.colorScheme.surface,
-                          child: InkWell(
-                            onTap: _busy
-                                ? null
-                                : () => widget.onPick(r + 1),
-                            child: Row(
-                              children: [
-                                for (final i in shown)
-                                  cell(
-                                    i < row.length ? row[i].trimRight() : '',
-                                    widths[i]!,
-                                    style: i == key ? keyStyle : cellStyle,
-                                  ),
-                              ],
+                    child: visible.isEmpty
+                        ? Center(
+                            child: Text(
+                              'No hits match "${_filter.text.trim()}"',
+                              style: theme.textTheme.bodyMedium,
                             ),
+                          )
+                        : ListView.builder(
+                            itemCount: visible.length,
+                            itemBuilder: (context, v) {
+                              final r = visible[v];
+                              final row = all[r];
+                              return Material(
+                                // striped by the place shown, not the row
+                                color: v.isOdd
+                                    ? theme.colorScheme.surfaceContainerLow
+                                    : theme.colorScheme.surface,
+                                child: InkWell(
+                                  onTap: _busy
+                                      ? null
+                                      : () => widget.onPick(r + 1),
+                                  child: Row(
+                                    children: [
+                                      for (final i in shown)
+                                        cell(
+                                          i < row.length
+                                              ? row[i].trimRight()
+                                              : '',
+                                          widths[i]!,
+                                          style: i == key
+                                              ? keyStyle
+                                              : cellStyle,
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
                           ),
-                        );
-                      },
-                    ),
                   ),
                 ],
               ),
@@ -344,6 +420,42 @@ class _SapValueHelpViewState extends State<SapValueHelpView> {
           ),
         );
       },
+    );
+    // the filter field over the list (near the dialog's top: the soft
+    // keyboard it opens must not cover the list it narrows); on while
+    // busy, it is the client's alone
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 6, 16, 4),
+          child: TextField(
+            key: const ValueKey('f4-hit-filter'),
+            controller: _filter,
+            autocorrect: false,
+            enableSuggestions: false,
+            textInputAction: TextInputAction.done,
+            decoration: InputDecoration(
+              isDense: true,
+              border: const OutlineInputBorder(),
+              prefixIcon: const Icon(Icons.filter_list),
+              labelText: 'Filter ${all.length} hits',
+              suffixText: q.isEmpty
+                  ? null
+                  : '${visible.length} of ${all.length}',
+              suffixIcon: q.isEmpty
+                  ? null
+                  : IconButton(
+                      tooltip: 'Clear',
+                      icon: const Icon(Icons.clear),
+                      onPressed: () => setState(_filter.clear),
+                    ),
+            ),
+            onChanged: (_) => setState(() {}),
+          ),
+        ),
+        Expanded(child: table),
+      ],
     );
   }
 }

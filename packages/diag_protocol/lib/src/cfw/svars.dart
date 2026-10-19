@@ -2,6 +2,7 @@
 library;
 
 import 'dart:convert';
+import 'dart:math' show min;
 import 'dart:typed_data';
 
 import '../framing/decode_stats.dart';
@@ -87,8 +88,11 @@ String _argText(Uint8List b) {
   }
 }
 
-/// Slice a decompressed SVARS blob into fixed-width records.
+/// Slice a decompressed SVARS blob into fixed-width records — none for a
+/// non-positive [width] (a wire descriptor of 0 divided by zero, the flush
+/// went unanswered: audit 2026-10-17 P0-1).
 List<Rec> parseSvars(Uint8List b, int width) {
+  if (width <= 0) return const [];
   final n = b.length ~/ width;
   return [
     for (var i = 0; i < n; i++) Rec(i, Uint8List.sublistView(b, i * width, (i + 1) * width))
@@ -136,8 +140,13 @@ String? _nameBefore(Uint8List b, int end) {
 }
 
 /// {colname: (recwidth, reccount, blob)} for every `03 05` cell, geometry
-/// from the preceding `03 02` descriptor, blob LZH-decoded.
-Map<String, SvarsColumn> rfcColumns(Uint8List rfc, {Set<String>? only}) {
+/// from the preceding `03 02` descriptor, blob LZH-decoded. A column named
+/// in [except] is recorded with an EMPTY blob, never inflated — its
+/// presence is all the caller reads (a DP push's RFC_QUEUE, multi-MB, is
+/// inflated by the DP cache, not by every flush parse: audit
+/// 2026-10-17 N6).
+Map<String, SvarsColumn> rfcColumns(Uint8List rfc,
+    {Set<String>? only, Set<String>? except}) {
   final out = <String, SvarsColumn>{};
   final bd = rfc.buffer.asByteData(rfc.offsetInBytes, rfc.lengthInBytes);
   for (final cell in find0305Cells(rfc)) {
@@ -149,10 +158,17 @@ Map<String, SvarsColumn> rfcColumns(Uint8List rfc, {Set<String>? only}) {
         rfc[o - 12] == 0x00 && rfc[o - 11] == 0x08) {
       w = bd.getUint32(o - 10);
       c = bd.getUint32(o - 6);
+      // a zero width is no geometry (the readers fall back to the column's
+      // known record width)
+      if (w == 0) w = c = null;
     }
     String? name = w != null ? _nameBefore(rfc, o - _geomBlock) : null;
     name ??= _scanNameBack(rfc, o);
     if (only != null && !only.contains(name)) continue;
+    if (except != null && except.contains(name)) {
+      out.putIfAbsent(name ?? '', () => SvarsColumn(name, w, c, Uint8List(0)));
+      continue;
+    }
     // the u32 BE at [4:8] (parse0305Cell): a cell past 64 KB declares its
     // high half there — /AIF/IFMON's step-38 RFC_QUEUE (a recorded session
     // aif raw srv[25..32], the date navigator's 711 DayInfo pushes:
@@ -300,6 +316,10 @@ Uint8List buildReplySvars(Uint8List callsv, Map<int, Object> outValues, int widt
     {Map<int, String>? kinds, Map<int, String>? renames}) {
   final recs = parseSvars(callsv, width);
   final out = BytesBuilder(copy: false);
+  // the value field of a VARS row: everything past the 42-B header — none
+  // for a (hostile) narrower row, whose padRight/substring went negative
+  // and left the flush unanswered (audit 2026-10-17 P0-2)
+  final vw = width > 42 ? width - 42 : 0;
   for (final r in recs) {
     final isOut = r.name == '_RESULT' || r.name == '_RESULT_QUEUEONLY';
     if (width == paramsW) {
@@ -314,24 +334,19 @@ Uint8List buildReplySvars(Uint8List callsv, Map<int, Object> outValues, int widt
       if (isOut) {
         final rec = Uint8List.fromList(r.raw);
         final kd = kinds?[r.idx];
-        if (kd != null && kd.isNotEmpty) rec[41] = kd.codeUnitAt(0);
+        if (kd != null && kd.isNotEmpty && rec.length > 41) rec[41] = kd.codeUnitAt(0);
         final nm = renames?[r.idx];
         if (nm != null && nm.isNotEmpty) {
-          rec.setRange(0, nm.length < 32 ? nm.length : 32, nm.codeUnits);
+          final n = min(min(nm.length, 32), rec.length);
+          rec.setRange(0, n, nm.codeUnits);
         }
         final val = outValues[r.idx];
         final s = val == null ? '' : val.toString();
-        final field = s.padRight(width - 42).substring(0, width - 42 < s.length ? width - 42 : s.length);
-        final padded = s.length >= (width - 42)
-            ? s.substring(0, width - 42)
-            : s.padRight(width - 42);
-        for (var i = 0; i < width - 42; i++) {
+        final padded = s.length >= vw ? s.substring(0, vw) : s.padRight(vw);
+        for (var i = 0; i < vw; i++) {
           rec[42 + i] = padded.codeUnitAt(i);
         }
         out.add(rec);
-        // silence unused
-        // ignore: unused_local_variable
-        final _ = field;
       } else if (r.type == 'O') {
         out.add(r.raw); // object-handle row carried unchanged
       } else {
@@ -365,12 +380,21 @@ List<String> parseSvarsItems(Uint8List rfc) {
 }
 
 String _xmlUnescape(String s) => s
-    .replaceAllMapped(_charRefRe, (m) => String.fromCharCode(int.parse(m.group(1)!)))
+    .replaceAllMapped(_charRefRe, _xmlCharRef)
     .replaceAll('&lt;', '<')
     .replaceAll('&gt;', '>')
     .replaceAll('&apos;', "'")
     .replaceAll('&quot;', '"')
     .replaceAll('&amp;', '&');
+
+/// The character a decimal `&#N;` reference [m] (group 1: the digits)
+/// names — the reference left as it stands when N is no code point: a
+/// 25-digit or past-U+10FFFF reference threw out of the flush parse and
+/// left the flush unanswered (audit 2026-10-17 P0-3).
+String _xmlCharRef(Match m) {
+  final v = int.tryParse(m.group(1)!);
+  return v != null && v <= 0x10FFFF ? String.fromCharCode(v) : m.group(0)!;
+}
 
 /// The RFC-queue ROW header the kernel opens every RFC_QUEUE row with
 /// (`<24 hex id>SAPGUI` + element / part counters): 68 B, every 1 853-B

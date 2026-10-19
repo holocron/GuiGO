@@ -9,11 +9,19 @@ import 'session_busy.dart';
 /// totals, export, "Modifier mise en forme" …) or a SAP.Toolbar.1 control
 /// (diag_protocol control_toolbar.dart): SAP GUI's compact icon buttons,
 /// each with its quick info as the tooltip and its text beside the icon
-/// when it has one; separators as thin rules; a menu button with a small
-/// dropdown arrow — a split one (type 1) fires its function from the body
-/// and opens the menu from the arrow, a menu-only one (type 2) opens it
-/// from anywhere; a disabled button greyed, a checked one highlighted. The
-/// row scrolls sideways when it does not fit.
+/// when it has one — and, at the natural row height, an icon-only button
+/// named by its quick info beside its icon, as the application toolbar
+/// names its own (sap_toolbar.dart: an icon alone does not say what it
+/// does, and a phone has no hover; SAP GUI draws these icon-only). The
+/// flat one-cell row keeps the glyph alone ([_ToolbarMetrics.flat]).
+/// Separators as thin rules; a menu button with a small dropdown arrow — a
+/// split one (type 1) fires its function from the body and opens the menu
+/// from the arrow, a menu-only one (type 2) opens it from anywhere; a
+/// disabled button greyed, a checked one highlighted. The row scrolls
+/// sideways when it does not fit, and a "More" button past it (outside
+/// the scrolling row, so it never scrolls away) lists every button by name
+/// in a sheet of finger-sized rows — the standard ALV toolbar's 15-20
+/// functions on a phone.
 ///
 /// In a control ROW shorter than its natural [naturalHeight] (a splitter
 /// cell's one-cell toolbar row: /AIF/IFMON's ALV tree toolbar, SE80's
@@ -83,13 +91,179 @@ class SapControlToolbarView extends StatelessWidget {
       }
     }
     if (children.isEmpty) return const SizedBox.shrink();
-    return Align(
-      alignment: Alignment.topLeft,
-      child: ScrollingButtonRow(
-        bottomGap: m.bottomGap,
-        arrowSize: m.arrow + 4,
-        children: children,
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Align(
+            alignment: Alignment.topLeft,
+            child: ScrollingButtonRow(
+              bottomGap: m.bottomGap,
+              arrowSize: m.arrow + 4,
+              children: children,
+            ),
+          ),
+        ),
+        _MoreButton(
+          buttons: buttons,
+          icons: icons,
+          busy: busy,
+          metrics: m,
+          onPressed: onPressed,
+          onDropdown: onDropdown,
+        ),
+      ],
+    );
+  }
+}
+
+/// The name a button goes by: its text, else its quick info, else its
+/// function code (SAP GUI shows an empty slot).
+String _nameOf(SapToolbarButton b, SapIconAtlas? icons) {
+  final text = (icons?.stripTokens(b.text) ?? b.text)
+      .replaceAll(SapIconAtlas.tokenRx, '')
+      .trim();
+  if (text.isNotEmpty) return text;
+  final quick = b.tooltip.trim();
+  return quick.isNotEmpty ? quick : b.code;
+}
+
+/// The SAP icon font glyph of [b]'s icon, null without one the atlas holds.
+Widget? _glyphOf(
+  SapToolbarButton b,
+  SapIconAtlas? icons,
+  double size,
+  Color fg,
+) {
+  final token = SapIconAtlas.tokenRx.firstMatch(b.icon);
+  final cp = token != null ? icons?.codepoint(token.group(1)!) : null;
+  if (cp == null) return null;
+  return Text(
+    String.fromCharCode(cp),
+    semanticsLabel: '',
+    style: TextStyle(
+      fontFamily: 'SapIcons',
+      fontSize: size,
+      height: 1,
+      color: fg,
+    ),
+  );
+}
+
+/// The button past the scrolling row: every toolbar function by name in a
+/// bottom sheet (finger-sized rows), with the same wiring as the row — a
+/// menu-only button opens its menu, a split one fires from its row and
+/// opens the menu from its trailing arrow. Not a dropdown glyph (the
+/// row's own arrows are counted by tests and are the menu buttons'), not a
+/// framed button (a frame counts as a button of the row).
+class _MoreButton extends StatelessWidget {
+  const _MoreButton({
+    required this.buttons,
+    required this.icons,
+    required this.busy,
+    required this.metrics,
+    required this.onPressed,
+    required this.onDropdown,
+  });
+
+  final List<SapToolbarButton> buttons;
+  final SapIconAtlas? icons;
+  final bool busy;
+  final _ToolbarMetrics metrics;
+  final void Function(String fcode) onPressed;
+  final void Function(String fcode, Offset at) onDropdown;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = !(busy || SessionBusy.of(context));
+    return Padding(
+      padding: EdgeInsets.only(bottom: metrics.bottomGap),
+      child: Builder(
+        builder: (ctx) => IconButton(
+          key: const ValueKey('ctb-more'),
+          tooltip: 'All toolbar functions',
+          icon: const Icon(Icons.more_horiz),
+          iconSize: metrics.icon,
+          padding: EdgeInsets.zero,
+          constraints: BoxConstraints.tightFor(
+            width: metrics.button,
+            height: metrics.button,
+          ),
+          onPressed: enabled ? () => _open(ctx) : null,
+        ),
       ),
+    );
+  }
+
+  /// [context]: the button's own (the menus open under it).
+  void _open(BuildContext context) {
+    // the menus open under the More button, inside the control: the
+    // server's cascade is anchored at the point it is told
+    final at = _ToolbarButton._below(context);
+    // the sheet closes over the buttons as pushed now: a re-push while it
+    // is open leaves it stale, as an open menu is (and it is closed by a
+    // pick or a swipe)
+    showModalBottomSheet<void>(
+      context: context,
+      useSafeArea: true,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (sheet) {
+        final scheme = Theme.of(sheet).colorScheme;
+        final busyNow = busy || SessionBusy.of(sheet);
+        final rows = [
+          for (final b in buttons)
+            if (!b.separator) b,
+        ];
+        return DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: 0.5,
+          minChildSize: 0.25,
+          maxChildSize: 0.95,
+          builder: (sheet, controller) => ListView.builder(
+            controller: controller,
+            itemCount: rows.length,
+            itemBuilder: (_, i) {
+              final b = rows[i];
+              final enabled = !busyNow && b.enabled;
+              final fg = enabled
+                  ? scheme.onSurface
+                  : scheme.onSurface.withValues(alpha: 0.38);
+              void pick(void Function() act) {
+                Navigator.pop(sheet);
+                act();
+              }
+
+              return ListTile(
+                key: ValueKey('ctb-more-${b.code}'),
+                enabled: enabled,
+                selected: b.checked,
+                leading: SizedBox(
+                  width: 24,
+                  child: Center(child: _glyphOf(b, icons, 18, fg)),
+                ),
+                title: Text(_nameOf(b, icons)),
+                // a split button: its row fires, its arrow opens the menu
+                trailing: b.splitMenu
+                    ? IconButton(
+                        key: ValueKey('ctb-more-${b.code}-menu'),
+                        tooltip: 'Menu',
+                        icon: const Icon(Icons.arrow_drop_down),
+                        onPressed: enabled
+                            ? () => pick(() => onDropdown(b.code, at))
+                            : null,
+                      )
+                    : (b.hasMenu ? const Icon(Icons.arrow_drop_down) : null),
+                onTap: !enabled
+                    ? null
+                    : b.hasMenu && !b.splitMenu
+                    ? () => pick(() => onDropdown(b.code, at))
+                    : () => pick(() => onPressed(b.code)),
+              );
+            },
+          ),
+        );
+      },
     );
   }
 }
@@ -219,11 +393,16 @@ class _ToolbarButton extends StatelessWidget {
         .replaceAll(SapIconAtlas.tokenRx, '')
         .trim();
     final quick = b.tooltip.trim();
-    // an icon-less, text-less button names itself by its quick info, else
-    // by its function code (SAP GUI shows an empty slot)
+    // a text-less button names itself by its quick info, else by its
+    // function code (SAP GUI shows an empty slot) — beside its icon too,
+    // at the natural height (the font is 13 there, legible); a flat
+    // one-cell row (PA20's object manager, SE80's dock) keeps the glyph
+    // filling the button, a name would blow a server-sized cell sideways
     final label = text.isNotEmpty
         ? text
-        : (cp == null ? (quick.isNotEmpty ? quick : b.code) : '');
+        : (cp == null || !metrics.flat
+              ? (quick.isNotEmpty ? quick : b.code)
+              : '');
     final face = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -317,6 +496,8 @@ class _ToolbarButton extends StatelessWidget {
         enabled: enabled,
         selected: selected,
         label: tip,
+        // the label is the name drawn on the face: not read twice
+        excludeSemantics: true,
         child: DecoratedBox(
           decoration: BoxDecoration(
             color: bg,

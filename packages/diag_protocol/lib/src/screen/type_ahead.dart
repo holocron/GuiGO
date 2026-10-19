@@ -255,18 +255,19 @@ TypeAheadTable? parseTypeAheadTable(Uint8List blob) {
 }
 
 /// The proposal table pushed in [frames] (a request round's answer: the
-/// OLE flush's DataProvider push, read through a one-turn [DpCache]), or
-/// null when none came back. The newest table wins.
+/// OLE flush's DataProvider push, read per frame with [dpPushesInFrame] —
+/// no throwaway [DpCache] per frame per call), or null when none came
+/// back. The newest table wins.
 TypeAheadTable? findTypeAheadTable(Iterable<Uint8List> frames) {
   TypeAheadTable? found;
   for (final f in frames) {
-    final cache = DpCache();
+    final Map<String, Uint8List> pushes;
     try {
-      cache.ingestFrame(f);
+      pushes = dpPushesInFrame(f);
     } on Object {
       continue; // not a DIAG data frame (a mode-control frame, garbage)
     }
-    for (final seg in cache.byUrl.values) {
+    for (final seg in pushes.values) {
       final c = dpPutContent(seg);
       if (c == null) continue;
       final t = parseTypeAheadTable(c.content);

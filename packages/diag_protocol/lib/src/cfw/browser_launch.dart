@@ -51,6 +51,7 @@
 library;
 
 import 'flush_call.dart';
+import 'svars.dart' show Rec;
 
 /// The token the frontend posts to the ticket service, and that service.
 class BrowserSso {
@@ -179,20 +180,35 @@ String shellExecuteAnswer(FlushCall call, int i) =>
 /// VARS value, or — a `_SPARAMETER` row — the SVARS item that row numbers
 /// (a value longer than a VARS cell: every url on record rides there).
 String? verbArgText(FlushCall call, int i, String name) {
-  for (final p in call.params) {
-    if (p.objid.trim() != '$i' || p.name.trim() != name) continue;
-    final s = int.tryParse(p.slot.trim());
-    if (s == null || s < 1 || s > call.vars.length) return null;
-    final row = call.vars[s - 1];
-    if (row.name == '_SPARAMETER') {
-      final k = int.tryParse(row.valueText);
-      if (k == null || k < 1 || k > call.svars.length) return null;
-      return call.svars[k - 1].trim();
-    }
-    return row.valueText;
+  final p = _paramByVerbArg(call.params)['$i\u0000$name'];
+  if (p == null) return null;
+  final s = int.tryParse(p.slot.trim());
+  if (s == null || s < 1 || s > call.vars.length) return null;
+  final row = call.vars[s - 1];
+  if (row.name == '_SPARAMETER') {
+    final k = int.tryParse(row.valueText);
+    if (k == null || k < 1 || k > call.svars.length) return null;
+    return call.svars[k - 1].trim();
   }
-  return null;
+  return row.valueText;
 }
+
+/// The FIRST PARAMS row per (verb objid, argument name), both trimmed —
+/// built once per parsed PARAMS table. [verbArgText] is asked per argument
+/// of every verb by the DOI fold and the frontend-file answers; a scan of
+/// the whole table per argument is O(args x params) (the 4 264-verb /
+/// 10 660-row batch: ~10^8 compares per pass).
+final Expando<Map<String, Rec>> _paramArgIndex =
+    Expando('PARAMS row by verb argument');
+
+Map<String, Rec> _paramByVerbArg(List<Rec> rows) =>
+    _paramArgIndex[rows] ??= () {
+      final m = <String, Rec>{};
+      for (final p in rows) {
+        m.putIfAbsent('${p.objid.trim()}\u0000${p.name.trim()}', () => p);
+      }
+      return m;
+    }();
 
 /// The web url verb [i] (1-based) of [call] asks the frontend to open in a
 /// browser, or null (not a launch verb, no url, not http / https).

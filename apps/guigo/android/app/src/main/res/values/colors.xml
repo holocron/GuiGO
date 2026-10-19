@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The app's dark surface (ColorScheme.fromSeed(0xFF0A6ED1, dark).surface,
+         main.dart): the launch window and the window behind the Flutter view
+         are this colour, so a cold start or a resize never flashes white into
+         the dark-only app. apps/guigo/test/platform_config_test.dart pins it
+         to the theme. -->
+    <color name="launch_background">#FF111318</color>
+</resources>

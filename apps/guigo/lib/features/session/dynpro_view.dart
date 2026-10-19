@@ -5,6 +5,13 @@ import 'package:flutter/gestures.dart'
     show kDoubleTapSlop, kDoubleTapTimeout, kTouchSlop;
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'
+    show
+        HardwareKeyboard,
+        KeyDownEvent,
+        KeyUpEvent,
+        LogicalKeyboardKey,
+        TextInputFormatter;
 
 import '../../core/sap_icons.dart';
 import 'dynpro_grid.dart';
@@ -22,8 +29,9 @@ const double _maxCellW = 12.0;
 
 /// The widest painted grid (columns) seen per program, for one logon: the
 /// cell size of a transaction stays put while its screens change. The
-/// session screen provides one per session (its main window and its modal
-/// dialogs share it); a DynproView outside any scope keeps its own.
+/// session screen provides one per session (the main window's: a popup is
+/// its own window and fits its own width); a DynproView outside any scope
+/// keeps its own.
 class DynproZoomScope extends InheritedWidget {
   const DynproZoomScope({
     super.key,
@@ -48,12 +56,28 @@ class DynproZoomScope extends InheritedWidget {
 /// count guards a model mutated after it was first laid out (tests build
 /// models in place).
 class _Derived {
-  _Derived(this.fieldCount, this.layout, this.grid, this.radioGroups);
+  _Derived(
+    this.fieldCount,
+    this.layout,
+    this.grid,
+    this.radioGroups,
+    this.nextInput,
+  );
   final int fieldCount;
   final DynproLayout layout;
   final DynproGrid grid;
   final Map<String, List<ScreenField>> radioGroups;
+
+  /// The soft keyboard's Next: each typeable input's successor in reading
+  /// order (row, then column — a table control's line left to right,
+  /// fixed then moving columns, then its next line), null for the last;
+  /// a protected input (an icon output among them) is no stop. Keyed by
+  /// cell ([_cellKey], the inputs' own key).
+  final Map<String, String?> nextInput;
 }
+
+/// An input's key in the view's state: its cell.
+String _cellKey(ScreenField f) => '${f.area}:${f.row}:${f.col}';
 
 final Expando<_Derived> _derived = Expando('dynpro layout');
 
@@ -81,11 +105,30 @@ _Derived _derive(ScreenModel m) {
           a.row != b.row ? a.row.compareTo(b.row) : a.col.compareTo(b.col),
     );
   }
+  // the inputs one can type into, in reading order: the paint lists them
+  // in PAINT order (a subscreen's after the main dynpro's), so sorted
+  final typeable = [
+    for (final f in m.fields)
+      if (f.kind == FieldKind.input && !f.isProtected) f,
+  ]..sort(
+    (a, b) => a.row != b.row
+        ? a.row.compareTo(b.row)
+        : a.col != b.col
+        ? a.col.compareTo(b.col)
+        : a.area.compareTo(b.area),
+  );
+  final nextInput = <String, String?>{
+    for (var i = 0; i < typeable.length; i++)
+      _cellKey(typeable[i]): i + 1 < typeable.length
+          ? _cellKey(typeable[i + 1])
+          : null,
+  };
   return _derived[m] = _Derived(
     m.fields.length,
     layoutDynpro(m.fields),
     DynproGrid.of(m),
     radioGroups,
+    nextInput,
   );
 }
 
@@ -135,6 +178,7 @@ class DynproView extends StatefulWidget {
     this.onDoubleClick,
     this.listboxValueSet,
     this.onListboxPick,
+    this.onCheckbox,
   });
 
   final ScreenModel model;
@@ -174,9 +218,16 @@ class DynproView extends StatefulWidget {
   /// SAP GUI sends every changed field with the PAI.
   final void Function(ScreenField f, String text)? onEdit;
 
-  /// Value help (F4) on a field that has it ([ScreenField.hasF4]): the
-  /// small button inside the focused field, as SAP GUI shows it.
+  /// Value help (F4) on a field that has it ([ScreenField.hasF4]): on the
+  /// SAP grid the small button inside the focused field, as SAP GUI shows
+  /// it; on the phone reflow a button on every field that offers it (the
+  /// matchcode button is the field's only touch route there).
   final Future<void> Function(ScreenField f)? onValueHelp;
+
+  /// A dynpro checkbox ticked / unticked to [on]: the session stages the
+  /// value, and it rides the next PAI the way SAP GUI sends a changed box
+  /// (the box shows the tick at once). Null: a tap sends a bare Enter.
+  final void Function(ScreenField f, bool on)? onCheckbox;
 
   /// An input took the keyboard focus: the field F1 asks help for.
   final void Function(ScreenField f)? onFocusField;
@@ -382,8 +433,23 @@ String? iconQuickInfo(String text) {
 
 // ---------------------------------------------------------------------------
 
+/// The view's cursor state, one notifier: the cursor field's key (SAP GUI's
+/// cursor field, kept when the keyboard goes), and the focused input's
+/// type-ahead with its key. One value, because a focus gain changes both
+/// together and a leaf must see the controller go before it is disposed.
+typedef _Cursor = ({String? key, String? taKey, TypeAheadController? ta});
+
 class _DynproViewState extends State<DynproView> {
   final Map<String, TextEditingController> _controllers = {};
+
+  /// Each input's own focus node, keyed like [_controllers]: a repaint
+  /// that adds or drops a field keeps the keyboard on the field with the
+  /// same key, and a server round never touches it (an input is never
+  /// disabled for busy — SAP GUI's hourglass keeps the cursor in its
+  /// field).
+  final Map<String, FocusNode> _focusNodes = {};
+
+  /// Inputs typed into since the last paint of their field.
   final Set<String> _edited = {};
 
   /// The value the server last painted into each input.
@@ -396,48 +462,69 @@ class _DynproViewState extends State<DynproView> {
     final before = _painted[key];
     _painted[key] = painted;
     if (before != null && before != painted) _edited.remove(key);
-    if (ctrl.text != painted && !_edited.contains(key)) ctrl.text = painted;
+    if (ctrl.text != painted && !_edited.contains(key)) {
+      // the caret at the end: a field that keeps the focus across the
+      // round is not left with an invalid selection
+      ctrl.value = TextEditingValue(
+        text: painted,
+        selection: TextSelection.collapsed(offset: painted.length),
+      );
+    }
   }
 
-  String? _focused; // the cursor field (keeps it when the keyboard goes)
+  /// The cursor field and the focused input's type-ahead ([_Cursor]): a
+  /// notifier, so a focus change redraws the field it left and the field
+  /// it lands on ([_Select] leaves), not the whole view.
+  final ValueNotifier<_Cursor> _cursorN =
+      ValueNotifier((key: null, taKey: null, ta: null));
+
+  String? get _focused => _cursorN.value.key;
+
+  /// Input [key] took the focus: SAP GUI's cursor field until another
+  /// field takes it or the screen changes.
+  void _setCursor(String key) {
+    final c = _cursorN.value;
+    if (c.key != key) _cursorN.value = (key: key, taKey: c.taKey, ta: c.ta);
+  }
 
   // --- type-ahead (type_ahead.dart): the focused input's dropdown -------
 
   /// The focused input's type-ahead (null: no [TypeAheadScope] above, or
-  /// no input has the keyboard focus) and its input's key.
-  TypeAheadController? _ta;
-  String? _taKey;
+  /// no input has the keyboard focus).
+  TypeAheadController? get _ta => _cursorN.value.ta;
 
   /// Inputs the user typed into since their value was last kept in the
   /// input history (kept on Enter / leaving the field, as SAP GUI does).
   final Set<String> _typedSinceKept = {};
 
   /// The type-ahead of input [key] when it is the focused one.
-  TypeAheadController? _typeAheadOf(String key) => _taKey == key ? _ta : null;
+  TypeAheadController? _typeAheadOf(String key) =>
+      _cursorN.value.taKey == key ? _cursorN.value.ta : null;
 
   void _typeAheadFocus(String key, ScreenField f, bool has,
       TextEditingController ctrl) {
     if (!has) {
-      if (_taKey != key) return;
+      if (_cursorN.value.taKey != key) return;
       _keepTyped();
       _dropTypeAhead();
       return;
     }
     final cfg = TypeAheadScope.read(context);
-    if (cfg == null || _taKey == key) return;
+    if (cfg == null || _cursorN.value.taKey == key) return;
     // the next field may take the focus before the last one hears it lost
     _keepTyped();
     _dropTypeAhead();
-    setState(() {
-      _ta = TypeAheadController(cfg, widget.model, f);
-      _taKey = key;
-    });
+    _cursorN.value = (
+      key: _cursorN.value.key,
+      taKey: key,
+      ta: TypeAheadController(cfg, widget.model, f),
+    );
   }
 
   /// SAP GUI keeps a typed value on leaving the field: the focused
   /// input's, when the user typed into it since it was last kept.
   void _keepTyped() {
-    final ta = _ta, key = _taKey;
+    final ta = _ta, key = _cursorN.value.taKey;
     if (ta == null || key == null || !_typedSinceKept.remove(key)) return;
     final text = _controllers[key]?.text;
     if (text != null) ta.recordHistory(text);
@@ -474,23 +561,33 @@ class _DynproViewState extends State<DynproView> {
     _typeAheadOf(key)?.close();
   }
 
-  void _dropTypeAhead({bool rebuild = true}) {
+  void _dropTypeAhead() {
     final ta = _ta;
     if (ta == null) return;
     ta.focusLost();
-    _ta = null;
-    _taKey = null;
-    if (rebuild && mounted) setState(() {});
-    // the anchor lets go of it in this frame
+    // the field's leaf lets go of it in this frame (the notifier marks it
+    // to rebuild: from a focus callback the next frame's build, from
+    // didUpdateWidget the build under way)
+    _cursorN.value = (key: _cursorN.value.key, taKey: null, ta: null);
     WidgetsBinding.instance.addPostFrameCallback((_) => ta.dispose());
   }
 
-  /// [field] (input [key]) under its type-ahead dropdown when a
+  /// A server round started while an input kept the focus: SAP GUI keeps
+  /// the typed value in the history on the PAI and the dropdown goes; the
+  /// controller stays, so typing after the answer proposes again (the
+  /// field never lost the focus).
+  void _busyRose() {
+    final ta = _ta;
+    if (ta == null) return;
+    _keepTyped();
+    ta.close();
+  }
+
+  /// [field] (input [key]) under its type-ahead dropdown [ta] when a
   /// [TypeAheadScope] is above; the plain field otherwise.
   Widget _typeAheadAnchor(String key, ScreenField f,
-      TextEditingController ctrl, Widget field) {
+      TextEditingController ctrl, TypeAheadController? ta, Widget field) {
     if (TypeAheadScope.maybeOf(context) == null) return field;
-    final ta = _typeAheadOf(key);
     ta?.rebind(widget.model, f);
     return TypeAheadAnchor(
       controller: ta,
@@ -504,9 +601,106 @@ class _DynproViewState extends State<DynproView> {
       TypeAheadAnchor.handleKey(
           _typeAheadOf(key), e, (p) => _typeAheadPick(key, f, ctrl, p));
 
+  // --- the keyboard's action key, a hardware Return --------------------
+
+  /// The field's Enter: its value sent with SAP GUI's Enter
+  /// ([DynproView.onFill], the fill round) — the soft keyboard's Done on
+  /// the last field (or a password's), a hardware Return in any field.
+  /// Nothing while a round runs.
+  Future<void> _submit(String key, ScreenField f, String value) async {
+    if (_busyNow) return;
+    _edited.remove(key);
+    _typeAheadSubmitted(key, value);
+    await widget.onFill(f, value);
+  }
+
+  /// The input after [key] for the Next key ([_Derived.nextInput]), null
+  /// when [f] is the last one — or a password: its Return is the logon's
+  /// Enter, not a jump to the language field.
+  String? _nextOf(String key, ScreenField f) =>
+      f.invisible ? null : _derive(widget.model).nextInput[key];
+
+  /// The keyboard's action key of input [key]: Next between the fields,
+  /// Done on the last ([_actionKey]).
+  TextInputAction _actionOf(String key, ScreenField f) =>
+      _nextOf(key, f) == null ? TextInputAction.done : TextInputAction.next;
+
+  /// The soft keyboard's action key pressed in input [key]. Next moves the
+  /// focus to the next typeable field in reading order with no round: the
+  /// typed value is staged already ([DynproView.onEdit]) and rides the
+  /// next action, as SAP GUI's Tab moves the cursor locally — the field
+  /// stays marked typed ([_edited]), or the next repaint would put the
+  /// painted value back ([_syncPainted]). Done is the Enter round
+  /// ([_submit]). The round lives here, not in onSubmitted: EditableText
+  /// calls onSubmitted after this for every action, Next included, so the
+  /// fields leave it unset. The focus stays in its field on Done
+  /// (Flutter's default unfocuses): SAP GUI's Enter keeps the cursor in
+  /// its field.
+  void _actionKey(String key, ScreenField f, TextEditingController ctrl) {
+    ctrl.clearComposing();
+    final next = _nextOf(key, f);
+    if (next == null) {
+      _submit(key, f, ctrl.text);
+      return;
+    }
+    final node = _nodeOf(next);
+    if (node.context != null) {
+      node.requestFocus();
+      return;
+    }
+    // the next cell is not built: a table control's column scrolled out
+    // of the built window ([_TcColumns]) — the cursor key keeps it built,
+    // so it takes the focus once the frame mounts it (and scrolls itself
+    // into view); until then the cursor mark runs ahead of the focus
+    _setCursor(next);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && node.context != null) node.requestFocus();
+    });
+  }
+
+  /// A hardware key in input [key]: the type-ahead's first (its dropdown's
+  /// ↓ / ↑ / Esc / Enter), then a physical Return is SAP GUI's Enter
+  /// whatever the soft keyboard's action label — iOS delivers it as the
+  /// field's own action, and a Next would move the cursor instead of
+  /// running the PAI (a Mac, an iPad keyboard: hardware_function_keys_test
+  /// has the screen's own Return) — taken here so the field's action never
+  /// sees it. A modified Return, and Tab (Flutter's traversal), are not
+  /// taken.
+  KeyEventResult _inputKey(
+    String key,
+    ScreenField f,
+    TextEditingController ctrl,
+    KeyEvent e,
+  ) {
+    final taken = _typeAheadKey(key, f, ctrl, e);
+    if (taken != KeyEventResult.ignored || e is KeyUpEvent) return taken;
+    final k = e.logicalKey;
+    if (k != LogicalKeyboardKey.enter && k != LogicalKeyboardKey.numpadEnter) {
+      return KeyEventResult.ignored;
+    }
+    final hw = HardwareKeyboard.instance;
+    if (hw.isShiftPressed ||
+        hw.isControlPressed ||
+        hw.isMetaPressed ||
+        hw.isAltPressed) {
+      return KeyEventResult.ignored;
+    }
+    // held down: one round, not one per repeat
+    if (e is KeyDownEvent) {
+      ctrl.clearComposing();
+      _submit(key, f, ctrl.text);
+    }
+    return KeyEventResult.handled;
+  }
+
   /// The list checkboxes ticked since the paint, by line (identity) and
   /// column — the paint's own value until the server repaints the list.
   final Map<ListLine, Map<int, bool>> _listTicks = Map.identity();
+
+  /// The last tick (line, column, value): a notifier like [_listCursor] —
+  /// a tick redraws its own line, not the whole view.
+  final ValueNotifier<(ListLine, int, bool)?> _listTicked =
+      ValueNotifier(null);
 
   /// The list cursor a tap placed since the paint (buffer row, column) —
   /// the paint's own ([ScreenModel.listCursor]) until then; a repaint of
@@ -517,18 +711,85 @@ class _DynproViewState extends State<DynproView> {
   /// The zoom memory when no [DynproZoomScope] provides the session's.
   final Map<String, int> _ownWidest = {};
 
+  /// The dynpro checkboxes ticked since the paint, by field (identity) —
+  /// the paint's own value until the server repaints the box (the
+  /// [_listTicks] pattern); [_boxTick] bumps so the box alone redraws.
+  final Map<ScreenField, bool> _boxTicks = Map.identity();
+  final ValueNotifier<int> _boxTick = ValueNotifier(0);
+
+  /// A checkbox tapped: the session stages the tick ([DynproView.onCheckbox])
+  /// and the box shows it; without a stager, today's bare Enter round.
+  void _tickBox(ScreenField f) {
+    final stage = widget.onCheckbox;
+    if (stage == null) {
+      widget.onPress(0);
+      return;
+    }
+    final on = !(_boxTicks[f] ?? f.on);
+    _boxTicks[f] = on;
+    _boxTick.value++;
+    stage(f, on);
+  }
+
   /// Busy now — the view's own flag or the session's ([SessionBusy]) —
   /// for a gesture handler (no dependency: the view does not rebuild).
   bool get _busyNow => widget.busy || SessionBusy.peek(context);
 
-  /// A field drawn from the busy state: it alone rebuilds when the
-  /// session's busy flips, not the whole view ([BusyBuilder]).
+  /// A control drawn from the busy state (a button, a choice, a listbox
+  /// goes inert): it alone rebuilds when the session's busy flips, not the
+  /// whole view ([BusyBuilder]). An input is never drawn busy: it keeps its
+  /// look, its focus and the keyboard, as SAP GUI's hourglass keeps the
+  /// cursor in its field — [_absorbing] blocks the taps.
   Widget _leaf(Widget Function(bool busy) build) =>
       BusyBuilder(busy: widget.busy, builder: (_, busy) => build(busy));
+
+  /// [fields] (the dynpro's canvas or form, below the scroll views) with
+  /// pointer input absorbed while busy — SAP GUI's locked window during a
+  /// round trip. One leaf: a flip updates one AbsorbPointer, the identical
+  /// child is skipped; the keyboard reaches the focused input still, and
+  /// [_busyFormatter] refuses what it types.
+  Widget _absorbing(Widget fields) => BusyBuilder(
+    busy: widget.busy,
+    builder: (_, busy) => AbsorbPointer(
+      key: const ValueKey('dynpro-busy'),
+      absorbing: busy,
+      child: fields,
+    ),
+  );
+
+  /// Typing during a round trip is refused (the field keeps the keyboard):
+  /// a value typed then would sit in the field while the session's answer
+  /// drops every staged value (`_dropStaged('the screen was repainted')`),
+  /// and the screen would show what the server never got. No dependency:
+  /// [_busyNow] peeks.
+  late final TextInputFormatter _busyFormatter = TextInputFormatter
+      .withFunction((old, next) => _busyNow ? old : next);
+
+  /// The session's busy notifier this view listens to for the rising edge
+  /// ([_busyRose]).
+  ValueListenable<bool>? _busyScope;
+  bool _wasBusy = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final s = SessionBusy.listenableOf(context);
+    if (identical(s, _busyScope)) return;
+    _busyScope?.removeListener(_busyChanged);
+    _busyScope = s?..addListener(_busyChanged);
+    _wasBusy = _busyNow;
+  }
+
+  void _busyChanged() {
+    final now = _busyNow;
+    if (now && !_wasBusy) _busyRose();
+    _wasBusy = now;
+  }
 
   @override
   void didUpdateWidget(DynproView old) {
     super.didUpdateWidget(old);
+    if (widget.busy != old.busy) _busyChanged();
     // a repainted list: the server's cursor again
     if (!identical(old.model.listPaint.firstOrNull,
         widget.model.listPaint.firstOrNull)) {
@@ -539,34 +800,84 @@ class _DynproViewState extends State<DynproView> {
       final now = Set<ListLine>.identity()..addAll(widget.model.listPaint);
       _listTicks.removeWhere((l, _) => !now.contains(l));
     }
+    final sameScreen = old.model.program == widget.model.program &&
+        old.model.dynpro == widget.model.dynpro &&
+        old.model.modalLevel == widget.model.modalLevel;
+    if (!sameScreen) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _scroll.hasClients) _scroll.jumpTo(0);
+      });
+    }
     // another screen: the cursor field was the old screen's
-    if (old.model.program != widget.model.program ||
-        old.model.dynpro != widget.model.dynpro ||
-        old.model.modalLevel != widget.model.modalLevel) {
-      _focused = null;
+    if (!sameScreen && _focused != null) {
+      _cursorN.value = (
+        key: null,
+        taKey: _cursorN.value.taKey,
+        ta: _cursorN.value.ta,
+      );
+    }
+    if (!identical(old.model, widget.model)) {
+      // a turn that painted the dynpro dropped every staged value
+      // (SapSession `_dropStaged('the screen was repainted')`): the paint
+      // is what the inputs show now, as SAP GUI shows it after a round.
+      // foldWindows carries the field OBJECTS over a turn that paints no
+      // body (a flush, the type-ahead answer's body-less delta —
+      // delta_paint_test), so a fresh object is a repaint even when it
+      // repeats the old value; the ticked boxes go the same way
+      if (_edited.isNotEmpty || _boxTicks.isNotEmpty) {
+        final was = Set<ScreenField>.identity()..addAll(old.model.fields);
+        if (widget.model.fields.any((f) => !was.contains(f))) {
+          _edited.clear();
+          _boxTicks.clear();
+        }
+      }
+      // the same screen repainted while an input keeps the focus: the host
+      // keys its cursor field by the model it was painted on (F1 / F4 and
+      // the menu act on it) — told again for the new paint
+      final focused = _focused;
+      if (sameScreen &&
+          focused != null &&
+          (_focusNodes[focused]?.hasFocus ?? false)) {
+        final f = _fieldAt(widget.model, focused);
+        if (f != null) widget.onFocusField?.call(f);
+      }
     }
     // another program / dynpro: the old screen's inputs are gone — their
-    // controllers, painted values and typed marks go with them (kept, they
-    // grew with every screen of the logon, and a typed mark could survive
-    // onto the next screen's field at the same cell)
+    // controllers, focus nodes, painted values and typed marks go with
+    // them (kept, they grew with every screen of the logon, and a typed
+    // mark could survive onto the next screen's field at the same cell)
     if (old.model.program != widget.model.program ||
         old.model.dynpro != widget.model.dynpro) {
       _pruneInputs();
     }
     // another screen (or window level): the dropdown was the old field's
-    if (_ta != null &&
-        (old.model.program != widget.model.program ||
-            old.model.dynpro != widget.model.dynpro ||
-            old.model.modalLevel != widget.model.modalLevel)) {
+    if (_ta != null && !sameScreen) {
       _typedSinceKept.clear();
-      _dropTypeAhead(rebuild: false); // the build follows
+      _dropTypeAhead(); // the build follows
     }
   }
 
+  /// The input painted at cell [key] (`area:row:col`) of [m].
+  static ScreenField? _fieldAt(ScreenModel m, String key) {
+    for (final f in m.fields) {
+      if (f.kind == FieldKind.input && '${f.area}:${f.row}:${f.col}' == key) {
+        return f;
+      }
+    }
+    return null;
+  }
+
   void _pruneInputs() {
-    if (_controllers.isEmpty && _painted.isEmpty && _edited.isEmpty) return;
+    if (_controllers.isEmpty &&
+        _focusNodes.isEmpty &&
+        _painted.isEmpty &&
+        _edited.isEmpty) {
+      return;
+    }
     final gone = _controllers.values.toList();
+    final nodes = _focusNodes.values.toList();
     _controllers.clear();
+    _focusNodes.clear();
     _painted.clear();
     _edited.clear();
     // the old fields' TextFields still hold them until this build replaces
@@ -575,6 +886,9 @@ class _DynproViewState extends State<DynproView> {
       for (final c in gone) {
         c.dispose();
       }
+      for (final n in nodes) {
+        n.dispose();
+      }
     });
   }
 
@@ -582,20 +896,36 @@ class _DynproViewState extends State<DynproView> {
   @visibleForTesting
   int get controllerCount => _controllers.length;
 
+  /// The number of live input focus nodes (tests read it).
+  @visibleForTesting
+  int get focusNodeCount => _focusNodes.length;
+
   /// Each scrolling table control's horizontal scroll position, by name.
   final Map<String, ScrollController> _tcScroll = {};
 
+  /// The body's vertical scroll: a NEW screen (program / dynpro / popup
+  /// level) opens at its top, as SAP GUI's does — a same-screen repaint
+  /// keeps the offset (the server's scroll position rides the paint).
+  final ScrollController _scroll = ScrollController();
+
   @override
   void dispose() {
+    _busyScope?.removeListener(_busyChanged);
     _ta?.dispose();
-    _ta = null;
+    _cursorN.dispose();
     for (final c in _controllers.values) {
       c.dispose();
+    }
+    for (final n in _focusNodes.values) {
+      n.dispose();
     }
     for (final c in _tcScroll.values) {
       c.dispose();
     }
+    _scroll.dispose();
     _listCursor.dispose();
+    _listTicked.dispose();
+    _boxTick.dispose();
     super.dispose();
   }
 
@@ -650,125 +980,34 @@ class _DynproViewState extends State<DynproView> {
 
     final grid = derived.grid;
     final widestCols = DynproZoomScope.maybeOf(context) ?? _ownWidest;
-    final body = LayoutBuilder(
-      builder: (context, cons) {
-        // SAP GUI geometry whenever the painted grid fits the width at a
-        // legible cell size; a phone-narrow window (or the logon screen's
-        // side text panel) keeps the row reflow below
-        final fixed = widget.cell;
-        if (fixed != null) {
-          return _buildGrid(
-            context,
-            grid,
-            radioGroups,
-            icons,
-            fixed.width,
-            cons.maxWidth,
-            rowHeight: fixed.height,
-          );
-        }
-        final hostsPlaced = widget.controls.keys.any(m.containers.containsKey);
-        // the side-text panel reflow is the phone's logon screen: a tablet
-        // keeps SAP GUI's geometry whatever text the screen carries (PA20's
-        // infotype list read as a "panel" and tore the screen into a phone
-        // form, field names for captions)
-        final tablet = cons.maxWidth >= 600 && !m.isKernelLogon;
-        if ((!grid.isEmpty || hostsPlaced) &&
-            (panelText.length <= 60 || tablet)) {
-          // the hosted controls' containers count toward the painted width
-          // (DB50/0219: fields to col 125, the chart container to col 163)
-          var cols = grid.cols;
-          for (final name in widget.controls.keys) {
-            final c = m.containers[name];
-            if (c != null) cols = math.max(cols, c.col + c.width);
-          }
-          // the zoom of a transaction holds across its screens / tabs: the
-          // cell fits the WIDEST screen of the program seen so far (ME21N's
-          // header tabs each paint another width; SAP GUI's cell never moves)
-          final prog = m.program ?? '';
-          cols = math.max(cols, widestCols[prog] ?? 0);
-          widestCols[prog] = cols;
-          final cw = cons.maxWidth / cols;
-          if (cw >= _minCellW) {
-            return _buildGrid(
+    // a composed window's pane: the cell is the window's, not the pane's
+    // width, and nothing below reads the constraints — built once per view
+    // build, not once per sash step (a LayoutBuilder re-runs its builder
+    // whenever the pane's constraints change); no width clamps a hosted
+    // control there (the composed path hosts none)
+    final fixed = widget.cell;
+    final body = fixed != null
+        ? _absorbing(
+            _buildGrid(
               context,
               grid,
+              layout,
               radioGroups,
               icons,
-              math.min(cw, _maxCellW),
-              cons.maxWidth,
-            );
-          }
-          // a table control only reads as its columns: too narrow for the
-          // legible cell, the grid keeps it and the window scrolls sideways
-          // (the row reflow tore TC_1211's lines into slivers of inputs)
-          // the same on any SAP-wide screen of a tablet: the row reflow is
-          // the phone's (it tore ME21N's header tabs into chips)
-          if (m.tableControls.isNotEmpty || cons.maxWidth >= 600) {
-            return SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: _buildGrid(
-                context,
-                grid,
-                radioGroups,
-                icons,
-                _minCellW,
-                cols * _minCellW,
-              ),
-            );
-          }
-        }
-        final wide = cons.maxWidth > 560 && panelText.length > 60;
-        final panelWidth = wide
-            ? (cons.maxWidth * 0.38).clamp(160.0, 320.0)
-            : 0.0;
-        final formWidth = wide
-            ? cons.maxWidth - panelWidth - 24
-            : cons.maxWidth;
-        final rows = _buildRows(context, layout, radioGroups, icons, formWidth);
-        // the reflow has no cells to place hosted controls at: they follow
-        // the form, full width
-        final hosted = [
-          for (final e in widget.controls.entries)
-            if (m.containers.containsKey(e.key))
-              Padding(
-                padding: const EdgeInsets.only(top: 12),
-                child: SizedBox(height: 380, child: e.value),
-              ),
-        ];
-        final form = hosted.isEmpty
-            ? rows
-            : Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [rows, ...hosted],
-              );
-        if (!wide) {
-          // narrow: the text panel reads first, the form below
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              if (panelText.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 12),
-                  child: TextPanel(text: panelText, compact: widget.compact),
-                ),
-              form,
-            ],
-          );
-        }
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SizedBox(
-              width: panelWidth,
-              child: TextPanel(text: panelText, compact: widget.compact),
+              fixed.width,
+              double.infinity,
+              rowHeight: fixed.height,
             ),
-            const VerticalDivider(width: 24, thickness: 1),
-            Expanded(child: form),
-          ],
-        );
-      },
-    );
+          )
+        : _fittedBody(
+            m,
+            grid,
+            layout,
+            radioGroups,
+            icons,
+            panelText,
+            widestCols,
+          );
 
     // the paint's classic list (an F4 hit list, a report list — thousands
     // of lines): its lines built as they scroll into view
@@ -780,6 +1019,7 @@ class _DynproViewState extends State<DynproView> {
       if (paged != null) return paged;
       return _withList(context, rows, 0, (line, width, _) {
         return ListView.builder(
+          controller: _scroll,
           padding: EdgeInsets.zero,
           itemCount: 1 + rows.length,
           itemBuilder: (context, i) => i == 0
@@ -800,6 +1040,7 @@ class _DynproViewState extends State<DynproView> {
     final hPad = widget.compact ? 8.0 : 12.0;
     Widget listView(Widget Function(int i)? line, int count) =>
         ListView.builder(
+          controller: widget.compact ? null : _scroll,
           shrinkWrap: widget.compact,
           physics: widget.compact
               ? const NeverScrollableScrollPhysics()
@@ -830,6 +1071,141 @@ class _DynproViewState extends State<DynproView> {
       rows,
       2 * hPad,
       (line, width, _) => listView(line, rows.length),
+    );
+  }
+
+  /// The body fitted to the window: SAP GUI geometry whenever the painted
+  /// grid fits the width at a legible cell size; a phone-narrow window (or
+  /// the logon screen's side text panel) keeps the row reflow.
+  Widget _fittedBody(
+    ScreenModel m,
+    DynproGrid grid,
+    DynproLayout layout,
+    Map<String, List<ScreenField>> radioGroups,
+    SapIconAtlas? icons,
+    String panelText,
+    Map<String, int> widestCols,
+  ) {
+    return LayoutBuilder(
+      builder: (context, cons) {
+        // SAP GUI geometry whenever the painted grid fits the width at a
+        // legible cell size; a phone-narrow window (or the logon screen's
+        // side text panel) keeps the row reflow below
+        final hostsPlaced = widget.controls.keys.any(m.containers.containsKey);
+        // the side-text panel reflow is the phone's logon screen: a tablet
+        // keeps SAP GUI's geometry whatever text the screen carries (PA20's
+        // infotype list read as a "panel" and tore the screen into a phone
+        // form, field names for captions)
+        final tablet = cons.maxWidth >= 600 && !m.isKernelLogon;
+        if ((!grid.isEmpty || hostsPlaced) &&
+            (panelText.length <= 60 || tablet)) {
+          // the hosted controls' containers count toward the painted width
+          // (DB50/0219: fields to col 125, the chart container to col 163)
+          var cols = grid.cols;
+          for (final name in widget.controls.keys) {
+            final c = m.containers[name];
+            if (c != null) cols = math.max(cols, c.col + c.width);
+          }
+          // the zoom of a transaction holds across its screens / tabs: the
+          // cell fits the WIDEST screen of the program seen so far (ME21N's
+          // header tabs each paint another width; SAP GUI's cell never
+          // moves). A popup is its own window, sized to its content: it
+          // fits its own columns and neither reads nor widens the memory
+          // (a 40-column popup of ME21N's program in its 448-point box was
+          // laid out for 160 columns — the phone reflow on an iPad)
+          if (m.modalLevel == 0) {
+            final prog = m.program ?? '';
+            cols = math.max(cols, widestCols[prog] ?? 0);
+            widestCols[prog] = cols;
+          }
+          final cw = cons.maxWidth / cols;
+          if (cw >= _minCellW) {
+            return _absorbing(
+              _buildGrid(
+                context,
+                grid,
+                layout,
+                radioGroups,
+                icons,
+                math.min(cw, _maxCellW),
+                cons.maxWidth,
+              ),
+            );
+          }
+          // a table control only reads as its columns: too narrow for the
+          // legible cell, the grid keeps it and the window scrolls sideways
+          // (the row reflow tore TC_1211's lines into slivers of inputs)
+          // the same on any SAP-wide screen of a tablet: the row reflow is
+          // the phone's (it tore ME21N's header tabs into chips)
+          if (m.tableControls.isNotEmpty || cons.maxWidth >= 600) {
+            return SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: _absorbing(
+                _buildGrid(
+                  context,
+                  grid,
+                  layout,
+                  radioGroups,
+                  icons,
+                  _minCellW,
+                  cols * _minCellW,
+                ),
+              ),
+            );
+          }
+        }
+        final wide = cons.maxWidth > 560 && panelText.length > 60;
+        final panelWidth = wide
+            ? (cons.maxWidth * 0.38).clamp(160.0, 320.0)
+            : 0.0;
+        final formWidth = wide
+            ? cons.maxWidth - panelWidth - 24
+            : cons.maxWidth;
+        final rows = _buildRows(context, layout, radioGroups, icons, formWidth);
+        // the reflow has no cells to place hosted controls at: they follow
+        // the form, full width
+        final hosted = [
+          for (final e in widget.controls.entries)
+            if (m.containers.containsKey(e.key))
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: SizedBox(height: 380, child: e.value),
+              ),
+        ];
+        final form = _absorbing(
+          hosted.isEmpty
+              ? rows
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [rows, ...hosted],
+                ),
+        );
+        if (!wide) {
+          // narrow: the text panel reads first, the form below
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (panelText.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: TextPanel(text: panelText, compact: widget.compact),
+                ),
+              form,
+            ],
+          );
+        }
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: panelWidth,
+              child: TextPanel(text: panelText, compact: widget.compact),
+            ),
+            const VerticalDivider(width: 24, thickness: 1),
+            Expanded(child: form),
+          ],
+        );
+      },
     );
   }
 
@@ -962,10 +1338,12 @@ class _DynproViewState extends State<DynproView> {
             widget.onListCursor?.call(l.line, col);
           }
 
-          // busy and the cursor redraw this line alone
+          // busy, the cursor and a tick redraw this line alone
           return _leaf(
             (busy) => _ListCursorLine(
               cursor: _listCursor,
+              ticked: _listTicked,
+              line: l,
               painted: painted,
               row: l.line,
               builder: (cursorCol) {
@@ -990,7 +1368,8 @@ class _DynproViewState extends State<DynproView> {
                   onCheck: cell == null || busy
                       ? null
                       : (s, on) {
-                          setState(() => (_listTicks[l] ??= {})[s.col] = on);
+                          (_listTicks[l] ??= {})[s.col] = on;
+                          _listTicked.value = (l, s.col, on);
                           cell(l, s, on ? 'X' : ' ');
                         },
                   checkedOf: (s) => _listTicks[l]?[s.col] ?? s.checked,
@@ -1017,6 +1396,7 @@ class _DynproViewState extends State<DynproView> {
   Widget _buildGrid(
     BuildContext context,
     DynproGrid grid,
+    DynproLayout layout,
     Map<String, List<ScreenField>> radioGroups,
     SapIconAtlas? icons,
     double cw,
@@ -1217,7 +1597,16 @@ class _DynproViewState extends State<DynproView> {
           // the glyph and its quick info, not the token's text
           child = _doubleTappable(f, _iconOutput(f, icons, font, ch));
         case FieldKind.input:
-          child = _doubleTappable(f, _gridInput(f, font, cw, width: w));
+          child = _doubleTappable(
+            f,
+            _gridInput(
+              f,
+              font,
+              cw,
+              width: w,
+              semanticsLabel: _accessibleName(f, layout, tcByName, icons),
+            ),
+          );
         case FieldKind.combobox:
           child = _doubleTappable(f, _listbox(f, font, monospace: true));
         case FieldKind.pushbutton:
@@ -1234,25 +1623,44 @@ class _DynproViewState extends State<DynproView> {
             ),
           );
         case FieldKind.checkbox:
+          // a table control's checkbox column: a glyph, not a Material
+          // toggle (four animation controllers, a focus node and a ripple
+          // per cell, times the control's lines, for a box whose tap is
+          // the cell's own); a free box keeps its Material target
+          final bare = f.tableControl != null && _choiceText(f).isEmpty;
+          final name = _tcCellName(f, tcByName, icons);
           child = _leaf(
-            (busy) => _gridChoice(
-              f,
-              font,
-              ch,
-              Checkbox(
-                value: f.on,
-                visualDensity: VisualDensity.compact,
-                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                onChanged: busy || f.isProtected
-                    ? null
-                    : (_) => widget.onPress(0),
-              ),
-              busy || f.isProtected ? null : () => widget.onPress(0),
+            (busy) => _Select(
+              source: _boxTick,
+              select: (_) => _boxTicks[f] ?? f.on,
+              builder: (on) {
+                final enabled = !busy && !f.isProtected;
+                return _gridChoice(
+                  f,
+                  font,
+                  ch,
+                  bare
+                      ? SapCheckGlyph(on: on, enabled: enabled, size: ch - 6)
+                      : Checkbox(
+                          value: on,
+                          visualDensity: VisualDensity.compact,
+                          materialTapTargetSize:
+                              MaterialTapTargetSize.shrinkWrap,
+                          onChanged: enabled ? (_) => _tickBox(f) : null,
+                        ),
+                  enabled ? () => _tickBox(f) : null,
+                  semanticsLabel: name,
+                );
+              },
             ),
           );
         case FieldKind.radio:
           final group = radioGroups['${f.area}:${f.block}:${f.group}'] ?? [f];
-          child = _leaf((busy) => _gridRadio(f, group, font, ch, busy));
+          final name = _tcCellName(f, tcByName, icons);
+          child = _leaf(
+            (busy) =>
+                _gridRadio(f, group, font, ch, busy, semanticsLabel: name),
+          );
       }
       // a composed window's small fixed cell: every field fills its row
       // (a 4-point inset would clip the glyphs of a 12-point row)
@@ -1324,7 +1732,7 @@ class _DynproViewState extends State<DynproView> {
                     controller: ctl,
                     viewport: (sc.right - sc.left) * cw,
                     cells: moving[tc.name] ?? const [],
-                    keep: _focused,
+                    cursor: _cursorN,
                   ),
                 ),
               ),
@@ -1453,8 +1861,43 @@ class _DynproViewState extends State<DynproView> {
         ),
       );
 
-  Widget _gridInput(ScreenField f, double font, double cw, {double? width}) {
-    final key = '${f.area}:${f.row}:${f.col}';
+  /// [f] offers value help the view can ask for.
+  bool _offersF4(ScreenField f) =>
+      f.hasF4 && !f.isProtected && widget.onValueHelp != null;
+
+  /// SAP GUI's F4 (matchcode) button of input [f]: inert while busy (a
+  /// leaf of its own, so the field around it never redraws for a flip).
+  Widget _f4Button(ScreenField f, {double? iconSize}) => _leaf(
+    (busy) => IconButton(
+      tooltip: 'Value help (F4)',
+      padding: EdgeInsets.zero,
+      visualDensity: VisualDensity.compact,
+      iconSize: iconSize,
+      icon: const Icon(Icons.manage_search),
+      onPressed: busy ? null : () => widget.onValueHelp!(f),
+    ),
+  );
+
+  /// The controller and the focus node of input [key], made on first use.
+  (TextEditingController, FocusNode) _inputState(String key, String text) => (
+    _controllers.putIfAbsent(key, () => TextEditingController(text: text)),
+    _nodeOf(key),
+  );
+
+  /// The focus node of input [key], made on first use — before its field
+  /// is built when the Next key points at a cell not built yet
+  /// ([_actionKey]); the field takes it over when it is.
+  FocusNode _nodeOf(String key) =>
+      _focusNodes.putIfAbsent(key, () => FocusNode(debugLabel: 'dynpro $key'));
+
+  Widget _gridInput(
+    ScreenField f,
+    double font,
+    double cw, {
+    double? width,
+    String? semanticsLabel,
+  }) {
+    final key = _cellKey(f);
     // a monospace glyph is ~0.6 em: shrink the font so the field's own
     // character count fits its painted width (a 3-cell "200" clipped)
     var chars = math.max(
@@ -1474,102 +1917,132 @@ class _DynproViewState extends State<DynproView> {
       final room = width - cw * 0.6 - _fieldInsets;
       font = math.min(font, math.max(6.0, room / (chars * _monoAdvance())));
     }
-    final ctrl = _controllers.putIfAbsent(
-      key,
-      () => TextEditingController(text: f.text),
-    );
+    final (ctrl, node) = _inputState(key, f.text);
     _syncPainted(key, ctrl, f.text);
     final scheme = Theme.of(context).colorScheme;
-    return _leaf((busy) {
-      final enabled = !busy && !f.isProtected;
-      final f4 =
-          f.hasF4 && enabled && widget.onValueHelp != null && _focused == key;
-      return Focus(
-        onKeyEvent: (_, e) => _typeAheadKey(key, f, ctrl, e),
-        onFocusChange: (has) {
-          _typeAheadFocus(key, f, has, ctrl);
-          // SAP GUI's cursor field: it stays the current field when the
-          // keyboard is put away (F1 / F4 still act on it) until another
-          // field takes the focus or the screen changes — a focus loss, or
-          // the cursor field taking the focus again, changes nothing to draw
-          if (!has) return;
-          widget.onFocusField?.call(f);
-          if (_focused != key) setState(() => _focused = key);
+    final f4 = _offersF4(f);
+    // the Focus wrapper adds no semantics node of its own: the field's
+    // EditableText exposes the focus (a phantom "focusable" stop read
+    // before every input otherwise) — nor a traversal stop: a hardware
+    // Tab lands in the next field's text, not on its wrapper
+    return Focus(
+      includeSemantics: false,
+      skipTraversal: true,
+      onKeyEvent: (_, e) => _inputKey(key, f, ctrl, e),
+      onFocusChange: (has) {
+        _typeAheadFocus(key, f, has, ctrl);
+        // SAP GUI's cursor field: it stays the current field when the
+        // keyboard is put away (F1 / F4 still act on it) until another
+        // field takes the focus or the screen changes — a focus loss, or
+        // the cursor field taking the focus again, changes nothing to draw
+        if (!has) return;
+        widget.onFocusField?.call(f);
+        _setCursor(key);
+      },
+      // the cursor mark, the F4 button and the dropdown follow the cursor
+      // notifier: a focus move redraws the field it left and the field it
+      // lands on, not the screen
+      child: _Select(
+        source: _cursorN,
+        select: (c) => (cursor: c.key == key, ta: c.taKey == key ? c.ta : null),
+        builder: (s) {
+          Widget field = TextField(
+            controller: ctrl,
+            focusNode: node,
+            enabled: !f.isProtected,
+            obscureText: f.invisible,
+            maxLength: f.maxnrchars > 0 ? f.maxnrchars : null,
+            textAlignVertical: TextAlignVertical.center,
+            // SAP tokens, not prose: no autocorrect, no suggestions, no
+            // smart punctuation, no sentence case (a phone's keyboard
+            // rewrote "ekko" and split a material number)
+            keyboardType: TextInputType.text,
+            autocorrect: false,
+            enableSuggestions: false,
+            smartDashesType: SmartDashesType.disabled,
+            smartQuotesType: SmartQuotesType.disabled,
+            textCapitalization: TextCapitalization.none,
+            inputFormatters: [_busyFormatter],
+            style: TextStyle(
+              fontSize: font,
+              fontFamily: 'Menlo',
+              fontFamilyFallback: const ['Courier New', 'monospace'],
+              // no tracking: Material 3's body text adds 0.5 pt a glyph, which
+              // pushed a full field's last glyph past its box
+              letterSpacing: 0,
+              // a display field's value reads at full contrast (Material's
+              // disabled text is 38 %: ME21N's totals went grey)
+              color: f.isProtected ? scheme.onSurfaceVariant : null,
+            ),
+            onChanged: (value) {
+              _edited.add(key);
+              widget.onEdit?.call(f, value);
+              _typeAheadEdited(key, ctrl);
+            },
+            contextMenuBuilder: widget.onContextMenu == null
+                ? null
+                : (context, state) => _fieldTextMenu(context, state, f),
+            // Next between the fields, Done on the last: the action key
+            // ([_actionKey]; onSubmitted stays unset — it fires after a
+            // Next too)
+            textInputAction: _actionOf(key, f),
+            onEditingComplete: () => _actionKey(key, f, ctrl),
+            decoration: InputDecoration(
+              // SAP GUI's F4 button at the right edge of the focused field
+              suffixIcon: f4 && s.cursor
+                  ? _f4Button(f, iconSize: font + 2)
+                  : null,
+              suffixIconConstraints: BoxConstraints.tightFor(
+                width: font + 8,
+                height: font + 6,
+              ),
+              isDense: true,
+              counterText: '',
+              filled: true,
+              fillColor: f.isProtected
+                  ? scheme.surfaceContainerHighest
+                  : scheme.surfaceContainerLowest,
+              contentPadding: EdgeInsets.symmetric(
+                horizontal: cw * 0.3,
+                vertical: 0,
+              ),
+              // gapPadding 0: the outline's label gap (4 pt a side, for a
+              // floating label these fields never have) is taken off the
+              // text's width — 8 pt a 2-cell field cannot spare.
+              // The box of a field one can type into is drawn in
+              // `outline` (3:1 against the dark page, WCAG 1.4.11 — the
+              // variant was a 2:1 hairline), a display field's in the
+              // quieter variant: SAP GUI's "bright box = type here"
+              border: OutlineInputBorder(
+                gapPadding: 0,
+                borderRadius: BorderRadius.circular(3),
+                borderSide: BorderSide(color: scheme.outline),
+              ),
+              enabledBorder: OutlineInputBorder(
+                gapPadding: 0,
+                borderRadius: BorderRadius.circular(3),
+                // the cursor field keeps its mark without the keyboard
+                borderSide: s.cursor
+                    ? BorderSide(color: scheme.primary, width: 1.5)
+                    : BorderSide(color: scheme.outline),
+              ),
+              disabledBorder: OutlineInputBorder(
+                gapPadding: 0,
+                borderRadius: BorderRadius.circular(3),
+                borderSide: BorderSide(color: scheme.outlineVariant),
+              ),
+            ),
+          );
+          // the field's accessible name (its caption, a table column's
+          // heading): a label-only wrapper merges into the field's own
+          // node — "Client, text field, 100"
+          if (semanticsLabel != null) {
+            field = Semantics(label: semanticsLabel, child: field);
+          }
+          return _typeAheadAnchor(key, f, ctrl, s.ta, field);
         },
-        child: _typeAheadAnchor(key, f, ctrl, TextField(
-          controller: ctrl,
-          enabled: enabled,
-          obscureText: f.invisible,
-          maxLength: f.maxnrchars > 0 ? f.maxnrchars : null,
-          textAlignVertical: TextAlignVertical.center,
-          style: TextStyle(
-            fontSize: font,
-            fontFamily: 'Menlo',
-            fontFamilyFallback: const ['Courier New', 'monospace'],
-            // no tracking: Material 3's body text adds 0.5 pt a glyph, which
-            // pushed a full field's last glyph past its box
-            letterSpacing: 0,
-          ),
-          onTap: () => _edited.add(key),
-          onChanged: (value) {
-            _edited.add(key);
-            widget.onEdit?.call(f, value);
-            _typeAheadEdited(key, ctrl);
-          },
-          contextMenuBuilder: widget.onContextMenu == null
-              ? null
-              : (context, state) => _fieldTextMenu(context, state, f),
-          onSubmitted: (value) async {
-            _edited.remove(key);
-            _typeAheadSubmitted(key, value);
-            await widget.onFill(f, value);
-          },
-          decoration: InputDecoration(
-            // SAP GUI's F4 button at the right edge of the focused field
-            suffixIcon: f4
-                ? IconButton(
-                    tooltip: 'Value help (F4)',
-                    padding: EdgeInsets.zero,
-                    visualDensity: VisualDensity.compact,
-                    iconSize: font + 2,
-                    icon: const Icon(Icons.manage_search),
-                    onPressed: () => widget.onValueHelp!(f),
-                  )
-                : null,
-            suffixIconConstraints: BoxConstraints.tightFor(
-              width: font + 8,
-              height: font + 6,
-            ),
-            isDense: true,
-            counterText: '',
-            filled: true,
-            fillColor: f.isProtected
-                ? scheme.surfaceContainerHighest
-                : scheme.surfaceContainerLowest,
-            contentPadding: EdgeInsets.symmetric(
-              horizontal: cw * 0.3,
-              vertical: 0,
-            ),
-            // gapPadding 0: the outline's label gap (4 pt a side, for a
-            // floating label these fields never have) is taken off the
-            // text's width — 8 pt a 2-cell field cannot spare
-            border: OutlineInputBorder(
-              gapPadding: 0,
-              borderRadius: BorderRadius.circular(3),
-              borderSide: BorderSide(color: scheme.outlineVariant),
-            ),
-            enabledBorder: OutlineInputBorder(
-              gapPadding: 0,
-              borderRadius: BorderRadius.circular(3),
-              // the cursor field keeps its mark without the keyboard
-              borderSide: _focused == key
-                  ? BorderSide(color: scheme.primary, width: 1.5)
-                  : BorderSide(color: scheme.outlineVariant),
-            ),
-          ),
-        )),
-      );
-    });
+      ),
+    );
   }
 
   Widget _gridButton(ScreenField f, SapIconAtlas? icons, double font) =>
@@ -1711,40 +2184,52 @@ class _DynproViewState extends State<DynproView> {
     );
   }
 
+  /// A choice on the grid: the box / button and its caption read as ONE
+  /// element (the merge sits outside the InkWell, as Flutter's own
+  /// CheckboxListTile does: inside, its tap action would be forced out
+  /// into the cell around it). A bare box (a table control's column) has
+  /// no caption to merge: [semanticsLabel] names it by its column.
   Widget _gridChoice(
     ScreenField f,
     double font,
     double ch,
     Widget leading,
-    VoidCallback? onTap,
-  ) {
+    VoidCallback? onTap, {
+    String? semanticsLabel,
+  }) {
     final text = _choiceText(f);
     if (text.isEmpty) {
       // a bare box (a table control's checkbox column): it fits its cells
-      return InkWell(
+      Widget box = InkWell(
         onTap: onTap,
         child: FittedBox(child: leading),
       );
+      if (semanticsLabel != null) {
+        box = Semantics(label: semanticsLabel, child: box);
+      }
+      return MergeSemantics(child: box);
     }
-    return InkWell(
-      onTap: onTap,
-      child: Row(
-        children: [
-          SizedBox(
-            width: ch,
-            height: ch,
-            child: FittedBox(child: leading),
-          ),
-          const SizedBox(width: 2),
-          Expanded(
-            child: Text(
-              text,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(fontSize: font),
+    return MergeSemantics(
+      child: InkWell(
+        onTap: onTap,
+        child: Row(
+          children: [
+            SizedBox(
+              width: ch,
+              height: ch,
+              child: FittedBox(child: leading),
             ),
-          ),
-        ],
+            const SizedBox(width: 2),
+            Expanded(
+              child: Text(
+                text,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: font),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1754,8 +2239,9 @@ class _DynproViewState extends State<DynproView> {
     List<ScreenField> group,
     double font,
     double ch,
-    bool busy,
-  ) {
+    bool busy, {
+    String? semanticsLabel,
+  }) {
     ScreenField? current =
         widget.radioSelection != null && group.contains(widget.radioSelection)
         ? widget.radioSelection
@@ -1788,7 +2274,68 @@ class _DynproViewState extends State<DynproView> {
         onChanged: enabled ? (_) => choose() : null,
       ),
       enabled ? choose : null,
+      semanticsLabel: semanticsLabel,
     );
+  }
+
+  /// The heading of table-control cell [f]'s column, as the control paints
+  /// it ("Pos", "UA"), else the column's DDIC title; '' outside a control.
+  static String _tcHeading(
+    ScreenField f,
+    Map<String, TableControlInfo> tcs,
+    SapIconAtlas? icons,
+  ) {
+    final tc = tcs[f.tableControl];
+    if (tc == null) return '';
+    final i = (f.tcColumn ?? 0) - 1;
+    if (i < 0) return '';
+    var h = i < tc.headings.length ? tc.headings[i] : '';
+    if (h.trim().isEmpty && i < tc.titles.length) h = tc.titles[i];
+    return (icons?.stripTokens(h) ?? h.replaceAll(SapIconAtlas.tokenRx, ''))
+        .trim();
+  }
+
+  /// The accessible name of table-control cell [f]: its column's heading
+  /// and its line ("Quantity, line 3" — what SAP GUI's own accessibility
+  /// layer exposes for a cell; the cell to its left is a VALUE, never a
+  /// caption), else the field's name, else the line alone; null outside a
+  /// table control.
+  static String? _tcCellName(
+    ScreenField f,
+    Map<String, TableControlInfo> tcs,
+    SapIconAtlas? icons,
+  ) {
+    if (f.tableControl == null) return null;
+    final h = _tcHeading(f, tcs, icons);
+    if (h.isNotEmpty) return '$h, line ${f.tcLine}';
+    final n = (f.name ?? '').trim();
+    return n.isNotEmpty ? n : 'Line ${f.tcLine}';
+  }
+
+  /// The accessible name of input [f] — what a screen reader says before
+  /// "text field": a table cell's column ([_tcCellName]); else the label
+  /// the fold paired with the field, else the caption the layout paired
+  /// (the nearest text to its left, its icon tokens stripped), else the
+  /// technical name; null when there is none.
+  static String? _accessibleName(
+    ScreenField f,
+    DynproLayout layout,
+    Map<String, TableControlInfo> tcs,
+    SapIconAtlas? icons,
+  ) {
+    final cell = _tcCellName(f, tcs, icons);
+    if (cell != null) return cell;
+    var s = f.label.trim();
+    if (s.isEmpty) {
+      final cap = layout.captionOf[f];
+      if (cap != null) {
+        s = (icons?.stripTokens(cap.text) ??
+                cap.text.replaceAll(SapIconAtlas.tokenRx, ''))
+            .trim();
+      }
+    }
+    if (s.isEmpty) s = (f.name ?? '').trim();
+    return s.isEmpty ? null : s;
   }
 
   Widget _buildRows(
@@ -1905,10 +2452,36 @@ class _DynproViewState extends State<DynproView> {
           Flexible(flex: _inputChars(f), child: cellOf(f))
         else if (_isText(f) && f.text.trim().length > 40)
           Flexible(flex: 40, child: cellOf(f))
+        else if (f.kind == FieldKind.radio || f.kind == FieldKind.checkbox)
+          // a choice's label wraps rather than overflow (the wall's French
+          // options on a 402 px phone: 256 / 274 px past the dialog)
+          Flexible(flex: f.text.trim().length.clamp(1, 80), child: cellOf(f))
         else
           cellOf(f),
     ];
+    // a row of choices wider than the phone (SM37's six job-status boxes,
+    // a selection screen's option row) flows onto further lines, each box
+    // with its whole caption: squeezed into one Row the captions wrapped
+    // letter by letter beside overflowing 48 pt boxes
+    final choicesOnly = rest.isNotEmpty &&
+        rest.every(
+          (f) => f.kind == FieldKind.radio || f.kind == FieldKind.checkbox,
+        );
+    var choiceWidth = 0.0;
+    if (choicesOnly) {
+      for (final f in rest) {
+        choiceWidth += 48 + _choiceText(f).length * 8.0 + 8;
+      }
+    }
+    final flowChoices = choicesOnly && rest.length > 1 && choiceWidth > maxWidth;
+    Widget choiceFlow() => Wrap(
+      spacing: 8,
+      runSpacing: 4,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [for (final f in rest) cellOf(f)],
+    );
     if (lead == null) {
+      if (flowChoices) return choiceFlow();
       return Row(spacing: 8, children: groupChildren);
     }
     // the caption column: the painted distance to its input, in cells
@@ -1927,22 +2500,24 @@ class _DynproViewState extends State<DynproView> {
     for (final f in rest) {
       estimate += 8;
       if (_isEditable(f)) {
-        estimate += _inputChars(f) * 9.0 + 32;
+        // an F4 field carries its button ([_input] paints it so)
+        estimate += _inputChars(f) * 9.0 + 32 + (_offersF4(f) ? 44 : 0);
       } else if (_isText(f)) {
         estimate += f.text.trim().length * 8.0 + 8;
       } else {
         estimate += 48 + f.text.trim().length * 8.0;
       }
     }
-    if (estimate <= maxWidth) {
+    if (estimate <= maxWidth && !flowChoices) {
       return Row(spacing: 8, children: [caption, ...groupChildren]);
     }
     // too wide: the caption heads its own line, the fields shrink below it
+    // (a row of choices flows instead)
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(padding: const EdgeInsets.only(bottom: 2), child: caption),
-        Row(spacing: 8, children: groupChildren),
+        if (flowChoices) choiceFlow() else Row(spacing: 8, children: groupChildren),
       ],
     );
   }
@@ -1979,7 +2554,12 @@ class _DynproViewState extends State<DynproView> {
       case FieldKind.input:
         return _doubleTappable(
           f,
-          _input(f, layout.captionOf.containsKey(f), maxWidth),
+          _input(
+            f,
+            layout.captionOf.containsKey(f),
+            maxWidth,
+            semanticsLabel: _accessibleName(f, layout, const {}, icons),
+          ),
         );
       case FieldKind.combobox:
         return _doubleTappable(
@@ -1997,13 +2577,20 @@ class _DynproViewState extends State<DynproView> {
         );
       case FieldKind.checkbox:
         return _leaf(
-          (busy) => _Choice(
-            leading: Checkbox(
-              value: f.on,
-              onChanged: busy ? null : (_) => widget.onPress(0),
-            ),
-            text: _choiceText(f),
-            onTap: busy ? null : () => widget.onPress(0),
+          (busy) => _Select(
+            source: _boxTick,
+            select: (_) => _boxTicks[f] ?? f.on,
+            builder: (on) {
+              final enabled = !busy && !f.isProtected;
+              return _Choice(
+                leading: Checkbox(
+                  value: on,
+                  onChanged: enabled ? (_) => _tickBox(f) : null,
+                ),
+                text: _choiceText(f),
+                onTap: enabled ? () => _tickBox(f) : null,
+              );
+            },
           ),
         );
       case FieldKind.radio:
@@ -2087,24 +2674,41 @@ class _DynproViewState extends State<DynproView> {
     );
   }
 
-  Widget _input(ScreenField f, bool captioned, double maxWidth) {
-    final key = '${f.area}:${f.row}:${f.col}';
-    final ctrl = _controllers.putIfAbsent(
-      key,
-      () => TextEditingController(text: f.text),
-    );
+  Widget _input(
+    ScreenField f,
+    bool captioned,
+    double maxWidth, {
+    String? semanticsLabel,
+  }) {
+    final key = _cellKey(f);
+    final (ctrl, node) = _inputState(key, f.text);
     _syncPainted(key, ctrl, f.text);
+    // the reflow has no focused-field button: every F4 field carries its
+    // matchcode button (SAP's most used help; the text-selection toolbar
+    // was its only touch route), its width budgeted so a 4-character
+    // order type keeps room for its text
+    final f4 = _offersF4(f);
     // the painted width: mlen (or the type's max) in character cells; a
     // Flexible parent may shrink it, never widen it
-    final width = (_inputChars(f) * 9.0 + 32).clamp(
+    final width = (_inputChars(f) * 9.0 + 32 + (f4 ? 44 : 0)).clamp(
       64.0,
       maxWidth.clamp(64.0, 440.0),
     );
-    Widget field(bool busy) => TextField(
+    Widget field(TypeAheadController? ta) {
+      Widget w = TextField(
         controller: ctrl,
-        enabled: !busy && !f.isProtected,
+        focusNode: node,
+        enabled: !f.isProtected,
         obscureText: f.invisible,
-        onTap: () => _edited.add(key),
+        // SAP tokens, not prose: no autocorrect, no suggestions, no smart
+        // punctuation, no sentence case
+        keyboardType: TextInputType.text,
+        autocorrect: false,
+        enableSuggestions: false,
+        smartDashesType: SmartDashesType.disabled,
+        smartQuotesType: SmartQuotesType.disabled,
+        textCapitalization: TextCapitalization.none,
+        inputFormatters: [_busyFormatter],
         onChanged: (value) {
           _edited.add(key);
           widget.onEdit?.call(f, value);
@@ -2113,31 +2717,145 @@ class _DynproViewState extends State<DynproView> {
         contextMenuBuilder: widget.onContextMenu == null
             ? null
             : (context, state) => _fieldTextMenu(context, state, f),
-        onSubmitted: (value) async {
-          _edited.remove(key);
-          _typeAheadSubmitted(key, value);
-          await widget.onFill(f, value);
-        },
+        // Next between the fields, Done on the last: the action key
+        // ([_actionKey]; onSubmitted stays unset — it fires after a Next
+        // too)
+        textInputAction: _actionOf(key, f),
+        onEditingComplete: () => _actionKey(key, f, ctrl),
         decoration: InputDecoration(
           isDense: true,
           contentPadding: const EdgeInsets.symmetric(
             horizontal: 10,
             vertical: 10,
           ),
+          suffixIcon: f4 ? _f4Button(f) : null,
+          // a finger-sized button; the field grows to it
+          suffixIconConstraints: f4
+              ? const BoxConstraints(minWidth: 44, minHeight: 44)
+              : null,
           // a field without a painted caption shows its name as the hint
           hintText: !captioned && (f.name ?? '').isNotEmpty ? f.name : null,
           hintStyle: TextStyle(color: Colors.blueGrey.shade400, fontSize: 12),
         ),
       );
+      // a captioned field's accessible name; an uncaptioned one is named
+      // by its hint while empty (a name twice otherwise) — one holding a
+      // value stays unnamed, a known gap
+      if (captioned && semanticsLabel != null) {
+        w = Semantics(label: semanticsLabel, child: w);
+      }
+      return _typeAheadAnchor(key, f, ctrl, ta, w);
+    }
+
     return ConstrainedBox(
       constraints: BoxConstraints(minWidth: 48, maxWidth: width),
-      child: TypeAheadScope.maybeOf(context) == null
-          ? _leaf(field)
-          : Focus(
-              onKeyEvent: (_, e) => _typeAheadKey(key, f, ctrl, e),
-              onFocusChange: (has) => _typeAheadFocus(key, f, has, ctrl),
-              child: _leaf((busy) => _typeAheadAnchor(key, f, ctrl, field(busy))),
-            ),
+      // no semantics node, no traversal stop of its own (the grid's
+      // wrapper above says why)
+      child: Focus(
+        includeSemantics: false,
+        skipTraversal: true,
+        onKeyEvent: (_, e) => _inputKey(key, f, ctrl, e),
+        onFocusChange: (has) {
+          _typeAheadFocus(key, f, has, ctrl);
+          // the reflow's field is the cursor field too: hardware F1 / F4
+          // and the screen menu act on it
+          if (!has) return;
+          widget.onFocusField?.call(f);
+          _setCursor(key);
+        },
+        child: _Select(
+          source: _cursorN,
+          select: (c) => c.taKey == key ? c.ta : null,
+          builder: field,
+        ),
+      ),
+    );
+  }
+}
+
+/// A leaf drawn from one slice of a notifier's value: [builder] gets
+/// [select] of [source]'s value and rebuilds only when that slice changes
+/// (the [_ListCursorLine] pattern) — a focus move redraws two fields, a
+/// checkbox tick one box, not the view.
+class _Select<S, T> extends StatefulWidget {
+  const _Select({
+    required this.source,
+    required this.select,
+    required this.builder,
+  });
+
+  final ValueListenable<S> source;
+  final T Function(S value) select;
+  final Widget Function(T selected) builder;
+
+  @override
+  State<_Select<S, T>> createState() => _SelectState<S, T>();
+}
+
+class _SelectState<S, T> extends State<_Select<S, T>> {
+  late T _last;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.source.addListener(_changed);
+  }
+
+  @override
+  void didUpdateWidget(_Select<S, T> old) {
+    super.didUpdateWidget(old);
+    if (!identical(old.source, widget.source)) {
+      old.source.removeListener(_changed);
+      widget.source.addListener(_changed);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.source.removeListener(_changed);
+    super.dispose();
+  }
+
+  void _changed() {
+    if (widget.select(widget.source.value) != _last) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      widget.builder(_last = widget.select(widget.source.value));
+}
+
+/// A checkbox drawn as a glyph: a table control's checkbox column (and a
+/// classic list's), where a Material toggle's animation controllers, focus
+/// node and ripple per cell buy nothing — the tap is the cell's own. Its
+/// states keep Material's colours; a screen reader hears the state.
+class SapCheckGlyph extends StatelessWidget {
+  const SapCheckGlyph({
+    super.key,
+    required this.on,
+    required this.enabled,
+    required this.size,
+  });
+
+  final bool on;
+  final bool enabled;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Semantics(
+      checked: on,
+      enabled: enabled,
+      child: Icon(
+        on ? Icons.check_box : Icons.check_box_outline_blank,
+        size: size,
+        color: !enabled
+            ? scheme.onSurface.withValues(alpha: 0.38)
+            : on
+                ? scheme.primary
+                : scheme.onSurfaceVariant,
+      ),
     );
   }
 }
@@ -2198,15 +2916,25 @@ class _Choice extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(8),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          leading,
-          Padding(padding: const EdgeInsets.only(right: 8), child: Text(text)),
-        ],
+    // the box / button and its caption read as one element (the merge
+    // outside the InkWell, as CheckboxListTile does)
+    return MergeSemantics(
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            leading,
+            // the row bounds it (a Flexible cell): a long label wraps
+            Flexible(
+              child: Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: Text(text),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -2271,46 +2999,96 @@ class SapIconAtlasStrip extends InheritedWidget {
 }
 
 /// A dynpro group box on the grid: a thin rounded border, its title cut
-/// into the top edge (the real GUI's frame).
+/// into the top edge (the real GUI's frame). The border leaves a gap under
+/// the title rather than masking it with a surface colour: the grid is
+/// drawn on the page, in a popup and in a composed pane, each its own
+/// surface (a scaffold-coloured patch sat behind every title in a popup).
 class _GridFrame extends StatelessWidget {
   const _GridFrame({required this.title, required this.fontSize});
   final String title;
   final double fontSize;
 
+  /// Where the title starts on the frame's edge.
+  static const double _titleLeft = 12;
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final style = TextStyle(
+      fontSize: fontSize,
+      fontWeight: FontWeight.w600,
+      color: scheme.primary,
+    );
+    double? titleWidth;
+    if (title.isNotEmpty) {
+      // measured as the Text draws it (the same text scaling)
+      final tp = TextPainter(
+        text: TextSpan(text: title, style: style),
+        textDirection: TextDirection.ltr,
+        textScaler: MediaQuery.textScalerOf(context),
+      )..layout();
+      titleWidth = tp.width;
+      tp.dispose();
+    }
     return Stack(
       clipBehavior: Clip.none,
       children: [
         Positioned.fill(
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              border: Border.all(color: scheme.outlineVariant),
-              borderRadius: BorderRadius.circular(4),
+          child: CustomPaint(
+            painter: _FrameBorderPainter(
+              color: scheme.outlineVariant,
+              gapStart: titleWidth == null ? null : _titleLeft,
+              gapExtent: titleWidth ?? 0,
             ),
           ),
         ),
         if (title.isNotEmpty)
           Positioned(
-            left: 8,
+            left: _titleLeft,
             top: -fontSize * 0.75,
-            child: Container(
-              color: Theme.of(context).scaffoldBackgroundColor,
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              child: Text(
-                title,
-                style: TextStyle(
-                  fontSize: fontSize,
-                  fontWeight: FontWeight.w600,
-                  color: scheme.primary,
-                ),
-              ),
-            ),
+            child: Text(title, style: style),
           ),
       ],
     );
   }
+}
+
+/// The frame's border with the floating-label cut Flutter's outline border
+/// draws: a gap of [gapExtent] (plus the outline's own padding a side) from
+/// [gapStart]; no gap without a title.
+class _FrameBorderPainter extends CustomPainter {
+  const _FrameBorderPainter({
+    required this.color,
+    required this.gapStart,
+    required this.gapExtent,
+  });
+
+  final Color color;
+  final double? gapStart;
+  final double gapExtent;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    OutlineInputBorder(
+      borderSide: BorderSide(color: color),
+      borderRadius: BorderRadius.circular(4),
+      gapPadding: 4,
+    ).paint(
+      canvas,
+      Offset.zero & size,
+      gapStart: gapStart,
+      gapExtent: gapExtent,
+      gapPercentage: 1.0,
+      // DIAG cells are left to right whatever the locale
+      textDirection: TextDirection.ltr,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_FrameBorderPainter old) =>
+      old.color != color ||
+      old.gapStart != gapStart ||
+      old.gapExtent != gapExtent;
 }
 
 /// One tab of a tabstrip's tab bar.
@@ -2464,16 +3242,23 @@ class _DoubleTapListenerState extends State<DoubleTapListener> {
 /// A classic list line drawn with the list cursor when it is on [row]:
 /// [cursor] (a tap's) over [painted] (the paint's). A tap moves the cursor
 /// by the notifier — the line it left and the line it lands on rebuild,
-/// the view and every other line do not.
+/// the view and every other line do not; a checkbox tick ([ticked])
+/// rebuilds its own line alone the same way.
 class _ListCursorLine extends StatefulWidget {
   const _ListCursorLine({
     required this.cursor,
+    required this.ticked,
+    required this.line,
     required this.painted,
     required this.row,
     required this.builder,
   });
 
   final ValueListenable<(int, int)?> cursor;
+
+  /// The view's last checkbox tick: this [line]'s own rebuilds it.
+  final ValueListenable<(ListLine, int, bool)?> ticked;
+  final ListLine line;
   final (int, int)? painted;
   final int row;
   final Widget Function(int? cursorCol) builder;
@@ -2494,6 +3279,7 @@ class _ListCursorLineState extends State<_ListCursorLine> {
   void initState() {
     super.initState();
     widget.cursor.addListener(_moved);
+    widget.ticked.addListener(_ticked);
   }
 
   @override
@@ -2503,16 +3289,25 @@ class _ListCursorLineState extends State<_ListCursorLine> {
       old.cursor.removeListener(_moved);
       widget.cursor.addListener(_moved);
     }
+    if (!identical(old.ticked, widget.ticked)) {
+      old.ticked.removeListener(_ticked);
+      widget.ticked.addListener(_ticked);
+    }
   }
 
   @override
   void dispose() {
     widget.cursor.removeListener(_moved);
+    widget.ticked.removeListener(_ticked);
     super.dispose();
   }
 
   void _moved() {
     if (_colNow() != _col) setState(() {});
+  }
+
+  void _ticked() {
+    if (identical(widget.ticked.value?.$1, widget.line)) setState(() {});
   }
 
   @override
@@ -2533,20 +3328,21 @@ class _TcCell {
 /// window built (a viewport of margin on either side — TC_1211's 35
 /// columns are all of them; a control hundreds of cells wide builds a
 /// few): rebuilt when the scroll moves a viewport, not per scroll frame.
-/// The [keep] cell (the cursor field) stays built wherever it scrolls, so
-/// it keeps its focus.
+/// The cursor field's cell ([cursor]'s key) stays built wherever it
+/// scrolls, so it keeps its focus; a cursor move rebuilds this alone (its
+/// children are the same instances: nothing below redraws).
 class _TcColumns extends StatefulWidget {
   const _TcColumns({
     required this.controller,
     required this.viewport,
     required this.cells,
-    this.keep,
+    required this.cursor,
   });
 
   final ScrollController controller;
   final double viewport;
   final List<_TcCell> cells;
-  final String? keep;
+  final ValueListenable<_Cursor> cursor;
 
   @override
   State<_TcColumns> createState() => _TcColumnsState();
@@ -2554,6 +3350,7 @@ class _TcColumns extends StatefulWidget {
 
 class _TcColumnsState extends State<_TcColumns> {
   int _page = 0;
+  String? _keep;
 
   int _pageNow() {
     final c = widget.controller;
@@ -2565,6 +3362,7 @@ class _TcColumnsState extends State<_TcColumns> {
   void initState() {
     super.initState();
     widget.controller.addListener(_scrolled);
+    widget.cursor.addListener(_cursorMoved);
   }
 
   @override
@@ -2574,11 +3372,16 @@ class _TcColumnsState extends State<_TcColumns> {
       old.controller.removeListener(_scrolled);
       widget.controller.addListener(_scrolled);
     }
+    if (!identical(old.cursor, widget.cursor)) {
+      old.cursor.removeListener(_cursorMoved);
+      widget.cursor.addListener(_cursorMoved);
+    }
   }
 
   @override
   void dispose() {
     widget.controller.removeListener(_scrolled);
+    widget.cursor.removeListener(_cursorMoved);
     super.dispose();
   }
 
@@ -2586,16 +3389,21 @@ class _TcColumnsState extends State<_TcColumns> {
     if (_pageNow() != _page) setState(() {});
   }
 
+  void _cursorMoved() {
+    if (widget.cursor.value.key != _keep) setState(() {});
+  }
+
   @override
   Widget build(BuildContext context) {
     final page = _page = _pageNow();
+    final keep = _keep = widget.cursor.value.key;
     final v = widget.viewport;
     final lo = (page - 1) * v, hi = (page + 3) * v;
     return Stack(
       children: [
         for (final c in widget.cells)
           if ((c.right >= lo && c.left <= hi) ||
-              (c.cellKey != null && c.cellKey == widget.keep))
+              (c.cellKey != null && c.cellKey == keep))
             c.widget,
       ],
     );

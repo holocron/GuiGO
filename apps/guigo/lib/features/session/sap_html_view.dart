@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/foundation.dart' show Uint8List;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -461,6 +463,14 @@ class SapHtmlView extends StatefulWidget {
   final Map<String, Uint8List> parts;
   final String baseUrl;
 
+  /// The least a form control (a text input, an image button) spans, in
+  /// points: a finger's (iOS's 44), not the glyph's. A control is a
+  /// placeholder in its line of text and is hit only inside its own box,
+  /// so the box itself grows — a date button of 27 points was missed and
+  /// the tap died on the text around it. Material's 48 would inflate
+  /// every form row (each is one line) for little more.
+  static const double controlHitPoints = 44;
+
   /// The pushed file [src] names, null when none was pushed: by its url
   /// (absolute), its url under [baseUrl]'s directory, else any pushed file
   /// of that name.
@@ -556,18 +566,19 @@ class _SapHtmlViewState extends State<SapHtmlView> {
   }
 
   /// An editable text input (its painted value to start with, `size`
-  /// characters wide).
-  Widget _inputBox(HtmlRun r, TextStyle style, ColorScheme scheme) {
+  /// characters wide). [fs] is the font size as drawn (the system's text
+  /// size applied): the box follows the glyphs, else a larger text
+  /// setting clipped the field.
+  Widget _inputBox(HtmlRun r, TextStyle style, ColorScheme scheme, double fs) {
     final name = r.input!;
     final c = _inputs.putIfAbsent(name, () => TextEditingController(text: r.value));
-    final fs = style.fontSize ?? 14;
     final chars = (r.size ?? 10).clamp(2, 40);
     final enter = widget.onFormEnter;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
       child: SizedBox(
         width: chars * fs * 0.62 + 14,
-        height: fs * 1.9,
+        height: math.max(SapHtmlView.controlHitPoints, fs * 1.9),
         child: TextField(
           key: ValueKey('html-input-$name'),
           controller: c,
@@ -587,9 +598,9 @@ class _SapHtmlViewState extends State<SapHtmlView> {
   }
 
   /// A button drawn as its image (the pushed GIF, else an icon of its
-  /// kind), its label the tooltip.
-  Widget _imageButton(HtmlRun r, TextStyle style, ColorScheme scheme) {
-    final fs = style.fontSize ?? 14;
+  /// kind) at the text's size [fs], its label the tooltip; the tap target
+  /// is [SapHtmlView.controlHitPoints] square around it.
+  Widget _imageButton(HtmlRun r, ColorScheme scheme, double fs) {
     final src = r.image!;
     final bytes = SapHtmlView.partFor(src, widget.baseUrl, widget.parts);
     final side = (fs * 1.35).roundToDouble();
@@ -607,24 +618,33 @@ class _SapHtmlViewState extends State<SapHtmlView> {
           );
     final label = r.text.trim();
     final enabled = r.button != null ? _canSubmit : (r.href != null && widget.onLink != null);
+    // the glyph box stays at its size, centred in a finger-sized ink well
+    // (the well must fill the hit box, the painting inside it)
+    final hit = math.max(SapHtmlView.controlHitPoints, side + 8);
     return Tooltip(
       message: label,
       child: Semantics(
         button: true,
         label: label,
-        child: InkWell(
-          key: ValueKey('html-button-${r.button ?? r.href ?? label}'),
-          onTap: enabled ? () => _submit(r) : null,
-          borderRadius: BorderRadius.circular(3),
-          child: Container(
-            margin: const EdgeInsets.symmetric(horizontal: 1, vertical: 1),
-            padding: const EdgeInsets.all(3),
-            decoration: BoxDecoration(
-              border: Border.all(color: scheme.outline),
-              borderRadius: BorderRadius.circular(3),
-              color: scheme.surfaceContainerHighest,
+        child: SizedBox(
+          width: hit,
+          height: hit,
+          child: InkWell(
+            key: ValueKey('html-button-${r.button ?? r.href ?? label}'),
+            onTap: enabled ? () => _submit(r) : null,
+            borderRadius: BorderRadius.circular(3),
+            child: Center(
+              child: Container(
+                margin: const EdgeInsets.symmetric(horizontal: 1, vertical: 1),
+                padding: const EdgeInsets.all(3),
+                decoration: BoxDecoration(
+                  border: Border.all(color: scheme.outline),
+                  borderRadius: BorderRadius.circular(3),
+                  color: scheme.surfaceContainerHighest,
+                ),
+                child: img,
+              ),
             ),
-            child: img,
           ),
         ),
       ),
@@ -647,6 +667,10 @@ class _SapHtmlViewState extends State<SapHtmlView> {
     final html = widget.html;
     final scheme = Theme.of(context).colorScheme;
     final base = Theme.of(context).textTheme.bodyMedium ?? const TextStyle(fontSize: 14);
+    // the controls' boxes follow the text as the system draws it (the text
+    // scaler alone: a whole-MediaQuery dependency rebuilt per keyboard
+    // frame elsewhere); the text itself scales on its own
+    final scaler = MediaQuery.textScalerOf(context);
     final blocks = _blocksOf(html);
     if (blocks.isEmpty) return _source(context, base);
     InlineSpan span(HtmlRun r, TextStyle style) {
@@ -656,10 +680,14 @@ class _SapHtmlViewState extends State<SapHtmlView> {
         fontFamily: r.mono ? 'Menlo' : null,
       );
       if (r.control && r.input != null) {
-        return WidgetSpan(alignment: PlaceholderAlignment.middle, child: _inputBox(r, st, scheme));
+        return WidgetSpan(
+            alignment: PlaceholderAlignment.middle,
+            child: _inputBox(r, st, scheme, scaler.scale(st.fontSize ?? 14)));
       }
       if (r.control && r.image != null) {
-        return WidgetSpan(alignment: PlaceholderAlignment.middle, child: _imageButton(r, st, scheme));
+        return WidgetSpan(
+            alignment: PlaceholderAlignment.middle,
+            child: _imageButton(r, scheme, scaler.scale(st.fontSize ?? 14)));
       }
       if (r.control) {
         st = st.copyWith(

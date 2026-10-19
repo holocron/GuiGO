@@ -1,8 +1,10 @@
 import 'dart:math' as math;
 
 import 'package:diag_protocol/diag_protocol.dart';
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart' show CustomSemanticsAction;
 
 import '../../core/sap_icons.dart';
 
@@ -116,19 +118,48 @@ class SapListPalette {
 class SapListMetrics {
   SapListMetrics(this.style, this.cw, this.lh);
 
-  /// The cells measured so far, by (base style, font size): a list
-  /// rebuild — a tap, a tick, a busy flip — laid a TextPainter out anew.
-  static final Map<(TextStyle, double), SapListMetrics> _measured = {};
+  /// The cells measured so far, by (base style, font size, line floor): a
+  /// list rebuild — a tap, a tick, a busy flip — laid a TextPainter out
+  /// anew.
+  static final Map<(TextStyle, double, double), SapListMetrics> _measured = {};
 
-  factory SapListMetrics.of(TextStyle base, double fontSize) {
-    final key = (base, fontSize);
+  /// The line a finger lands on: a classic list line on a touch platform
+  /// is never under it, whatever the font (a 170-column where-used list
+  /// fitted to a phone's width reads at the 10-point floor: 15-point
+  /// lines, a finger over two or three). A tap floor, not SAP geometry —
+  /// the character cell keeps the server's grid, and the frame's rails
+  /// still join as every line is the same height. The same 30 points as
+  /// an ALV grid row and the dynpro's field row cap.
+  static const double touchLine = 30;
+
+  /// The floor [of] applies when none is given: [touchLine] on a touch
+  /// platform (the phones; a widget test runs as Android), none on a
+  /// desktop (the macOS target keeps SAP GUI's 1.5-em lines).
+  static double get defaultMinLine => switch (defaultTargetPlatform) {
+    TargetPlatform.iOS ||
+    TargetPlatform.android ||
+    TargetPlatform.fuchsia => touchLine,
+    _ => 0,
+  };
+
+  factory SapListMetrics.of(
+    TextStyle base,
+    double fontSize, {
+    double? minLine,
+  }) {
+    final floor = minLine ?? defaultMinLine;
+    final key = (base, fontSize, floor);
     final known = _measured[key];
     if (known != null) return known;
     if (_measured.length >= 64) _measured.clear(); // a bound, never reached
-    return _measured[key] = SapListMetrics._measure(base, fontSize);
+    return _measured[key] = SapListMetrics._measure(base, fontSize, floor);
   }
 
-  factory SapListMetrics._measure(TextStyle base, double fontSize) {
+  factory SapListMetrics._measure(
+    TextStyle base,
+    double fontSize,
+    double minLine,
+  ) {
     // every glyph on the cell's advance: no inherited letter / word
     // spacing (the theme's bodyMedium carries 0.25), no weight
     final style = base.copyWith(
@@ -146,7 +177,8 @@ class SapListMetrics {
     )..layout();
     final cw = tp.width / 20;
     tp.dispose();
-    return SapListMetrics(style, cw, (fontSize * 1.5).roundToDouble());
+    final lh = math.max((fontSize * 1.5).roundToDouble(), minLine);
+    return SapListMetrics(style, cw, lh);
   }
 
   final TextStyle style;
@@ -173,9 +205,17 @@ int sapListColumns(Iterable<ListLine?> rows) {
 /// reports the tapped column ([onTapAt]) — the owner places the list
 /// cursor there (no round: a recorded session, a
 /// click sends no frame) — and a second tap in time the double-click
-/// ([onDoubleTapAt]: the pick, F2 with the cursor there, g9); a checkbox
-/// tap stages its value ([onCheck]) and wins over the line's. [cursorCol]
-/// draws the list cursor's cell.
+/// ([onDoubleTapAt]: the pick, F2 with the cursor there, g9). A tap on a
+/// HOTSPOT run (`FORMAT HOTSPOT`, SFE extension 0x04: the SE16 standard
+/// list's cells, a recorded session srv_17_18; the SE11 hit
+/// list's sort headings, a recorded session srv_60_68) is the pick at
+/// once, as the real GUI's single click on one is, and a second tap in
+/// time is not also a double-click (the grid's rule for its hotspots). A
+/// checkbox tap stages its value ([onCheck]) and wins over the line's.
+/// [cursorCol] draws the list cursor's cell and tints the cursor's line.
+///
+/// A screen reader gets the line's tap at its first hotspot (else its
+/// first text run) and the pick as a custom action, 'Choose (F2)'.
 class SapListLineView extends StatelessWidget {
   const SapListLineView({
     super.key,
@@ -198,8 +238,9 @@ class SapListLineView extends StatelessWidget {
   final double width;
   final SapIconAtlas? icons;
 
-  /// A tap / the second tap of a double-tap at buffer column (the cell
-  /// under the finger).
+  /// A tap at buffer column (the cell under the finger), and the pick
+  /// there: the second tap of a double-tap, or the single tap of a
+  /// hotspot cell.
   final ValueChanged<int>? onTapAt;
   final ValueChanged<int>? onDoubleTapAt;
 
@@ -217,10 +258,24 @@ class SapListLineView extends StatelessWidget {
     final cw = metrics.cw, lh = metrics.lh;
     if (l == null) return SizedBox(width: width, height: lh);
     final boxes = <Widget>[]; // the checkboxes: above the line's taps
+    // a glyph's box — an icon's, a checkbox's: the line's height, at most
+    // its two-cell slot (a finger-high line keeps character-sized glyphs)
+    final box = math.min(lh, cw * 2.4);
     final children = <Widget>[
       Positioned.fill(
         child: CustomPaint(painter: _ListLinePainter(l, cw, lh, palette)),
       ),
+      // the cursor's line, tinted the width of the list: the cell box
+      // alone is a few points wide (over the bands and under the text)
+      if (cursorCol != null)
+        Positioned.fill(
+          key: const ValueKey('sap-list-cursor-band'),
+          child: IgnorePointer(
+            child: ColoredBox(
+              color: (cursorColor ?? palette.text).withValues(alpha: 0.10),
+            ),
+          ),
+        ),
       if (cursorCol != null)
         Positioned(
           key: const ValueKey('sap-list-cursor'),
@@ -261,13 +316,16 @@ class SapListLineView extends StatelessWidget {
       if (code != null) {
         final cp = icons?.codepoint(code);
         Widget glyph = cp == null
-            ? Icon(Icons.circle_outlined, size: lh * 0.6, color: palette.text)
+            ? Icon(Icons.circle_outlined, size: box * 0.6, color: palette.text)
             : Text(
                 String.fromCharCode(cp),
                 textScaler: TextScaler.noScaling,
+                // the glyph is a private-use character: its quick info
+                // is what a reader says
+                semanticsLabel: s.tip ?? '',
                 style: TextStyle(
                   fontFamily: 'SapIcons',
-                  fontSize: lh * 0.72,
+                  fontSize: box * 0.72,
                   height: 1.0,
                   color: palette.foreground(s),
                 ),
@@ -283,19 +341,21 @@ class SapListLineView extends StatelessWidget {
       } else if (s.checkbox) {
         final on = checkedOf?.call(s) ?? s.checked;
         final enabled = s.input && onCheck != null;
-        final box = math.min(lh, cw * 2.4);
+        // the hit area: the box's cell and one either side (the list
+        // paints a blank cell after it: the where-used list's at column
+        // 2, SM37's at 1), the line's full height — a finger's, where the
+        // glyph is 14-19 points
+        final hit = math.max(box, 3 * cw);
         boxes.add(Positioned(
-          left: s.col * cw + cw / 2 - box / 2,
-          top: (lh - box) / 2,
-          width: box,
-          height: box,
-          child: FittedBox(
-            child: Checkbox(
-              value: on,
-              visualDensity: VisualDensity.compact,
-              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              onChanged: enabled ? (v) => onCheck!(s, v ?? false) : null,
-            ),
+          left: s.col * cw + cw / 2 - hit / 2,
+          top: 0,
+          width: hit,
+          height: lh,
+          child: SapListCheckGlyph(
+            on: on,
+            enabled: enabled,
+            size: box,
+            onTap: enabled ? () => onCheck!(s, !on) : null,
           ),
         ));
       }
@@ -322,6 +382,13 @@ class SapListLineView extends StatelessWidget {
           SerialTapGestureRecognizer.new,
           (r) => r.onSerialTapUp = (d) {
             final col = math.max(0, (d.localPosition.dx / cw).floor());
+            if (_hotspotAt(l, col)) {
+              // the hotspot click: the pick, at once; a second tap in
+              // time is not also a double-click (sap_grid_view
+              // _cellGestures: the click already went to the server)
+              if (d.count == 1) (onDoubleTapAt ?? onTapAt)?.call(col);
+              return;
+            }
             final f = d.count >= 2 ? onDoubleTapAt ?? onTapAt : onTapAt;
             f?.call(col);
           },
@@ -329,14 +396,54 @@ class SapListLineView extends StatelessWidget {
       },
       child: Stack(clipBehavior: Clip.hardEdge, children: children),
     );
+    // a screen reader's tap lands on the first hotspot, else the first
+    // text run; the pick (the double-click) is its own action
+    final readerCol = _readerColumn(l);
+    final pick = onDoubleTapAt ?? onTapAt;
     return SizedBox(
       width: width,
       height: lh,
       child: Stack(
         clipBehavior: Clip.hardEdge,
-        children: [Positioned.fill(child: taps), ...boxes],
+        children: [
+          Positioned.fill(
+            child: Semantics(
+              onTap: onTapAt == null ? null : () => onTapAt!(readerCol),
+              customSemanticsActions: pick == null
+                  ? null
+                  : {
+                      const CustomSemanticsAction(label: 'Choose (F2)'): () =>
+                          pick(readerCol),
+                    },
+              child: taps,
+            ),
+          ),
+          ...boxes,
+        ],
       ),
     );
+  }
+
+  /// Whether buffer column [col] of [l] lies in a hotspot run (any run:
+  /// `WRITE icon AS ICON HOTSPOT` too, and a blank hotspot run).
+  static bool _hotspotAt(ListLine l, int col) {
+    for (final s in l.segments) {
+      if (s.hotspot && s.covers(col)) return true;
+    }
+    return false;
+  }
+
+  /// The column a screen reader's tap lands on: the first hotspot run's,
+  /// else the first text run's, else the line's start.
+  static int _readerColumn(ListLine l) {
+    for (final s in l.segments) {
+      if (s.hotspot) return s.col;
+    }
+    final plain = _plainOf(l);
+    for (final s in plain) {
+      if (s.text.trim().isNotEmpty) return s.col;
+    }
+    return l.col0;
   }
 
   /// The line's text as spans on the cell grid: frames, icons and
@@ -368,6 +475,58 @@ class SapListLineView extends StatelessWidget {
       at = s.col + text.length;
     }
     return out;
+  }
+}
+
+/// A checkbox cell — a list's, a table control's — as a glyph, not a
+/// Material toggle: a Checkbox brings four animation controllers, a focus
+/// node and a dozen elements to every cell (SM37, SP01: one per line on
+/// screen; ME21N's two checkbox columns) for a tick that only stages a
+/// value. The glyph keeps Material's three looks — on in the primary
+/// colour, off outlined, disabled greyed — and a reader's checked state;
+/// without [onTap] it is inert and still swallows the tap (a disabled box
+/// is not the line's cursor cell); with none the owner's own tap layer
+/// (a table control cell's InkWell) takes it.
+class SapListCheckGlyph extends StatelessWidget {
+  const SapListCheckGlyph({
+    super.key,
+    required this.on,
+    required this.enabled,
+    required this.size,
+    this.onTap,
+  });
+
+  final bool on;
+  final bool enabled;
+  final double size;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final color = !enabled
+        ? scheme.onSurface.withValues(alpha: 0.38)
+        : on
+        ? scheme.primary
+        : scheme.onSurfaceVariant;
+    final glyph = Center(
+      child: Icon(
+        on ? Icons.check_box : Icons.check_box_outline_blank,
+        size: size,
+        color: color,
+      ),
+    );
+    return Semantics(
+      checked: on,
+      enabled: enabled,
+      child: onTap == null && enabled
+          ? glyph
+          : GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: onTap,
+              child: glyph,
+            ),
+    );
   }
 }
 

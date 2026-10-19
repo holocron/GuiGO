@@ -25,7 +25,10 @@ class DpPush {
 /// push — pinned ones included — is held under (the reference client's
 /// diag_dealdrive _DP_CACHE_MAX / _DP_PIN_MAX_BYTES, its 54 GB SWDD runaway
 /// guard). Pushes are multi-MB on ALV / chart / editor screens: an
-/// unbounded cache grows for the logon's whole life.
+/// unbounded cache grows for the logon's whole life. The byte ceiling
+/// counts a push's wire segment AND the decoded memos its readers pinned
+/// on it ([DpCache.decodedBytes]); a phone session's windows are held
+/// under TransportLimits.dpCacheBytes, a fraction of this.
 const int dpCacheMaxEntries = 256;
 const int dpCacheMaxBytes = 32 << 20;
 
@@ -76,8 +79,29 @@ class DpCache {
   /// the snoop — the reference client's `_fresh`).
   Set<String> lastIngested = const {};
 
-  /// Bytes held over every cached segment.
+  /// Bytes held over every cached segment (the wire form alone).
   int get bytes => _bytes;
+
+  /// Bytes the decoded memos of the cached segments hold — the inflated
+  /// content ([dpPutContent]) and column cells ([dpColumnCells]) their
+  /// readers pinned on them, alive as long as the segment is cached
+  /// ([dpDecodedBytes] per segment). Counted with [bytes] against
+  /// [maxBytes] at every sweep: the ceiling once held the compressed
+  /// segments alone while the inflated cells, several times their size,
+  /// sat uncounted beside them (audit perf1 dp-cache-decoded). Computed on
+  /// read (two memo lookups per entry): no running counter to drift.
+  int get decodedBytes {
+    var n = 0;
+    for (final seg in byUrl.values) {
+      n += dpDecodedBytes(seg);
+    }
+    return n;
+  }
+
+  /// Hold the caps now — what a round's readers decoded since the last
+  /// ingest counts from here, not from the next push; the latest ingest's
+  /// own pushes are never victims ([lastIngested]).
+  void sweep() => _sweep(lastIngested);
 
   /// The arrival counter: one more per new url stored and per re-push of
   /// a cached url whose bytes changed (a tree refreshed under its stable
@@ -212,7 +236,8 @@ class DpCache {
   /// the victims are the least recently written pushes bound to a DEAD
   /// control, then the unbound ones — never one feeding a live control nor
   /// one of [fresh]; then everything but [fresh] is held under [maxBytes],
-  /// least recently written first.
+  /// least recently written first — each push weighing its segment plus
+  /// its decoded memos ([dpDecodedBytes]).
   void _sweep(Set<String> fresh) {
     final maxN = maxEntries;
     if (maxN != null && order.length > maxN) {
@@ -233,18 +258,60 @@ class DpCache {
       _drop(drop);
     }
     final maxB = maxBytes;
-    if (maxB != null && _bytes > maxB) {
-      final drop = <String>{};
-      var over = _bytes - maxB;
-      for (final u in _recency) {
-        if (over <= 0) break;
-        if (fresh.contains(u)) continue;
-        drop.add(u);
-        over -= byUrl[u]!.length;
+    if (maxB == null) return;
+    var over = _bytes + decodedBytes - maxB;
+    if (over <= 0) return;
+    final drop = <String>{};
+    for (final u in _recency) {
+      if (over <= 0) break;
+      if (fresh.contains(u)) continue;
+      drop.add(u);
+      final seg = byUrl[u]!;
+      over -= seg.length + dpDecodedBytes(seg);
+    }
+    _drop(drop);
+  }
+}
+
+/// The bytes the decoded memos of [seg] hold: its [dpPutContent] content
+/// and every [dpColumnCells] cell that is its own buffer (an inline `03
+/// 04` row is a view into the segment, which [DpCache.bytes] counts
+/// already; an inflated `03 05` cell and the joined content are fresh).
+/// 0 before any reader decoded it.
+int dpDecodedBytes(Uint8List seg) {
+  var n = 0;
+  // (ByteBuffer equality is the underlying data's: a view's buffer is the
+  // segment's)
+  final own = seg.buffer;
+  final content = _contentMemo[seg]?.content?.content;
+  if (content != null && content.buffer != own) n += content.length;
+  final cols = _columnMemo[seg];
+  if (cols != null) {
+    for (final (_, _, cells) in cols.values) {
+      for (final c in cells) {
+        if (c.buffer != own) n += c.length;
       }
-      _drop(drop);
     }
   }
+  return n;
+}
+
+/// The DP pushes received [frame] carries, url -> segment, exactly as a
+/// one-frame `DpCache..ingestFrame(frame)` holds them in [DpCache.byUrl]
+/// (a url pushed twice keeps its first place and its last segment) —
+/// without building the cache: a reader that only looks a turn's pushes
+/// up (the type-ahead proposal) pays the memoized decode and walk alone.
+Map<String, Uint8List> dpPushesInFrame(Uint8List frame) {
+  final out = <String, Uint8List>{};
+  final dec = decompressFrame(frame);
+  if (dec == null) return out;
+  for (final it in dec.walk.items) {
+    if (!it.isAppl || it.id != applRfcTr) continue;
+    for (final (url, seg) in _pushesOf(it.value)) {
+      out[url] = seg;
+    }
+  }
+  return out;
 }
 
 bool _sameBytes(Uint8List a, Uint8List b) {
@@ -342,7 +409,24 @@ class DpContent {
 
 /// The raw content a DP_PUT delivers for its DESURL (dp_put_content port):
 /// the DATAASC/DATABIN column's LZH object, bounded by TOTALSIZE when set.
-DpContent? dpPutContent(Uint8List seg) {
+///
+/// Memoized per [seg] object, as [dpColumnCells]: a cached push is read by
+/// every consumer of its url (each OpenDocument verb, every Install
+/// ReadOnlyTemplate over ALL cached pushes, the frontend-file writes, the
+/// publish-url answer) and its bytes never change. The [DpContent] — and its
+/// [DpContent.content] — is shared: read it, copy before changing it.
+DpContent? dpPutContent(Uint8List seg) =>
+    (_contentMemo[seg] ??= _ContentMemo(_dpPutContent(seg))).content;
+
+final Expando<_ContentMemo> _contentMemo = Expando('DP push content');
+
+/// A [dpPutContent] result, null included (an Expando holds no null).
+class _ContentMemo {
+  const _ContentMemo(this.content);
+  final DpContent? content;
+}
+
+DpContent? _dpPutContent(Uint8List seg) {
   seg = _queueReassembled(seg);
   final (name, dims, cells) = dpColumnCells(seg, 'DATAASC');
   var column = name;
@@ -555,7 +639,19 @@ String? _scalarText(Uint8List seg, String name) {
 
 /// ((width, count), [cell bytes]) of a DP column — inline `03 04` rows or
 /// LZH `03 05` cells alike (_dp_column_cells port).
-(String, (int, int), List<Uint8List>) dpColumnCells(Uint8List seg, String name) {
+///
+/// Memoized per ([seg] object, [name]): a cached push segment is stable
+/// until evicted and every side model re-reads its FORMAT / DATAASC
+/// columns (each re-inflating every `03 05` cell). The cell list is
+/// unmodifiable and the cells are shared: read them, copy before changing.
+(String, (int, int), List<Uint8List>) dpColumnCells(Uint8List seg, String name) =>
+    (_columnMemo[seg] ??= {})[name] ??= _dpColumnCells(seg, name);
+
+final Expando<Map<String, (String, (int, int), List<Uint8List>)>> _columnMemo =
+    Expando('DP column cells');
+
+(String, (int, int), List<Uint8List>) _dpColumnCells(
+    Uint8List seg, String name) {
   final anchor = Uint8List.fromList([
     0x03, 0x01,
     (name.length >> 8) & 0xff, name.length & 0xff,
@@ -611,7 +707,7 @@ String? _scalarText(Uint8List seg, String name) {
       j += 1;
     }
   }
-  return (name, dims, cells);
+  return (name, dims, List.unmodifiable(cells));
 }
 
 int _indexOf(Uint8List b, Uint8List needle, int from) {
@@ -687,12 +783,6 @@ List<FmtColumn>? placeholderColumns(Uint8List dec) {
     run += c.length;
   }
   if (!coherent) {
-    var o = 0;
-    cols.map((c) {
-      final f = o;
-      o += c.length;
-      return (c, f);
-    }).toList();
     // rebuild with sequential offsets
     var off2 = 0;
     final fixed = <FmtColumn>[];

@@ -130,8 +130,14 @@ class _WindowState {
     this.origin, {
     required int screenRows,
     required int screenCols,
+    required TransportLimits limits,
     this.parentMode,
-  }) : ea = EaSession(screenRows: screenRows, screenCols: screenCols),
+  }) : ea = EaSession(
+         screenRows: screenRows,
+         screenCols: screenCols,
+         dpCacheEntries: limits.dpCacheEntries,
+         dpCacheBytes: limits.dpCacheBytes,
+       ),
        ctx = ActionContext(screenRows: screenRows, screenCols: screenCols);
 
   final int mode;
@@ -283,7 +289,11 @@ class _WindowTable {
   /// The logon's own system (imode_scope.dart [HomeSystem]), latched from
   /// its first frame naming one — shared by every window.
   final HomeSystem home = HomeSystem();
+  /// The most recently closed windows (the newest [maxClosedKept]), and
+  /// how many closed in all.
   final List<SapWindow> closed = [];
+  int closedCount = 0;
+  static const int maxClosedKept = 64;
   late _WindowState w;
   int liveMode = 0;
   _WindowState get live => open[liveMode] ?? w;
@@ -310,10 +320,11 @@ class _WindowTable {
   /// the server's addressing frames from here on, until the action ends.
   bool handedBack = false;
 
-  /// The window the awaited action's frames were last parked on — where
-  /// the conversation went when the server falls silent with no frame
-  /// addressing the action's own window ([SapSessionWindows._handBackToParked]).
-  _WindowState? lastParked;
+  /// The parked payloads that ADDRESS their window ([frameAddressesWindow],
+  /// read when the frame was routed — a queued payload may be SNC-wrapped):
+  /// only such a frame can take the conversation to its window when the
+  /// server falls silent ([SapSessionWindows._handBackToParked]).
+  final Expando<bool> parkedAddressing = Expando('parkedAddressing');
 
   /// A hand-back put the window's parked frames (and the frame itself) back
   /// on the inbox: the receive reads on instead of ending the turn.
@@ -576,7 +587,7 @@ extension SapSessionWindows on SapSession {
         } else {
           win.queue.add(payload);
           _parkedQueued(win);
-          if (_modes.awaitingReply) _modes.lastParked = win;
+          if (addresses) _modes.parkedAddressing[payload] = true;
           _trace(
             '[mode] frame of window (${win.number}) (DIAG mode $m, step '
             '$step) parked while window (${_modes.live.number}) is addressed',
@@ -631,6 +642,7 @@ extension SapSessionWindows on SapSession {
       origin,
       screenRows: screenRows,
       screenCols: screenCols,
+      limits: limits,
       parentMode: _modes.liveMode,
     );
     // the frontend's listbox value sets are the connection's, not a window's
@@ -693,8 +705,7 @@ extension SapSessionWindows on SapSession {
     _follow(win);
     _modes
       ..awaitingReply = false
-      ..handedBack = true
-      ..lastParked = null;
+      ..handedBack = true;
     if (win.queue.isEmpty) return false;
     _inbox.addFirst(payload);
     for (final p in win.queue.reversed) {
@@ -706,23 +717,32 @@ extension SapSessionWindows on SapSession {
   }
 
   /// The action's server went silent and nothing addressed the window it
-  /// was sent from, but frames of another open window were parked
-  /// meanwhile: the conversation is THERE (the server waits on that
-  /// window, never on the silent one) — follow it and read its parked
-  /// frames as the action's (they are read again, routed to it). Returns
-  /// whether there was such a window.
+  /// was sent from, but another open window holds a parked frame that
+  /// ADDRESSES it (an SES, a paint, a non-tick RFC — parked before this
+  /// action, after its own window had been answered): the conversation is
+  /// THERE (the server waits on that window, never on the silent one) —
+  /// follow it and read its parked frames as the action's (they are read
+  /// again, routed to it). Parked sid-6 ticks alone never qualify: a tick
+  /// precedes EVERY mode-1 answer of a debugger key and is not a hand-back
+  /// (a recorded session s[71] / s[74] / s[77], each followed by
+  /// the mode-1 flush + repaint) — the action keeps waiting on its own
+  /// window. Returns whether there was such a window.
   bool _handBackToParked() {
-    final win = _modes.lastParked;
-    _modes.lastParked = null;
-    if (!_modes.awaitingReply || win == null) return false;
-    if (!identical(_modes.open[win.mode], win) ||
-        win.mode == _modes.liveMode) {
-      return false;
-    }
+    if (!_modes.awaitingReply) return false;
+    final opens = _modes.open.values.toList()
+      ..sort((a, b) => a.mode.compareTo(b.mode));
+    final win = opens
+        .where(
+          (w) =>
+              w.mode != _modes.liveMode &&
+              w.queue.any((p) => _modes.parkedAddressing[p] ?? false),
+        )
+        .firstOrNull;
+    if (win == null) return false;
     _trace(
       '[mode] no reply in window (${_modes.live.number}) and the server is '
-      'silent: its last frames went to window (${win.number}) — following '
-      'it',
+      'silent: window (${win.number}) holds a parked frame addressing it — '
+      'following it',
     );
     _follow(win);
     _modes
@@ -754,6 +774,10 @@ extension SapSessionWindows on SapSession {
     final win = _modes.open.remove(f[0]);
     if (win == null) return;
     _modes.closed.add(win.snapshot(active: false, closed: true));
+    _modes.closedCount++;
+    if (_modes.closed.length > _WindowTable.maxClosedKept) {
+      _modes.closed.removeAt(0);
+    }
     win.queue.clear();
     if (win.mode != _modes.liveMode) {
       // another window than the live one (`/i<n>`): the live one continues
@@ -926,7 +950,7 @@ extension SapSessionWindows on SapSession {
       _modes.liveMode,
       for (final w in ws)
         '${w.mode}/${w.number}/${w.title}/${w.program}/${w.dynpro}',
-      _modes.closed.length,
+      _modes.closedCount,
     ].join('|');
     if (sig == _modes.signature) return;
     _modes.signature = sig;

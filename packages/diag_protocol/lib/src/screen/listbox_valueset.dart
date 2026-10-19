@@ -120,7 +120,7 @@ List<String> listboxIdsOf(Iterable<Uint8List> frames) {
     if (dec == null) continue;
     for (final it in dec.walk.items) {
       if (!it.isAppl || it.id != 9 || it.sid != 2) continue;
-      for (final a in parseDyntAtoms(Uint8List.fromList(it.value)).atoms) {
+      for (final a in parseDyntAtoms(it.value).atoms) {
         if (a.etype != etypeCombobox1) continue;
         final id = decodeListboxAtom(a.value)?.id ?? '';
         if (id.isNotEmpty && !out.contains(id)) out.add(id);
@@ -151,9 +151,17 @@ class ValueSet {
   /// file cache.
   final bool cacheable;
 
-  /// The text of [key] (keys compare right-trimmed), null when absent.
+  /// The text of [key] (keys compare right-trimmed), null when absent —
+  /// the first entry of that key. Asked per listbox per build: a set past a
+  /// handful of entries is looked up through a key -> text map built once
+  /// per [entries] list (the class stays const-constructible).
   String? textOf(String key) {
     final k = key.trimRight();
+    if (entries.length > _scanEntries) {
+      return (_textByKey[entries] ??= {
+        for (final e in entries.reversed) e.key: e.text,
+      })[k];
+    }
     for (final e in entries) {
       if (e.key == k) return e.text;
     }
@@ -162,6 +170,13 @@ class ValueSet {
 
   bool hasKey(String key) => textOf(key) != null;
 }
+
+/// The set size up to which [ValueSet.textOf] scans instead of mapping.
+const int _scanEntries = 16;
+
+/// [ValueSet.textOf]'s maps, by entries list (sets are immutable once
+/// built — [decodeValueSetPush] hands an unmodifiable list).
+final Expando<Map<String, String>> _textByKey = Expando('value-set texts');
 
 const List<int> _subtype = [
   0x78, 0x2d, 0x73, 0x61, 0x70, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x73, 0x65,

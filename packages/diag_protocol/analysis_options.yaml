@@ -1,6 +1,5 @@
 # The app's rule set (apps/guigo: flutter_lints = package:lints' recommended
-# set) in its pure-Dart form; `lints` resolves through the pub workspace
-# (flutter_lints depends on it).
+# set) in its pure-Dart form.
 include: package:lints/recommended.yaml
 
 analyzer:

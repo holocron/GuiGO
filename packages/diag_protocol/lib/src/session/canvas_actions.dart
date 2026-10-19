@@ -186,7 +186,7 @@ List<Uint8List> canvasConnectItems(
   List<int>? sourcePath,
 }) => canvasEventItems(
   ctx,
-  okcode: '%_GC $shell 1048576',
+  okcode: cfwGenericEventOkcode(shell, 1048576),
   xml: canvasConnectXml(shell, srcObjId, dstObjId, controls: controls),
   sourcePath: sourcePath,
 );
@@ -301,7 +301,7 @@ List<Uint8List> canvasSelectItems(
   List<int>? sourcePath,
 }) => canvasEventItems(
   ctx,
-  okcode: '%_GC $shell $canvasObjectSelectedEvent',
+  okcode: cfwGenericEventOkcode(shell, canvasObjectSelectedEvent),
   xml: canvasSelectXml(shell, params),
   focusShell: focused ? shell : null,
   sourcePath: sourcePath,

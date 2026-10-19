@@ -40,12 +40,24 @@ class CreatedControl {
 
 /// Session-side responder state the mint loop and the DOI model share.
 class EaSession {
-  EaSession({this.handleBase = 40000, this.screenRows = 26, this.screenCols = 170}) {
+  EaSession({
+    this.handleBase = 40000,
+    this.screenRows = 26,
+    this.screenCols = 170,
+    this.dpCacheEntries = dpCacheMaxEntries,
+    this.dpCacheBytes = dpCacheMaxBytes,
+  }) {
     dpCache
       ..retain = _pushRetention
       ..onPut = _pushStored
       ..onEvict = _pushEvicted;
   }
+
+  /// The push cache's caps ([DpCache.maxEntries] / [DpCache.maxBytes]: the
+  /// segments and their decoded memos together) — the session's
+  /// TransportLimits for a window, the package defaults for a replay.
+  final int dpCacheEntries;
+  final int dpCacheBytes;
 
   int handleBase;
   /// The LIVE dialog step, synced from the session's folded counter before
@@ -94,8 +106,8 @@ class EaSession {
   /// (frontend_files.dart: SecureSaveDataToUrl to `file://`, DeleteFile,
   /// ShellExecute).
   final FrontendFileStore frontendFiles = FrontendFileStore();
-  final DpCache dpCache =
-      DpCache(maxEntries: dpCacheMaxEntries, maxBytes: dpCacheMaxBytes);
+  late final DpCache dpCache =
+      DpCache(maxEntries: dpCacheEntries, maxBytes: dpCacheBytes);
   final Map<String, DpPushBinding> dpUrlOwner = {}; // url -> binding
 
   /// DP push url -> the kernel shell it feeds ([noteDpBindings], from the
@@ -165,9 +177,15 @@ class EaSession {
   /// DestroyWindow / an ended internal mode) — except the latest ingest's
   /// own ([DpCache.lastIngested]: a reused url's new content whose binding
   /// is recorded after the snoop). Returns the number dropped.
-  int evictDeadPushes() => dpCache.evictWhere(
-      (u) => _pushRetention(u) == false,
-      keep: dpCache.lastIngested);
+  int evictDeadPushes() {
+    final n = dpCache.evictWhere(
+        (u) => _pushRetention(u) == false,
+        keep: dpCache.lastIngested);
+    // the round's decodes count now ([DpCache.decodedBytes]), not from the
+    // next push
+    dpCache.sweep();
+    return n;
+  }
 
   /// Hold the control registries under their caps: the oldest DEAD
   /// controls are forgotten first (registry entries superseded by a later
@@ -627,12 +645,27 @@ bool aliasesRoot(EaSession session, FlushCall call) =>
 /// server's own SetProperty where captured, else "0" for a numeric propId
 /// (the server reads it back into a numeric field; "" dumps
 /// CONVT_NO_NUMBER), else "" (ea_controlxml._control_xml port).
+///
+/// [leading]: CONTROL blocks of controls the queue did NOT register, written
+/// first — an ABAP editor's props a method of the same queue moved: the
+/// check of SE38 (Ctrl+F2) creates the error list (its docking container
+/// and grid register their cached props) AND puts the editor's caret on
+/// line 1, and the real GUI reports both in the one answer
+/// (a recorded session s[38] -> g[31]: `119`
+/// FirstVisibleLine 1, SelPosEndLine 1, LastVisibleLine 40,
+/// SelPosStartLine 1, then `125`, `135`).
 Uint8List controlXml(
-    EaSession session, FlushCall call, List<(String, String)> cachedProps) {
+  EaSession session,
+  FlushCall call,
+  List<(String, String)> cachedProps, {
+  List<(String, List<(String, String)>)> leading = const [],
+}) {
   final b = StringBuffer()
     ..write('<?xml version="1.0" encoding="sap*"?>\n<DATAMANAGER><CONTROLS>');
-  for (final (shell, props)
-      in registeredControlValues(call, cachedProps).reversed) {
+  for (final (shell, props) in [
+    ...leading,
+    ...registeredControlValues(call, cachedProps).reversed,
+  ]) {
     b.write('<CONTROL SHELLID="${_xmlAttr(shell)}">');
     for (final (prop, value) in props) {
       b.write('<PROPERTY VALUE="${_xmlAttr(value)}" '
@@ -958,7 +991,27 @@ List<Uint8List>? buildAnswer(
     replyVarsLzh = lzhCompress(reply);
   }
 
-  // reply PARAMS: per-row return-TYPE stamps
+  // reply PARAMS: per-row return-TYPE stamps — a blank-scalar row stamps
+  // 8, never 9+blank: the kernel reads a 9 with no handle as an object it
+  // cannot resolve, `OBJHOLE2` in the ABAP string the call imports
+  // (SE38 activation's GetMarker -> CL_GUI_SOURCEEDIT=>GET_MARKER
+  // CONVT_NO_NUMBER, the test system 2026-10-16)
+  int resultStamp(int pI) {
+    final p = call.params[pI];
+    final s = p.slot.trim();
+    final vr = _isDigits(s) ? int.parse(s) - 1 : -1;
+    if (vr < 0 || vr >= call.vars.length) return call.resultTypes[pI] ?? 9;
+    final t = typesByVarsrow[vr] ?? 9;
+    final vbs = verbByVarsrow[vr];
+    if (t == 9 && call.verbs.isNotEmpty &&
+        call.vars[vr].type != 'O' &&
+        (vbs == null || !methodType.containsKey(vbs) || kindFollowsRequest.contains(vbs)) &&
+        !propStore.containsKey(vr)) {
+      return 8;
+    }
+    return t;
+  }
+
   List<Uint8List>? paramsInline;
   List<Uint8List>? paramsRows;
   final lzhs = <Uint8List>[];
@@ -973,7 +1026,7 @@ List<Uint8List>? buildAnswer(
       final p = call.params[pI];
       if (p.name == '_RESULT' || p.name == '_RESULT_QUEUEONLY') {
         final rec = Uint8List.fromList(p.raw);
-        stampResultType(rec, call.resultTypes[pI] ?? 9);
+        stampResultType(rec, resultStamp(pI));
         paramsRows.add(rec);
       } else {
         paramsRows.add(Uint8List.fromList([0x20]));
@@ -982,9 +1035,10 @@ List<Uint8List>? buildAnswer(
   }
   if (cols.containsKey('PARAMS')) {
     final col = cols['PARAMS']!;
+    // the PARAMS geometry the wire declares, else the known one (the parse
+    // took the same width: flush_call's parseSvars)
     final pw = col.width ?? paramsW;
     final stamps = <int, Object>{};
-    // blank-scalar rows stamp 8, never 9+blank
     for (var pI = 0; pI < call.params.length; pI++) {
       final p = call.params[pI];
       if (p.name != '_RESULT' && p.name != '_RESULT_QUEUEONLY') continue;
@@ -992,17 +1046,7 @@ List<Uint8List>? buildAnswer(
       if (!_isDigits(s)) continue;
       final vr = int.parse(s) - 1;
       if (vr < 0 || vr >= call.vars.length) continue;
-      final t = typesByVarsrow[vr] ?? 9;
-      final vb = verbByVarsrow[vr];
-      final vbs = vb ?? '';
-      if (t == 9 && call.verbs.isNotEmpty &&
-          call.vars[vr].type != 'O' &&
-          (vb == null || !methodType.containsKey(vbs) || kindFollowsRequest.contains(vbs)) &&
-          !propStore.containsKey(vr)) {
-        stamps[pI] = 8;
-      } else {
-        stamps[pI] = t;
-      }
+      stamps[pI] = resultStamp(pI);
     }
     final praw = buildReplySvars(col.blob, stamps, pw);
     if (praw.length <= tableInlineMax) {
@@ -1028,7 +1072,7 @@ List<Uint8List>? buildAnswer(
   final reply = buildReply(
     call.raw,
     replyVarsLzh ?? Uint8List(0),
-    auxCells: lzhs.skip(paramsInline != null ? 0 : 0).toList(),
+    auxCells: lzhs,
     controlXml: xml,
     paramsInline: paramsInline,
     paramsRows: paramsRows,
@@ -1064,6 +1108,8 @@ const String windowsPlatformExAnswer = '14';
 const String getColumnWidthAnswer = '31';
 
 List<Uint8List> _rowsOf(Uint8List b, int w) {
+  // a zero width spun forever (audit 2026-10-17 P0-2)
+  if (w <= 0) return const [];
   return [
     for (var i = 0; i * w < b.length; i++)
       Uint8List.sublistView(b, i * w, (i + 1) * w > b.length ? b.length : (i + 1) * w)
@@ -1292,4 +1338,4 @@ final _unusedImport = 0;
 // Patterns hoisted out of their call sites: a RegExp built per call is
 // compiled per call (audit #7 / zcode P-12).
 final RegExp _letterRx = RegExp(r'[A-Za-z]');
-final RegExp _digitsOnlyRx = RegExp(r'^\d+$');
+final RegExp _digitsOnlyRx = RegExp(r'^\d{1,9}$');

@@ -67,6 +67,15 @@ extension SapSessionLayout on SapSession {
     return out;
   }
 
+  /// [regions] and [splitterSashes] of ONE composition — what a view of
+  /// the base window reads per generation (one composeScreen, not one per
+  /// getter: the sashes are an out-parameter of the same pass).
+  ({List<ScreenRegion> regions, List<SplitterSash> sashes})
+  get baseComposition {
+    final sashes = <SplitterSash>[];
+    return (regions: _composeBase(sashes: sashes), sashes: sashes);
+  }
+
   List<ScreenRegion> _composeBase({
     List<SplitterSash>? sashes,
     Map<String, CellRect>? boxes,
@@ -227,16 +236,28 @@ extension SapSessionLayout on SapSession {
     };
   }
 
-  /// The model of [shell]'s [tables] — rebuilt only when its tables changed
-  /// (the same decoded tables give the same tree; audit #15: every read of
-  /// [trees] re-applied every push of every tree).
+  /// The model of [shell]'s [tables] — the memoized model grown IN PLACE
+  /// by the tables pushed since (the memoized list leads this one: an
+  /// expansion's children, an update push), rebuilt only when the list
+  /// restarted (a root push dropped the earlier node tables, an ended
+  /// internal mode took its pushes away) — audit #15: every read of
+  /// [trees] re-applied every push of every tree; audit perf5: every push
+  /// rebuilt the tree from every table. A view keys on the object and its
+  /// [SapTreeModel.revision].
   SapTreeModel _treeModelOf(
     Map<String, (List<DpTable>, SapTreeModel)> memo,
     String shell,
     List<DpTable> tables,
   ) {
     final hit = memo[shell];
-    if (hit != null && _sameTables(hit.$1, tables)) return hit.$2;
+    if (hit != null && _prefixOf(hit.$1, tables)) {
+      final m = hit.$2;
+      for (final t in tables.skip(hit.$1.length)) {
+        m.apply(t);
+      }
+      memo[shell] = (tables, m);
+      return m;
+    }
     final m = _treeOf(tables);
     memo[shell] = (tables, m);
     return m;
@@ -430,11 +451,30 @@ extension SapSessionLayout on SapSession {
       _trace('dock $dock resize ignored: no AREASIZE painted');
       return false;
     }
-    if (side != '1' && side != '2') {
+    if (!isSideDock(side)) {
       _trace('dock $dock resize ignored: not a left / right dock');
       return false;
     }
-    final c = cols.round().clamp(1, w.$2 - 1);
+    final sideDocks = [
+      for (final d in _shownDocks())
+        if (isSideDock(st.registry.props[d]?[propDockSide])) d,
+    ];
+    // a lone side dock is the session's sash ([dockFraction]); beside
+    // other side docks (SMARTFORMS' tree and Form Painter) it is this
+    // dock's own width, and the others keep theirs
+    final lone = sideDocks.length == 1 && sideDocks.single == dock;
+    // the area keeps a column: a lone dock may take the window less one,
+    // one beside others the area it shares with them less one
+    var room = w.$2 - 1;
+    if (!lone) {
+      final boxes = <String, CellRect>{};
+      final regs = _composeBase(boxes: boxes);
+      for (final r in regs) {
+        if (r.kind == 'dynpro') room = r.rect.cols.toInt() - 1;
+      }
+      room += boxes[dock]?.cols.toInt() ?? 0;
+    }
+    final c = cols.round().clamp(1, room < 1 ? 1 : room);
     // once per paint: the same extent again before the server answered
     // (its step unchanged) owes nothing new
     final mark = '$dock:$c@$step';
@@ -442,19 +482,21 @@ extension SapSessionLayout on SapSession {
       _trace('dock $dock resize: already reported at step $step');
       return false;
     }
-    st
-      ..dockFraction = c / w.$2
-      ..reportedDocks = null; // the realized extent changed: owed again
+    if (lone) st.dockFraction = c / w.$2;
+    st.reportedDocks = null; // the realized extent changed: owed again
     st.registry.draggedDelta[dock] = w.$2 - a.$2;
+    st.registry.draggedCols[dock] = c;
     // the dynpro area every later round reports (16/12/8) is the window
     // less the dragged pane until the server re-lays out (the reference client's
     // docked_layout.realized_area_px: the user's drag wins on its axis)
-    final sideDocks = [
-      for (final d in _shownDocks())
-        if (st.registry.props[d]?[propDockSide] case '1' || '2') d,
-    ];
-    if (sideDocks.length == 1 && sideDocks.single == dock) {
+    if (lone) {
       ctx.dockedCells = (ctx.dockedCells.$1, c);
+    } else {
+      for (final r in regions) {
+        if (r.kind == 'dynpro') {
+          ctx.dockedCells = (ctx.dockedCells.$1, w.$2 - r.rect.cols.toInt());
+        }
+      }
     }
     _trace('dock $dock dragged to $c of ${w.$2} cols');
     String? refusal() {
@@ -558,8 +600,9 @@ extension SapSessionLayout on SapSession {
     if (w0 != null) {
       // the pair at the report: a later different one is the re-layout
       for (final d in docks) {
-        final side = reg.props[d]?[propDockSide];
-        if (side == '1' || side == '2') reg.reportedDelta[d] = w0.$2 - a.$2;
+        if (isSideDock(reg.props[d]?[propDockSide])) {
+          reg.reportedDelta[d] = w0.$2 - a.$2;
+        }
       }
     }
     final winPx = (ctx.winPxHeight, ctx.winPxWidth);
@@ -572,7 +615,13 @@ extension SapSessionLayout on SapSession {
       );
       // a pane we realize by dockFraction: area = window px - dock px
       final f = st.dockFraction;
-      if (f != null && w.$2 - dyn.rect.cols == (f * w.$2).round()) {
+      final sides = [
+        for (final d in docks)
+          if (isSideDock(reg.props[d]?[propDockSide])) d,
+      ];
+      if (f != null &&
+          sides.length == 1 &&
+          w.$2 - dyn.rect.cols == (f * w.$2).round()) {
         areaPx = (areaPx.$1, winPx.$2 - (winPx.$2 * f).round());
       }
     }
@@ -668,11 +717,10 @@ extension SapSessionLayout on SapSession {
                     if ((classes[c.shell] ?? '').toUpperCase().contains(
                           'DOCKING',
                         ))
-                      if (switch (reg.props[c.shell]?[propDockSide]) {
-                        '1' || '2' => p.$1 == propControlHeight,
-                        '3' || '4' => p.$1 == propControlWidth,
-                        _ => false,
-                      })
+                      if (isSideDock(reg.props[c.shell]?[propDockSide])
+                          ? p.$1 == propControlHeight
+                          : isBandDock(reg.props[c.shell]?[propDockSide]) &&
+                                p.$1 == propControlWidth)
                         p,
               ],
             )
@@ -707,6 +755,9 @@ extension SapSessionLayout on SapSession {
       if (g != null && _onScreen(link.$1)) linked[link.$1] = g;
     });
     final out = <ControlReport>[];
+    final sideDockCount = _shownDocks()
+        .where((d) => isSideDock(reg.props[d]?[propDockSide]))
+        .length;
     final shells = reg.cachedProps.keys.where(_onScreen).toList()
       ..sort((a, b) => (int.tryParse(a) ?? 0).compareTo(int.tryParse(b) ?? 0));
     for (final sh in shells) {
@@ -725,10 +776,17 @@ extension SapSessionLayout on SapSession {
       for (final p in props) {
         if (p != propControlHeight && p != propControlWidth) continue;
         // a side dock's width the server set but we realize differently
-        // (dockFraction): reported, like gui[15]'s 135 300 = 845
+        // (dockFraction): reported, like gui[15]'s 135 300 = 845; beside
+        // other side docks the width the user dragged it to (the real
+        // GUI's 300 = px of its sash, 8 px per col — a recorded session)
         final f = _layoutState.dockFraction;
-        if (docking && p == propControlWidth && (side == '1' || side == '2')) {
-          if (f != null && window != null) {
+        if (docking && p == propControlWidth && isSideDock(side)) {
+          final dragged = reg.draggedCols[sh];
+          if (sideDockCount > 1) {
+            if (dragged != null && '${dragged * 8}' != set[propControlWidth]) {
+              values.add((p, '${dragged * 8}'));
+            }
+          } else if (f != null && window != null) {
             final v = (f * window.$2 * 8).round();
             if ('$v' != set[propControlWidth]) values.add((p, '$v'));
           }
@@ -740,9 +798,9 @@ extension SapSessionLayout on SapSession {
         if (g != null) {
           v = areaContainerPx(g, p);
         } else if (docking && set[propVisible] != '0') {
-          if ((side == '1' || side == '2') && p == propControlHeight) {
+          if (isSideDock(side) && p == propControlHeight) {
             v = '${area.rows.toInt() * 13 + 17}';
-          } else if ((side == '3' || side == '4') && p == propControlWidth) {
+          } else if (isBandDock(side) && p == propControlWidth) {
             v = '${(window?.$2 ?? area.cols.toInt()) * 8}';
           }
         }
@@ -964,8 +1022,10 @@ final RegExp _treeTableVerb = RegExp(
   r'^(?:Add|Update|Set|SetUpdate)(?:R3|Item)Table$',
 );
 
-bool _sameTables(List<DpTable> a, List<DpTable> b) {
-  if (a.length != b.length) return false;
+/// Whether [a] leads [b]: every table of [a] is, by identity, the one at
+/// the same place of [b] (equal lists included).
+bool _prefixOf(List<DpTable> a, List<DpTable> b) {
+  if (a.length > b.length) return false;
   for (var i = 0; i < a.length; i++) {
     if (!identical(a[i], b[i])) return false;
   }
@@ -1071,4 +1131,4 @@ String? areaContainerPx(ScreenContainer g, String prop) => switch (prop) {
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
 // compiled per call (audit #7 / zcode P-12).
-final RegExp _digitsOnlyRx = RegExp(r'^\d+$');
+final RegExp _digitsOnlyRx = RegExp(r'^\d{1,9}$');

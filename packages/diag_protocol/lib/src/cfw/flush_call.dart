@@ -71,6 +71,9 @@ const Map<String, int> methodType = {
   'GetIconFlag': 11, 'GetIndentation': 20, 'GetIsHighLighted': 20,
   'GetItemText': 8, 'GetItemType': 20, 'GetKeyString': 8,
   'GetListDisplay': 11, 'GetMinimumHeight': 20, 'GetMoveHeaders': 11,
+  // the ABAP editor's marker lines (CL_GUI_SOURCEEDIT=>GET_MARKER: a
+  // comma list of line numbers, SPLIT into a LINETAB of I)
+  'GetMarker': 8,
   'GetNextNodeKey': 8, 'GetNodeChildrenCount': 20,
   'GetNodeChildrenCountByKey': 20, 'GetNodeChildrenCountByPath': 20,
   'GetNodeKeyByPath': 8, 'GetNodePathByKey': 8, 'GetNodeTextByKey': 8,
@@ -375,12 +378,22 @@ void _typeResults(FlushCall call) {
   }
 }
 
+/// Test seam: a value it holds true for fails [parseFlushCall] — no wire
+/// input makes the parse throw any more (audit 2026-10-17 P0-1..4),
+/// and the readers' unparseable-call path stays pinned through this.
+bool Function(Uint8List rfc)? debugFailFlushParse;
+
 /// Parse an OLE_FLUSH_CALL RFC_TR value (parse_flush_call port).
 FlushCall parseFlushCall(Uint8List rfc, {GuiDialect? dialect}) {
   DecodeStats.flushParses++;
+  if (debugFailFlushParse?.call(rfc) ?? false) {
+    throw const FormatException('unparseable flush call (test seam)');
+  }
   final call = FlushCall(rfc)
     ..dialect = dialect
-    ..columns = rfcColumns(rfc)
+    // RFC_QUEUE: presence only (the answer gate) — its push blob is the DP
+    // cache's to inflate (audit 2026-10-17 N6)
+    ..columns = rfcColumns(rfc, except: const {'RFC_QUEUE'})
     ..svars = parseSvarsItems(rfc);
   final cols = call.columns;
   // rfcColumns sees only `03 05` CELLS — a direct query whose PARAMS/VERBS
@@ -500,10 +513,16 @@ FlushCall parseFlushCall(Uint8List rfc, {GuiDialect? dialect}) {
   return call;
 }
 
-String _name(Rec v, int start, int end) =>
-    String.fromCharCodes(v.raw, start, end < v.raw.length ? end : v.raw.length).trim();
+// clamped at both ends: a VERBS record narrower than a field (a hostile
+// width) reads it empty
+String _name(Rec v, int start, int end) => start >= v.raw.length
+    ? ''
+    : String.fromCharCodes(v.raw, start, end < v.raw.length ? end : v.raw.length).trim();
 
-final RegExp _digitsRe = RegExp(r'^\d+$');
+// bounded: CFW slots, object ids and shell handles fit an int32 — an
+// unbounded `\d+` let a 25-digit VARS slot through to `int.parse`, whose
+// FormatException left the flush unanswered (audit 2026-10-17 P0-4)
+final RegExp _digitsRe = RegExp(r'^\d{1,9}$');
 
 bool _isDigits(String? s) => s != null && _digitsRe.hasMatch(s);
 
@@ -591,12 +610,16 @@ class _Derived {
       identical(vars, c.vars);
 }
 
+// keyed on the verb-object list, which [FlushCall.withDialect] shares: the
+// answer path's dialect copy reuses the tables the frame's readers derived
+// (keyed on the call, each copy derived them again: audit 2026-10-17
+// N12)
 final Expando<_Derived> _derived = Expando('flush call derived tables');
 
 _Derived _derivedOf(FlushCall call) {
-  final d = _derived[call];
+  final d = _derived[call.verbObjects];
   if (d != null && d.of(call)) return d;
-  return _derived[call] = _Derived(call);
+  return _derived[call.verbObjects] = _Derived(call);
 }
 
 List<VerbMeta> verbMeta(FlushCall call) =>

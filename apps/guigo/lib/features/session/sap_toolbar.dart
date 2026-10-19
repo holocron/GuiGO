@@ -28,6 +28,7 @@ class SapToolbar extends StatelessWidget {
     required this.busy,
     required this.onPress,
     this.wrap = false,
+    this.dense = false,
   });
 
   final List<MenuEntry> entries;
@@ -38,6 +39,12 @@ class SapToolbar extends StatelessWidget {
   /// Wrap onto several lines (a modal's button area) instead of scrolling
   /// horizontally (the main window's toolbar row).
   final bool wrap;
+
+  /// A phone held sideways (the session screen's landscape bar): the
+  /// buttons keep their 36 pt box without the 48 pt tap-target padding, a
+  /// thinner scroll strip under them — the row's height is what a sideways
+  /// phone's body cannot spare. A thumb still lands on a 36 pt chip.
+  final bool dense;
 
   @override
   Widget build(BuildContext context) {
@@ -55,8 +62,41 @@ class SapToolbar extends StatelessWidget {
         children: buttons,
       );
     }
-    return ScrollingButtonRow(children: buttons);
+    // SAP GUI's application toolbar row is always there, buttons or none:
+    // a row that came and went with the PF-status changed the body's
+    // height, and every change was a new SAP window size — a resize round
+    // per screen whose toolbar differed from the last (and one after every
+    // logon: the connecting view has no toolbar, Easy Access has). An
+    // invisible, inert button of the same style keeps the row's height on
+    // every platform and text scale, whatever a real one measures
+    if (buttons.isEmpty) {
+      buttons.add(
+        Visibility.maintain(
+          visible: false,
+          child: FilledButton.tonal(
+            onPressed: null,
+            style: _buttonStyle,
+            child: const Text(''),
+          ),
+        ),
+      );
+    }
+    return ScrollingButtonRow(bottomGap: dense ? 4 : 6, children: buttons);
   }
+
+  /// One style for every toolbar button (and the empty row's placeholder).
+  static final ButtonStyle _style = FilledButton.styleFrom(
+    minimumSize: const Size(40, 36),
+    padding: const EdgeInsets.symmetric(horizontal: 12),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+  );
+
+  /// The [dense] row's: the same box, no tap-target padding around it.
+  static final ButtonStyle _denseStyle = _style.copyWith(
+    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+  );
+
+  ButtonStyle get _buttonStyle => dense ? _denseStyle : _style;
 
   Widget _button(BuildContext context, MenuEntry e, bool busy) {
     final token = SapIconAtlas.tokenRx.firstMatch(e.text);
@@ -93,16 +133,11 @@ class SapToolbar extends StatelessWidget {
         ? plain
         : (glyph == null || !wrap ? quick : '');
     final onPressed = enabled ? () => onPress(e.vkey) : null;
-    final style = FilledButton.styleFrom(
-      minimumSize: const Size(40, 36),
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
-    );
     return Tooltip(
       message: tip,
       child: FilledButton.tonal(
         onPressed: onPressed,
-        style: style,
+        style: _buttonStyle,
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -126,6 +161,8 @@ class ScrollingButtonRow extends StatefulWidget {
     required this.children,
     this.bottomGap = 6,
     this.arrowSize = 24,
+    this.spacing = 6,
+    this.padding = const EdgeInsets.symmetric(horizontal: 8),
   });
   final List<Widget> children;
 
@@ -133,6 +170,11 @@ class ScrollingButtonRow extends StatefulWidget {
   /// of the page arrows (a compact control row: smaller).
   final double bottomGap;
   final double arrowSize;
+
+  /// The gap between the buttons and the row's own padding (the standard
+  /// toolbar's keys sit edge to edge: zero and none).
+  final double spacing;
+  final EdgeInsetsGeometry padding;
 
   @override
   State<ScrollingButtonRow> createState() => _ScrollingButtonRowState();
@@ -246,8 +288,8 @@ class _ScrollingButtonRowState extends State<ScrollingButtonRow> {
         child: SingleChildScrollView(
           controller: _c,
           scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          child: Row(spacing: 6, children: widget.children),
+          padding: widget.padding,
+          child: Row(spacing: widget.spacing, children: widget.children),
         ),
       ),
     );

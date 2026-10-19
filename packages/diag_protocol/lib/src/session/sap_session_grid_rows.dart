@@ -61,7 +61,10 @@ extension SapSessionGridRows on SapSession {
     // OptPacket is a few rows only (SE16 MARA 819 cells at 310 per row) —
     // the Java GUI asks 36 rows of SE16's 503-cell rows (a recorded session)
     final optRows = opt != null && opt > 0 ? -(-opt ~/ stride) : 0;
-    final want = count ?? (optRows > _minFetchRows ? optRows : _minFetchRows);
+    // capped: the OptPacket is a wire number — a hostile one asked ~10^9
+    // lines and marked them all covered (audit 2026-10-17 P0-8)
+    var want = count ?? (optRows > _minFetchRows ? optRows : _minFetchRows);
+    if (want > maxFetchRows) want = maxFetchRows;
     var last = fromRow + (want < 1 ? 1 : want) - 1;
     if (last > total) last = total;
     var first = fromRow;
@@ -224,6 +227,10 @@ extension SapSessionGridRows on SapSession {
 
 /// The smallest default fetch window (rows).
 const int _minFetchRows = 40;
+
+/// The largest fetch window (rows) one DATAREQUEST asks, whatever the
+/// OptPacket or the caller's count say.
+const int maxFetchRows = 1000;
 
 class _GridRowsState {
   /// provider object handle (our mint) -> its grid and role

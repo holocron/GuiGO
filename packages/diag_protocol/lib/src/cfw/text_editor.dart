@@ -1,6 +1,7 @@
 /// Editor controls — the workbench's ABAP editor (SE38 / SE80 / SE37 / SE24
-/// source display) and the SAPGUI TextEdit control — with the text the
-/// server pushes into them through the DataProvider (read side only).
+/// source) and the SAPGUI TextEdit control — with the text the server
+/// pushes into them through the DataProvider, and the text the client hands
+/// back when the server pulls it (the save side, below).
 ///
 /// Wire shape, ABAP editor (live the test system, the reference client's Windows-dialect SE38
 /// display of 2026-10-10, a recorded session; the same as
@@ -36,14 +37,57 @@
 /// `AssignProperty2(<dataobj>, data | r3TableAutoObj, <editor>,
 /// TextAsR3Table | TextAsR3Stream)` push — fixed-width DATAASC records,
 /// one line each, the session's UTF-8 — or an inline `TextStream` put.
+///
+/// The save side. Typing sends nothing (a recorded session:
+/// no wire traffic while typing); the control's cached props change —
+/// TextModified 1, Version, LineCount, the caret — and ride the next round
+/// of any kind (F11: a recorded session g[41]; `=CHECK`: smartforms
+/// gui[35]). Their TextModified 1 is what makes the server PULL the text in
+/// that round's PAI (an F11 whose props say 0 pulls nothing: smartforms
+/// gui[47]):
+/// * ABAP editor (SAP GUI for Windows, sapab4edit.ocx): `SaveDocToDP(#1,
+/// #2 = <dp>)` on the editor + `SaveDataToUrl(…, SAPR3://<sink>)` on that
+/// DataProvider (wda srv[46], smartforms srv[39]), then an UNTYPED
+/// `DP_GET_CLIENT_TABLE45A` of the sink declaring `DATABIN` 120 / FORMAT
+/// 80 / PROPS 80 (wda srv[47]); the OCX answers APPLICATION /
+/// ABAP_SOURCE, the whole document as UTF-16LE with a lone CR between
+/// lines in DATABIN rows of the declared width ([abapSourcePullAnswer];
+/// wda g[44], smartforms gui[37]). `SetSavePoint(0)` then clears
+/// TextModified (wda s[48] -> g[45] `TextModified 0`), a reload clears
+/// Version too (wda s[54] -> g[51] `Version 0`; smartforms gui[40]).
+/// SE38 / SE80's REPORT save (Ctrl+S) wraps the same pull in the
+/// editor's state: `CreateObject(<DataProvider>)` + `StoreStateIntoDP
+/// (#1 = it)` first (a recorded session s[29]: the client
+/// answers the minted handle, nothing else — the state stays in the
+/// frontend's object, no pull), the pull (s[30] / s[31] -> g[25]), then
+/// `SetSavePoint(0)` … `RestoreStateFromDP(#1 = that handle)` (s[33]
+/// -> g[26] `TextModified 0` alone: the caret and the view are the ones
+/// stored). SE38's check (Ctrl+F2) pulls the same document without the
+/// state and without the save point (a recorded session
+/// paste s[40] / s[41] -> g[34]: TOTALSIZE 6766 = the saved 6764 + the
+/// one character typed since, `x`; TextModified stays 1); a check of an
+/// unmodified document pulls nothing (g[30]: a bare round, no
+/// CONTROLS). SE80's display -> change switch (Ctrl+F1) reloads the
+/// document inside a stored state: `StoreStateIntoDP` (s[92]), then
+/// `SetCurrentDocReadOnly(0)` + `LoadDocFromDP` + `RestoreStateFromDP`
+/// (s[93]) — answered with no CONTROLS (g[83] / g[84]: the same text,
+/// nothing moved);
+/// * TextEdit (the SAP GUI for Java's SapTextEdit; the SE38 of
+/// a recorded session): `AssignProperty2(<editor>,
+/// TextAsR3Table, <obj>, data)` + `SaveDataToUrl(…, SAPR3://<sink>)`
+/// (srv[31]), then `DP_GET_CLIENT_TABLE45A` of the sink declaring
+/// DATAASC 765 (srv[32]); the bean answers APPLICATION / X-R3ABAP, one
+/// blank-padded UTF-8 record per line ([r3AbapPullAnswer]; gui[22]).
 library;
 
 import 'dart:convert';
 import 'dart:typed_data';
 
 import '../framing/envelope.dart' show containsBytes;
+import 'client_table_pull.dart' show clientTablePullTableWidth;
 import 'dp_cache.dart';
 import 'flush_call.dart';
+import 'reply_container.dart' show buildDpAnswer, rfcToken, tableColumn;
 
 /// One editor control as the server last loaded it.
 class SapTextEditor {
@@ -71,11 +115,39 @@ class SapTextEditor {
   /// 'textedit' (`SAPGUI.TextEditCtrl.1` / SapTextEdit).
   String kind;
 
-  /// The text, one entry per line (right-trimmed records for TextEdit).
+  /// The text, one entry per line (right-trimmed records for TextEdit): as
+  /// the server last loaded it, or as the user edited it since
+  /// (SapSession.editEditorText) — what a pull of the document answers.
   List<String> lines;
 
-  /// Whether the server set the document read-only (display mode).
+  /// Whether the server set the document read-only (display mode):
+  /// `SetCurrentDocReadOnly(1)` on SE38 display, `(0)` once Ctrl+F1 switched
+  /// to change mode (a recorded session s[28] / s[43]). A read-only
+  /// document takes no user edit (SapSession.editEditorText).
   bool readOnly;
+
+  /// Whether the text differs from the server's last save point — the
+  /// control's TextModified cached prop: set by a user edit
+  /// (SapSession.editEditorText; a recorded session g[41]
+  /// `TextModified 1`), cleared by the server's `SetSavePoint` (s[48] ->
+  /// g[45] `TextModified 0`) and by a document (re)load
+  /// (a recorded session srv[43] -> gui[40]).
+  bool textModified = false;
+
+  /// The control's Version cached prop: its count of edit steps since the
+  /// document was loaded — 2 after a Return and one typed run
+  /// (a recorded session g[41]; a recorded session g[22]
+  /// 0 -> 2, g[27] 2 -> 4 after its save), 8 after the smartforms user
+  /// replaced the text by three typed lines (gui[35]), +303 for a paste of
+  /// 152 line breaks and 151 lines ([ab4InsertUndoSteps]; ab4_editor_save
+  /// g[32] 4 -> 307), +1 for each character typed (g[41] 308;
+  /// a recorded session g[77] `ab` +2), +1 for each
+  /// Delete (g[53] `WRI` deleted: +3), back down by Ctrl+Z (g[73]: six
+  /// steps undone to the save point, Version 1544, TextModified 0); a
+  /// document (re)load resets it (wda s[54] -> g[51] `Version 0`), a save
+  /// point does not (g[45]; ab4_editor_save g[26] -> g[27]), nor does a
+  /// check's pull (g[34] -> g[41]).
+  int version = 0;
 
   /// The 1-based line the server put the cursor on, null when it set none.
   int? cursorLine;
@@ -173,7 +245,7 @@ class SapTextEditor {
   Set<int> get externalBreakpoints => {...?markers[ab4ExternalBreakpointMarker]};
 
   /// The cached properties (FirstVisibleLine, LastVisibleLine, LineCount,
-  /// SelPos*) as the SERVER last holds them: the control's creation state
+  /// SelPos*, TextModified, Version) as the SERVER last holds them: the control's creation state
   /// (all 1), then every value the client flushed — in a round or in a
   /// flush's answer — or answered a read-back with. A server put
   /// (`FirstVisibleLine(=n)`) or a method that moves one
@@ -218,7 +290,39 @@ const Set<String> _ab4Verbs = {
   'RemoveMarker',
   'RemoveAllMarker',
   'FirstVisibleLine',
+  // the save side (a recorded session srv[46] / s[48], on the real
+  // GUI's editor handle 72)
+  'SaveDocToDP',
+  'SetSavePoint',
 };
+
+/// The undo steps sapab4edit.ocx counts for [text] inserted in one go (a
+/// paste, a dictated or autocorrected run) — what its Version cached prop
+/// moves by; a typed character is the one-character case (1: every typed
+/// character is a step of its own, `ab` +2 and then `c` +1 in
+/// a recorded session g[77] / g[81], `sdfsdf` +6 in
+/// g[38]), a Return the one-break case (1). A multi-line text counts one
+/// step per line break, plus one for its characters: the five lines put
+/// into the emptied document of a recorded session g[27]
+/// moved Version 2 -> 8, the 1 500 lines put over a Ctrl+A g[43] 14 ->
+/// 1517 (the selection's deletion 2, as g[22]: 0 -> 2). The CRLF block
+/// pasted from Notepad in a recorded session g[32] counted a
+/// step per line break AND per non-empty line (152 + 151: 4 -> 307, the
+/// same paste of a recorded session g[25] 0 -> 303):
+/// read as the OCX inserting a CRLF text line by line. Neither capture
+/// logged the keys, so the two readings are the ones that fit every
+/// recorded count, not a decoded rule. No recorded pull depends on the
+/// count: the check after six Ctrl+Z back to the save point (Version 1544,
+/// TextModified 0, _long g[73]) was pulled like the others.
+int ab4InsertUndoSteps(String text) {
+  final runs = text.split(_splitEditorLinesRx);
+  final breaks = runs.length - 1;
+  final filled = runs.where((r) => r.isNotEmpty).length;
+  final n = text.contains('\r\n')
+      ? breaks + filled
+      : breaks + (filled > 0 ? 1 : 0);
+  return n < 1 ? 1 : n;
+}
 
 /// The ABAP editor's session-breakpoint marker kind (`SetMarker(2, …)`).
 const int ab4BreakpointMarker = 2;
@@ -244,6 +348,10 @@ const Map<String, String> ab4InitialCachedProps = {
   'SelPosStartCol': '1',
   'SelPosEndLine': '1',
   'SelPosEndCol': '1',
+  // the unedited document (the creation reply's `TextModified 0` /
+  // `Version 0`); a user edit moves both (a recorded session g[41])
+  'TextModified': '0',
+  'Version': '0',
 };
 
 /// The ABAP editor's cached props in the order sapab4edit.ocx flushes them
@@ -297,12 +405,19 @@ const Set<String> _editorVerbs = {
   'ReadOnlyMode',
   'TextStream',
   'Text',
+  'TextModified',
 };
 
 /// The DataProvider-fed TextEdit body properties (reference client PUSH_PROPS).
 const Set<String> _pushProps = {'TextAsR3Table', 'TextAsR3Stream'};
 
-final RegExp _digits = RegExp(r'^\d+$');
+final RegExp _digits = RegExp(r'^\d{1,9}$');
+
+/// The editor document sinks a [SapTextEditorTracker] holds unanswered at
+/// most ([SapTextEditorTracker.docSinks]): the server pulls each one in the
+/// round after it names it (one or two per save), so a backlog past this is
+/// a server that never pulls — the oldest goes.
+const int maxEditorDocSinks = 64;
 
 /// Folds the OLE flush calls into the editors they create and load.
 class SapTextEditorTracker {
@@ -331,6 +446,16 @@ class SapTextEditorTracker {
 
   /// editor shell -> (program, dynpro) of the paint that bound it
   final Map<String, (String, String)> paintedOn = {};
+
+  /// SAPR3 sink -> the ABAP editor whose document a `SaveDocToDP` put into
+  /// the DataProvider saved under it: `SaveDocToDP(#1, #2 = 74)` on the
+  /// editor, `SaveDataToUrl(…, SAPR3://…E20000)` ON 74 (a recorded session
+  /// save srv[46]: the DataProvider is `#2`, a handle minted earlier, `#1`
+  /// blank — SAPLSTXB on a recorded session srv[39]). The
+  /// server pulls the sink next ([abapSourcePullAnswer]); taken when
+  /// answered. Wire-fed, so bounded: the newest [maxEditorDocSinks] are
+  /// kept (oldest out), and a shell re-created as a new control drops its.
+  final Map<String, String> docSinks = {};
 
   /// Every editor seen, in creation order.
   List<SapTextEditor> get all => [for (final s in _order) _editors[s]!];
@@ -392,6 +517,7 @@ class SapTextEditorTracker {
     final meta = verbMeta(call);
     final rowShell = <String, String>{}; // CreateControl _RESULT row -> shell
     final rowUrl = <String, String>{}; // DataProvider row -> its url
+    final docSaves = <String, String>{}; // SaveDocToDP's DataProvider -> editor
     final touched = <String>{};
     DpCache? cache;
     Uint8List? segment(String url) {
@@ -434,6 +560,7 @@ class SapTextEditorTracker {
           parentOf.remove(shell);
         }
         // a reused shell id is a new control
+        docSinks.removeWhere((_, sh) => sh == shell);
         areaOf.remove(shell);
         linkOf.remove(shell);
         paintedOn.remove(shell);
@@ -469,6 +596,22 @@ class SapTextEditorTracker {
         }
         continue;
       }
+      if (verb == 'SaveDataToUrl') {
+        // the sink of an editor document a SaveDocToDP of this queue put
+        // into the DataProvider (on-object = its #2): the pull that follows
+        // reads it (a recorded session srv[46] -> srv[47])
+        final u = (named['#3'] ?? '').trim();
+        final sh = docSaves.remove(m.objValue.trim()) ??
+            (docSaves.length == 1 ? docSaves.remove(docSaves.keys.single) : null);
+        if (sh != null && u.startsWith('SAPR3://')) {
+          docSinks.remove(u); // a re-named sink is the newest
+          docSinks[u] = sh;
+          if (docSinks.length > maxEditorDocSinks) {
+            docSinks.remove(docSinks.keys.first);
+          }
+        }
+        continue;
+      }
       if (verb == 'SetProperty') {
         // SetProperty(<shell>, ReadOnly, 1): the TextEdit read-only mode
         final sh = (named['#1'] ?? '').trim();
@@ -489,7 +632,31 @@ class SapTextEditorTracker {
           named[name] ?? (args.isNotEmpty ? args.first.$2 : '');
       var text = true;
       switch (verb) {
+        case 'SaveDocToDP':
+          // the document into the DataProvider #2, saved under a sink by
+          // the queue's SaveDataToUrl on it ([docSinks])
+          final dp = (named['#2'] ?? '').trim();
+          if (dp.isNotEmpty) docSaves[dp] = sh;
+          continue;
+        case 'SetSavePoint':
+          // the text the server pulled is its saved state now: TextModified
+          // 0, reported in this flush's answer, Version kept
+          // (a recorded session s[48] -> g[45])
+          e.textModified = false;
+          text = false;
+        case 'TextModified':
+          // a put (`TextModified(=0)`, a recorded session
+          // s[34]); a getter (`TextModified(_RESULT=)`) reads it back
+          final v = [
+            for (final a in args)
+              if (!a.$1.startsWith('_')) a.$2,
+          ];
+          if (v.isEmpty) continue;
+          e.textModified = _truthy(v.first);
+          text = false;
         case 'AddEmptyDoc':
+          e.textModified = false;
+          e.version = 0;
           e.lines = [];
           e.cursorLine = null;
           e.cursorCol = null;
@@ -506,6 +673,13 @@ class SapTextEditorTracker {
           // 1, the server holding the 25 the F5 round sent
           // (a recorded session g[55] / g[56])
         case 'LoadDocFromDP':
+          // a (re)load is the unedited document: TextModified and Version 0,
+          // reported in the flush's answer when the server held other
+          // values (a recorded session s[54] -> g[51] `Version 0`,
+          // a recorded session srv[43] -> gui[40])
+          final edited = e.textModified || e.version != 0;
+          e.textModified = false;
+          e.version = 0;
           // the DataProvider it loads from: by row, else the last url set
           final dpRow = (m.slots['#2'] ?? '').trim();
           final url =
@@ -513,7 +687,11 @@ class SapTextEditorTracker {
               (rowUrl.values.isEmpty ? null : rowUrl.values.last);
           final seg = url == null ? null : segment(url);
           final doc = seg == null ? null : databinText(seg);
-          if (doc == null) continue;
+          if (doc == null) {
+            // the reset is reported all the same
+            if (edited) touched.add(e.shell);
+            continue;
+          }
           e.lines = splitEditorLines(doc);
         case 'SetCurrentDocReadOnly' || 'ReadOnly' || 'ReadOnlyMode':
           e.readOnly = _truthy(arg('#1'));
@@ -755,6 +933,172 @@ List<String>? r3TableText(Uint8List seg, {bool stream = false}) {
   }
   return out;
 }
+
+/// The ABAP editor's document as its OCX hands it to the server: the lines
+/// joined by a lone CR (U+000D), no trailing separator, UTF-16LE — a line
+/// break inside a line (never typed: a paste is split into lines first)
+/// is that CR too (a recorded session g[44] `method … .\rendmethod.\r*
+/// reference client oracle`, a recorded session gui[37]).
+Uint8List abapSourceBytes(List<String> lines) {
+  final text = lines.join('\r').replaceAll(_splitEditorLinesRx, '\r');
+  final out = Uint8List(2 * text.length);
+  for (var i = 0; i < text.length; i++) {
+    final u = text.codeUnitAt(i);
+    out[2 * i] = u & 0xff;
+    out[2 * i + 1] = u >> 8;
+  }
+  return out;
+}
+
+/// The DATABIN row width the ABAP editor's document pull declares (120 on
+/// every recorded pull: a recorded session srv[47],
+/// a recorded session srv[40]) — the width a request that
+/// declares none is answered in.
+const int abapSourceRowWidth = 120;
+
+/// The SAP GUI for Windows OCX's answer to the server's pull of the ABAP
+/// editor's document (`DP_GET_CLIENT_TABLE45A` of the [SapTextEditorTracker.
+/// docSinks] sink, [request] its RFC value) holding [lines]: TYPE
+/// APPLICATION, SUBTYPE ABAP_SOURCE, DATE `00000000` / TIME `000000`,
+/// blank DESCRIPTION and PLATTFORM, TOTALSIZE = the document's byte count
+/// (LE u32), then the DATABIN table the request declared — [abapSourceBytes]
+/// cut into rows of its width (120), the last one short — and FORMAT /
+/// PROPS as empty tables of their declared widths (80), the 06 67 trailer
+/// (a recorded session g[44]: 112 B in one row; a recorded session
+/// code_tab_save gui[37]: 158 B in a 120 + 38 row pair). NOT the Java
+/// bean's X-R3ABAP DATAASC records ([r3AbapPullAnswer]): the kernel reads
+/// the table it DECLARED, a DATAASC answer to a DATABIN pull commits an
+/// EMPTY text (the reference client's complaint-smartforms-code-tab-save-confirmed).
+///
+/// A document past one 250-byte segment rides as ONE `03 05` LZH cell of the
+/// fixed-width rows ([tableColumn], every reply table's rule), the last row
+/// NUL-padded and cut by TOTALSIZE — the OCX's own answer of every pull of
+/// a recorded session (SE38 g[25] 352 B: DATABIN 120 x 3, 360
+/// bytes inflated; g[30] 384 B, the line `* comment é ü ß` 16 UTF-16 units;
+/// the pasted g[34] / g[39] 6728 B and g[43] / g[48] 6730 B: 120 x 57;
+/// SE80 g[88] 420 B; a recorded session g[28] 6764 B,
+/// g[34] 6766 B), the same cell lead and 250-byte segment padding, the
+/// same FORMAT / PROPS and trailer after it. The inline rows of the two
+/// small captures (112 B, 158 B) and the cell from 352 B on put the
+/// switch between 158 and 352 bytes: the reply tables' 250 is inside it
+/// (no capture pins it closer). Inline rows of a long source would also
+/// overflow the reply item's u16 length. The LZH bytes are this encoder's,
+/// not the OCX's (the inflated rows are the same); the 06 67 trailer's
+/// double is the frontend's per-call statistics (80.0, 69.0, 195.0 …
+/// across those answers), not a version. A document past 64 KB is
+/// unrecorded.
+Uint8List abapSourcePullAnswer(Uint8List request, List<String> lines) {
+  final doc = abapSourceBytes(lines);
+  final declared = clientTablePullTableWidth(request, 'DATABIN');
+  final w = declared > 0 ? declared : abapSourceRowWidth;
+  final rows = [
+    for (var i = 0; i < doc.length; i += w)
+      Uint8List.sublistView(doc, i, i + w > doc.length ? doc.length : i + w),
+  ];
+  final table = BytesBuilder(copy: false)
+    ..add(_tableHead('DATABIN', w, rows.length))
+    ..add(tableColumn(rows, width: w));
+  for (final aux in const ['FORMAT', 'PROPS']) {
+    final aw = clientTablePullTableWidth(request, aux);
+    table.add(_tableHead(aux, aw > 0 ? aw : 80, 0));
+  }
+  return buildDpAnswer(
+    scalars: {
+      'TYPE': 'APPLICATION',
+      'SUBTYPE': 'ABAP_SOURCE',
+      'DATE': '00000000',
+      'TIME': '000000',
+      'DESCRIPTION': '',
+      'TOTALSIZE': _le32(doc.length),
+      'PLATTFORM': '',
+    },
+    tableRegion: table.takeBytes(),
+  );
+}
+
+/// The TextEdit's X-R3ABAP record width when the read-back declares none:
+/// 255 characters of UTF-8, 765 bytes (a recorded session
+/// srv[32] declares it, gui[22] answers in it).
+const int r3AbapRecordWidth = 765;
+
+/// The SAP GUI for Java's answer to the server's read-back of a TextEdit's
+/// text (`AssignProperty2(<editor>, TextAsR3Table, <obj>, data)` +
+/// `SaveDataToUrl`, then `DP_GET_CLIENT_TABLE45A` of the sink — [request]
+/// its RFC value) holding [lines]: TYPE APPLICATION, SUBTYPE X-R3ABAP, blank
+/// DATE / TIME / DESCRIPTION / PLATTFORM, TOTALSIZE = the records' byte
+/// count, the SEND_DATA_AS_STRING flag, one DATAASC record per line — its
+/// UTF-8 blank-padded to the declared width (765), a longer line cut —
+/// in one LZH cell, a FORMAT record of the bean's own (blank name, offset
+/// 1, length = the width, type `X`), an empty PROPS, NO 06 67 trailer
+/// (a recorded session gui[22]: 8 x 765 = 6 120 B). The SAP GUI
+/// for Windows TextEdit OCX's answer is unrecorded.
+Uint8List r3AbapPullAnswer(Uint8List request, List<String> lines) {
+  final declared = clientTablePullTableWidth(request);
+  final w = declared > 0 ? declared : r3AbapRecordWidth;
+  final rows = <Uint8List>[];
+  for (final line in lines) {
+    final b = utf8.encode(line);
+    final r = Uint8List(w)..fillRange(0, w, 0x20);
+    // cut on a character boundary: a split UTF-8 sequence is no text
+    var n = b.length < w ? b.length : w;
+    while (n < b.length && n > 0 && (b[n] & 0xc0) == 0x80) {
+      n--;
+    }
+    r.setRange(0, n, b);
+    rows.add(r);
+  }
+  final format = Uint8List(79)
+    ..setRange(60, 76, [
+      ..._le64(1),
+      ..._le64(w),
+    ])
+    ..[76] = 0x58 // 'X'
+    ..[77] = 0x01;
+  final table = BytesBuilder(copy: false)
+    ..add(_tableHead('DATAASC', w, rows.length))
+    ..add(tableColumn(rows, width: w))
+    ..add(_tableHead('FORMAT', 80, 1))
+    ..add(tableColumn([format]))
+    ..add(_tableHead('PROPS', 80, 0));
+  return buildDpAnswer(
+    scalars: {
+      'TYPE': 'APPLICATION',
+      'SUBTYPE': 'X-R3ABAP',
+      'DATE': '',
+      'TIME': '',
+      'DESCRIPTION': '',
+      'TOTALSIZE': _le32(w * rows.length),
+      'PLATTFORM': '',
+    },
+    extraScalars: const [('SEND_DATA_AS_STRING', '')],
+    tableRegion: table.takeBytes(),
+    trailer: false,
+  );
+}
+
+/// A reply table's name and dims: `03 01 <name> 03 01`, `03 02 <width u32>
+/// <rows u32> 03 02` (its rows follow: [tableColumn]).
+Uint8List _tableHead(String name, int width, int rows) {
+  final dims = ByteData(8)
+    ..setUint32(0, width)
+    ..setUint32(4, rows);
+  return Uint8List.fromList([
+    ...rfcToken(0x03, 0x01, Uint8List.fromList(name.codeUnits)),
+    ...rfcToken(0x03, 0x02, dims.buffer.asUint8List()),
+  ]);
+}
+
+/// [n] as the 4 characters of a little-endian u32 (a TOTALSIZE scalar).
+String _le32(int n) => String.fromCharCodes([
+  n & 0xff,
+  (n >> 8) & 0xff,
+  (n >> 16) & 0xff,
+  (n >> 24) & 0xff,
+]);
+
+List<int> _le64(int n) => [
+  for (var i = 0; i < 8; i++) i < 4 ? (n >> (8 * i)) & 0xff : 0,
+];
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
 // compiled per call (audit #7 / zcode P-12).

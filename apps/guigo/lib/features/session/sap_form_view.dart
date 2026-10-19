@@ -1,7 +1,9 @@
 import 'dart:convert' show base64Decode;
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:office_doc/office_doc.dart';
 
 /// An Adobe form template (SFP's Layout tab, `PDFXMLDesigner.Document`)
@@ -152,39 +154,62 @@ class _SapFormViewState extends State<SapFormView>
   Widget _structureTab(BuildContext context) {
     final root = _form.root;
     if (root == null) return const Center(child: Text('Empty template'));
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    final scheme = Theme.of(context).colorScheme;
+    final tree = ListView(
+      padding: const EdgeInsets.symmetric(vertical: 4),
       children: [
-        Expanded(
-          flex: 5,
-          child: ListView(
-            padding: const EdgeInsets.symmetric(vertical: 4),
-            children: [
-              _StructureTile(
-                element: root,
-                depth: 0,
-                selected: _selected,
-                onSelect: (e) => setState(() => _selected = e),
-              ),
-            ],
-          ),
-        ),
-        const VerticalDivider(width: 1),
-        Expanded(
-          flex: 4,
-          child: _selected == null
-              ? Center(
-                  child: Text(
-                    'Select an element',
-                    style: TextStyle(
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                )
-              : _DetailsPane(element: _selected!, form: _form, full: true),
+        _StructureTile(
+          element: root,
+          depth: 0,
+          selected: _selected,
+          onSelect: (e) => setState(() => _selected = e),
         ),
       ],
     );
+    return LayoutBuilder(builder: (context, box) {
+      if (box.maxWidth < 600) {
+        // a phone's width split in two left the SOM paths and the values
+        // a few characters each: below the tablet breakpoint the details
+        // stack under the tree (as the Layout tab's do), the tree taking
+        // the whole height while nothing is selected
+        final sel = _selected;
+        final h = box.hasBoundedHeight
+            ? (box.maxHeight * 0.4).clamp(160.0, 280.0)
+            : 200.0;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(child: tree),
+            if (sel != null) ...[
+              Divider(height: 1, color: scheme.outlineVariant),
+              SizedBox(
+                key: const ValueKey('form-structure-details'),
+                height: h,
+                child: _DetailsPane(element: sel, form: _form, full: true),
+              ),
+            ],
+          ],
+        );
+      }
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(flex: 5, child: tree),
+          const VerticalDivider(width: 1),
+          Expanded(
+            flex: 4,
+            child: _selected == null
+                ? Center(
+                    child: Text(
+                      'Select an element',
+                      style: TextStyle(color: scheme.onSurfaceVariant),
+                    ),
+                  )
+                : _DetailsPane(element: _selected!, form: _form, full: true),
+          ),
+        ],
+      );
+    });
   }
 
   // --- Scripts -----------------------------------------------------------------
@@ -287,23 +312,60 @@ class _SapFormViewState extends State<SapFormView>
 
   Widget _sourceTab(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final lines = _form.lines;
+    final mono = TextStyle(
+      fontFamily: 'Menlo',
+      fontSize: 11,
+      color: scheme.onSurface,
+    );
+    // a line a row, built as the rows scroll into view: a template runs
+    // to hundreds of KB (a logo is one base64 line), and one paragraph of
+    // all of it was shaped whole on every visit to the tab. The rows
+    // wrap, as the one paragraph did. The selection reaches only the rows
+    // on screen, so the whole source copies from the header's button
     return Container(
-      width: double.infinity,
       color: scheme.surfaceContainerLowest,
-      child: SingleChildScrollView(
-        child: SelectionArea(
-          child: Padding(
-            padding: const EdgeInsets.all(8),
-            child: Text(
-              _form.source,
-              style: TextStyle(
-                fontFamily: 'Menlo',
-                fontSize: 11,
-                color: scheme.onSurface,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            height: 36,
+            child: Row(
+              children: [
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    '${lines.length} lines',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  key: const ValueKey('form-source-copy'),
+                  tooltip: 'Copy source',
+                  iconSize: 18,
+                  icon: const Icon(Icons.copy_all_outlined),
+                  onPressed: () =>
+                      Clipboard.setData(ClipboardData(text: _form.source)),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: Scrollbar(
+              child: SelectionArea(
+                child: ListView.builder(
+                  key: const ValueKey('form-source'),
+                  padding: const EdgeInsets.all(8),
+                  itemCount: lines.length,
+                  itemBuilder: (_, i) => Text(lines[i], style: mono),
+                ),
               ),
             ),
           ),
-        ),
+        ],
       ),
     );
   }
@@ -357,20 +419,31 @@ class _FormPages extends StatelessWidget {
           ),
         );
       }
-      // several pages at their natural size: constrained:false or the
-      // viewer hands the Column the pane's bounded height and the stack
-      // of 842-pt pages overflows it (the striped band on the live form)
+      // several pages: constrained:false or the viewer hands the Column
+      // the pane's bounded height and the stack of 842-pt pages overflows
+      // it (the striped band on the live form). The stack is fitted to
+      // the pane's width — never past its natural size, as the one page
+      // is — the FittedBox keeping the Column self-sized: an A4 page on a
+      // phone opened at 100 %, its right third off screen until a pinch
+      final fitW =
+          box.hasBoundedWidth ? math.min(box.maxWidth, page.w) : page.w;
       return InteractiveViewer(
         maxScale: 8,
         minScale: 0.2,
         constrained: false,
         child: SizedBox(
-          width: page.w,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              for (final w in pages) ...[w, const SizedBox(height: 24)],
-            ],
+          width: fitW,
+          child: FittedBox(
+            fit: BoxFit.fitWidth,
+            child: SizedBox(
+              width: page.w,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  for (final w in pages) ...[w, const SizedBox(height: 24)],
+                ],
+              ),
+            ),
           ),
         ),
       );
@@ -414,7 +487,13 @@ class _PageCard extends StatelessWidget {
         }
         if (hit != null) onSelect(hit);
       },
-      child: Container(
+      // the page, its border and shadow recorded once: a pinch or a pan
+      // replays the picture under the viewer's transform instead of
+      // laying every field's text out again on each frame of the gesture
+      // (the viewer rebuilds per frame; the nearest boundary above was the
+      // tab page's)
+      child: RepaintBoundary(
+        child: Container(
         width: page.w,
         height: page.h,
         clipBehavior: Clip.hardEdge,
@@ -440,6 +519,7 @@ class _PageCard extends StatelessWidget {
             theme: Theme.of(context),
             selected: selected,
           ),
+        ),
         ),
       ),
     );
@@ -608,6 +688,7 @@ class _FormPainter extends CustomPainter {
       canvas,
       Offset(rect.left, rect.top + (rect.height - tp.height) / 2),
     );
+    tp.dispose();
   }
 
   void _paintEdges(Canvas canvas, Rect rect, XfaPlaced e,
@@ -716,6 +797,7 @@ class _FormPainter extends CustomPainter {
       canvas,
       Offset(rect.left + 1, rect.top + (rect.height - tp.height) / 2),
     );
+    tp.dispose();
   }
 
   Color _ui(XfaColor c) => Color.fromARGB(255, c.r, c.g, c.b);
@@ -724,9 +806,15 @@ class _FormPainter extends CustomPainter {
       ? docInk
       : Color.fromARGB(255, e.color!.r, e.color!.g, e.color!.b);
 
+  /// The selection as far as THIS page is concerned: an element on another
+  /// page is none of its business, so a tap on page 2 repaints page 2
+  /// alone.
+  XfaElement? get _ownSelection =>
+      selected?.page == pageIndex ? selected : null;
+
   @override
   bool shouldRepaint(_FormPainter old) =>
-      old.selected != selected ||
+      old._ownSelection != _ownSelection ||
       old.pageIndex != pageIndex ||
       old.images.length != images.length ||
       !identical(old.form, form);
@@ -790,6 +878,7 @@ class _StructureTile extends StatelessWidget {
                 Icon(_icon, size: 15, color: scheme.onSurfaceVariant),
                 const SizedBox(width: 6),
                 Flexible(
+                  flex: 3,
                   child: Text(
                     label,
                     overflow: TextOverflow.ellipsis,
@@ -800,13 +889,19 @@ class _StructureTile extends StatelessWidget {
                     ),
                   ),
                 ),
+                // the widget kind gives way too (a quarter of the room at
+                // most): a deep tree on a phone overflowed the row once the
+                // indent and the kind alone outgrew it
                 if (detail.isNotEmpty) ...[
                   const SizedBox(width: 6),
-                  Text(
-                    detail,
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: scheme.onSurfaceVariant,
+                  Flexible(
+                    child: Text(
+                      detail,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: scheme.onSurfaceVariant,
+                      ),
                     ),
                   ),
                 ],
@@ -954,8 +1049,9 @@ class _DetailsPane extends StatelessWidget {
     );
   }
 
-  static bool _mono(String v) =>
-      v.contains(RegExp(r'^[\w.$#/{}\[\] :,-]+$')) && v.length > 8;
+  static final _monoRx = RegExp(r'^[\w.$#/{}\[\] :,-]+$');
+
+  static bool _mono(String v) => v.length > 8 && v.contains(_monoRx);
 }
 
 // ---------------------------------------------------------------------------

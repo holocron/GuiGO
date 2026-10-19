@@ -446,7 +446,7 @@ DateTime calendarWeekStart(DateTime d, int firstDay) {
 
 String _d(DateTime? d) => d == null ? '-' : calendarWireDate(d);
 
-final RegExp _digits = RegExp(r'^\d+$');
+final RegExp _digits = RegExp(r'^\d{1,9}$');
 
 class _Cal {
   _Cal(this.shell, this.container, this.seq, this.program, this.step);

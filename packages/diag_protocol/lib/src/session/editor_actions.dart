@@ -265,7 +265,7 @@ List<Uint8List> ab4LineEventItems(
   b.write('</EVENT></EVENTS></DATAMANAGER>');
   return canvasEventItems(
     ctx,
-    okcode: '%_GC $shell $ab4LineEvent',
+    okcode: cfwGenericEventOkcode(shell, ab4LineEvent),
     xml: Uint8List.fromList(utf8.encode(b.toString())),
     focusShell: shell,
     sourcePath: path,
@@ -329,7 +329,7 @@ List<Uint8List> editorBorderClickItems(
   b.write('</EVENT></EVENTS>${_winControlsOf(controls)}</DATAMANAGER>');
   return canvasEventItems(
     ctx,
-    okcode: '%_GC $shell $ab4BorderClickEvent',
+    okcode: cfwGenericEventOkcode(shell, ab4BorderClickEvent),
     xml: Uint8List.fromList(utf8.encode(b.toString())),
     focusShell: shell,
     sourcePath: path,
@@ -351,7 +351,7 @@ List<Uint8List> editorDoubleClickItems(
   List<int>? path,
 }) => canvasEventItems(
   ctx,
-  okcode: '%_GC $shell $editorDoubleClickEvent',
+  okcode: cfwGenericEventOkcode(shell, editorDoubleClickEvent),
   xml: Uint8List.fromList(
     utf8.encode(
       '$_xmlDecl<DATAMANAGER> <EVENTS>  <EVENT SHELLID ="${_attr(shell)}" '
@@ -393,7 +393,7 @@ List<Uint8List> editorHelpItems(
   List<int>? path,
 }) => canvasEventItems(
   ctx,
-  okcode: '%_GC $shell $ab4HelpEvent',
+  okcode: cfwGenericEventOkcode(shell, ab4HelpEvent),
   xml: Uint8List.fromList(
     utf8.encode(
       '$_xmlDecl<DATAMANAGER> <EVENTS>  <EVENT SHELLID ="${_attr(shell)}" '

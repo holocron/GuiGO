@@ -23,7 +23,7 @@
 /// anchors, scripting-driven visibility) fall back to sane defaults.
 library;
 
-import 'dart:convert' show utf8;
+import 'dart:convert' show LineSplitter, utf8;
 import 'dart:typed_data';
 
 import 'package:xml/xml.dart';
@@ -411,6 +411,11 @@ class XfaForm {
 
   /// The raw XML text (the Source tab shows it).
   final String source;
+
+  /// [source] as lines (the Source tab's rows, built as they scroll into
+  /// view): a CRLF a Windows Designer or a server round trip left in the
+  /// template splits like a bare LF, no '\r' rides a row.
+  late final List<String> lines = const LineSplitter().convert(source);
 
   late final List<XfaScript> scripts = [
     for (final e in elements)

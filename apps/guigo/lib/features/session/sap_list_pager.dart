@@ -78,6 +78,10 @@ class SapPagedListState extends State<SapPagedList> {
   late ScrollController _c;
   Timer? _settle;
   bool _inFlight = false;
+
+  /// [_inFlight] for the fetch bar over the list's top edge: a leaf of its
+  /// own redraws for it, never the lines.
+  final _inFlightN = ValueNotifier<bool>(false);
   bool _owed = false;
 
   /// The last target asked for and the page's first line when it was: the
@@ -146,6 +150,7 @@ class SapPagedListState extends State<SapPagedList> {
   void dispose() {
     _scope?.removeListener(_scopeBusyChanged);
     _settle?.cancel();
+    _inFlightN.dispose();
     _c.dispose();
     super.dispose();
   }
@@ -196,10 +201,13 @@ class SapPagedListState extends State<SapPagedList> {
     _asked = target;
     _askedFrom = p.first;
     _inFlight = true;
+    _inFlightN.value = true;
     requests++;
     ask(target).whenComplete(() {
       _inFlight = false;
-      if (mounted) _scheduleCheck();
+      if (!mounted) return;
+      _inFlightN.value = false;
+      _scheduleCheck();
     });
   }
 
@@ -224,6 +232,14 @@ class SapPagedListState extends State<SapPagedList> {
   Widget build(BuildContext context) {
     final p = widget.page;
     final lh = widget.lineHeight;
+    final scheme = Theme.of(context).colorScheme;
+    // a line the server has not sent yet: an ellipsis at its start (a
+    // blank row read as an empty line of the list)
+    final pendingStyle = TextStyle(
+      color: scheme.onSurfaceVariant,
+      fontSize: math.min(13.0, lh * 0.7),
+      height: 1,
+    );
     // the extent: the whole list — and past its end when the server's page
     // starts there: Page Down does not stop at the last full page (from
     // 154 of 220 lines, 46 visible, the server answers first 200 with the
@@ -235,7 +251,7 @@ class SapPagedListState extends State<SapPagedList> {
             ? (cons.maxHeight / lh).ceil()
             : p.visible;
         final count = math.max(p.total, p.first + shown);
-        return Scrollbar(
+        final list = Scrollbar(
           controller: _c,
           thumbVisibility: true,
           interactive: true,
@@ -256,10 +272,44 @@ class SapPagedListState extends State<SapPagedList> {
                 }
                 // a line of the list the server has not sent yet
                 return SizedBox(
-                    key: ValueKey('sap-list-pending-$i'), height: lh);
+                  key: ValueKey('sap-list-pending-$i'),
+                  height: lh,
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Padding(
+                      padding: const EdgeInsets.only(left: 8),
+                      child: Text('…', style: pendingStyle),
+                    ),
+                  ),
+                );
               },
             ),
           ),
+        );
+        // the fetch bar: the page's round is on its way (over the list's
+        // top edge — an overlay, so the list keeps its height; static, as
+        // the session's own spinner already turns for the round)
+        return Stack(
+          children: [
+            list,
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: ValueListenableBuilder<bool>(
+                valueListenable: _inFlightN,
+                builder: (_, inFlight, _) => inFlight
+                    ? SizedBox(
+                        height: 2,
+                        child: ColoredBox(
+                          key: const ValueKey('sap-list-fetching'),
+                          color: scheme.primary,
+                        ),
+                      )
+                    : const SizedBox.shrink(),
+              ),
+            ),
+          ],
         );
       },
     );

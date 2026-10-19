@@ -2,8 +2,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 /// Whether the session is running an action (or the logon), for the
-/// widgets that DRAW it — a disabled input, an inert button, an absorbing
-/// pointer — and nothing above them.
+/// widgets that DRAW it — an inert button, an absorbing pointer over the
+/// inputs (an input keeps its look, its focus and the keyboard) — and
+/// nothing above them.
 ///
 /// The session screen flips busy around every key press: threaded down as
 /// a constructor flag it rebuilt the whole body (every dynpro field, every

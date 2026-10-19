@@ -20,6 +20,8 @@
 /// pivot holds, not Excel's exact layout.
 library;
 
+import 'dart:math' show min;
+
 import 'doi.dart' show Document;
 
 /// Excel's (French Office 16) label of a summed data field and of the
@@ -48,8 +50,11 @@ String? applyInsertFull2(
       r.length >= 3 ? r[2] : (r.isEmpty ? '' : r.last);
   final keys = [for (final r in keyTitles) title(r)];
   final data = [for (final r in dataTitles) title(r)];
-  final nKeys = keyCols > 0 ? keyCols : keys.length;
-  final nData = dataCols > 0 ? dataCols : data.length;
+  // the wire's column counts clamped to a sheet's width: unbounded, one
+  // InsertFull2 ran a billion-iteration key loop and a 16 GB sum list
+  // (audit 2026-10-17 P0-6)
+  final nKeys = min(keyCols > 0 ? keyCols : keys.length, Document.maxRangeCols);
+  final nData = min(dataCols > 0 ? dataCols : data.length, Document.maxRangeCols);
   if (nKeys <= 0 || nData <= 0 || dataRows <= 0) return null;
   final src = source.trim().isEmpty ? doc.activeSheet : source.trim();
   final cells = doc.sheets[src];
@@ -64,9 +69,11 @@ String? applyInsertFull2(
       }
     }
   }
-  final cap = dataRows > Document.maxRangeRows
-      ? Document.maxRangeRows
-      : dataRows;
+  // rows read: as many as the range-cell budget allows over this width
+  final cap = min(
+    min(dataRows, Document.maxRangeRows),
+    Document.maxRangeCells ~/ (nKeys + nData),
+  );
   // the roles: a data column is summed unless its role says otherwise
   // (only ADD is on record)
   final groups = <String, (List<String>, List<num>)>{};
@@ -78,9 +85,8 @@ String? applyInsertFull2(
       () => (k, List<num>.filled(nData, 0)),
     );
     for (var c = 0; c < nData; c++) {
-      g.$2[c] += doc.valueAt(r, nKeys + 1 + c, src) is num
-          ? doc.valueAt(r, nKeys + 1 + c, src) as num
-          : 0;
+      final v = doc.valueAt(r, nKeys + 1 + c, src);
+      if (v is num) g.$2[c] += v;
     }
   }
   if (groups.isEmpty) return null;

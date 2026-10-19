@@ -25,6 +25,7 @@
 /// _METRIC_Y2 29 px per column / row).
 library;
 
+import 'dart:collection';
 import 'dart:math' as math;
 
 import 'sap_barchart.dart' show isBarChartClass;
@@ -109,12 +110,49 @@ const int metricY2 = 29;
 /// The CFW control properties the layout and docking code reads and
 /// writes (SAP GUI's numeric property ids, the registry's keys): the
 /// control's height and width (in the METRICS units [metricY2] /
-/// [metricX2]), a docking container's side (`1` / `2` left / right, `3` /
-/// `4` top / bottom) and its visibility (`0` hidden).
+/// [metricX2]), a docking container's side ([dockSideOf]) and its
+/// visibility (`0` hidden).
 const String propControlHeight = '120';
 const String propControlWidth = '300';
 const String propDockSide = '470';
 const String propVisible = '290';
+
+/// The side a docking container's `470` value docks it at: CL_GUI_DOCKING_
+/// CONTAINER's dock_at_left 1 / dock_at_top 2 / dock_at_bottom 4 /
+/// dock_at_right 8, as the frontend reads them — the Java GUI's
+/// GuiDockShell.setProperty(470) (platinr3S.jar, 810 rel) takes exactly
+/// 1, 8, 2, 4 (any other value becomes 1) and lays them out West / East /
+/// North / South (docklayout.Docker LEFT / RIGHT / TOP / BOTTOM). The
+/// corpus agrees: every `8` and `1` dock carries a width (300) only, every
+/// `2` and `4` dock a height (120) only — SMARTFORMS' Form Painter dock
+/// 129 `470 = 8`, `300 = 400` beside the tree dock 120 `470 = 1`
+/// (a recorded session srv[14]); the class editor's grid
+/// dock 117 `470 = 2` (SAPLSEO_CLEDITOR/0200), reported by the real GUI
+/// 110 px tall at the window's full width (`117 120 = 110`, later `300 =
+/// 1892` — a recorded session). the reference client's docked_layout
+/// DOCK_SIDES (`2` right, `3` top) lost both: a `2` dock had no width and
+/// was dropped, an `8` one was taken for a second LEFT pane. Null: no
+/// side set (the caller falls back to the extent it was given).
+String? dockSideOf(String? value) {
+  final v = (value ?? '').trim();
+  if (v.isEmpty) return null;
+  return switch (v) {
+    '2' => 'top',
+    '4' => 'bottom',
+    '8' => 'right',
+    _ => 'left',
+  };
+}
+
+/// Whether [value] (a `470`) docks the container at the window's left or
+/// right edge: its extent is a width (300), its inner edge a column sash.
+bool isSideDock(String? value) =>
+    switch (dockSideOf(value)) { 'left' || 'right' => true, _ => false };
+
+/// Whether [value] (a `470`) docks the container at the top or bottom
+/// edge: its extent is a height (120), its inner edge a row sash.
+bool isBandDock(String? value) =>
+    switch (dockSideOf(value)) { 'top' || 'bottom' => true, _ => false };
 
 /// The CFW alignment / position props a control's box inside its parent
 /// follows (the jar's com.sap.platin.r3.cet.GuiCtlProperty: SAP_PROP_ALIGN
@@ -208,7 +246,7 @@ String controlKind(String cls) {
 
 bool _isDockingClass(String cls) => cls.toUpperCase().contains('DOCKING');
 
-final RegExp _digits = RegExp(r'^\d+$');
+final RegExp _digits = RegExp(r'^\d{1,9}$');
 
 /// SAP.DocumentContainerControl.N (doi.dart containerClassRx).
 final RegExp _officeClass = RegExp(
@@ -294,6 +332,16 @@ class ControlRegistry {
   /// painted delta is trusted again (a recorded session KEY DECODE 3)
   final Map<String, int> draggedDelta = {};
 
+  /// dock shell -> the width (cells) the USER dragged a side dock to when
+  /// the window holds SEVERAL side docks (SMARTFORMS' tree dock left of the
+  /// dynpro, its Form Painter dock right of it — a recorded session
+  /// srv[14]): the one [LayoutInputs.dockFraction] cannot place, being the
+  /// share of a LONE dock. While the server still paints the
+  /// [draggedDelta] pair the pane is drawn at it; once it re-lays out, the
+  /// dragged dock takes what the new area leaves beside the others
+  /// (_dockedBoxes).
+  final Map<String, int> draggedCols = {};
+
   /// shell -> the cached props its RegisterCachedProp verbs registered,
   /// in registration order (the CONTROLS report's order)
   final Map<String, List<String>> cachedProps = {};
@@ -335,6 +383,7 @@ class ControlRegistry {
       requested,
       reportedDelta,
       draggedDelta,
+      draggedCols,
       cachedProps,
       flushedSizes,
       controlLinks,
@@ -424,12 +473,17 @@ class ControlRegistry {
         par = lastSplitter;
       }
       created.add(LayoutControl(program, step, shell, cls));
+      _createdChanged();
       requested.remove(shell); // a re-created shell starts a new history
+      draggedCols.remove(shell); // … at the extent the server asks
       flushedSizes.remove(shell); // … and owes its realized size again
       props[shell]?.remove(propVisible); // … and visible (see [hidden])
       if (_digits.hasMatch(par)) parents[shell] = par;
     }
-    if (created.length > 1000) created.removeRange(0, created.length - 1000);
+    if (created.length > 1000) {
+      created.removeRange(0, created.length - 1000);
+      _createdChanged();
+    }
 
     for (final v in verbs) {
       final a = v.args;
@@ -631,12 +685,27 @@ class ControlRegistry {
     return false;
   }
 
-  /// raw_controls_graph.control_graph kinds: {shell: kind}
-  Map<String, String> kinds() => {
-    for (final c in created) c.shell: controlKind(c.cls),
-  };
+  /// raw_controls_graph.control_graph kinds: {shell: kind} — each shell's
+  /// LATEST class, in first-creation order. Memoized with [classes]: both
+  /// depend on the (shell, class) pairs of [created] alone, which only
+  /// [foldCall] changes ([_createdChanged]; [forget] keeps the history and
+  /// [retag] rewrites programs only). A caller holds a snapshot: a change
+  /// builds a new map, the held one keeps its answers — and the maps are
+  /// read-only (the registry's, shared by every reader of a compose).
+  Map<String, String> kinds() => _kinds ??= UnmodifiableMapView({
+    for (final e in classes().entries) e.key: controlKind(e.value),
+  });
 
-  Map<String, String> classes() => {for (final c in created) c.shell: c.cls};
+  Map<String, String> classes() =>
+      _classes ??= UnmodifiableMapView({for (final c in created) c.shell: c.cls});
+
+  Map<String, String>? _kinds, _classes;
+
+  /// [created] changed: the memoized maps are rebuilt on the next read.
+  void _createdChanged() {
+    _kinds = null;
+    _classes = null;
+  }
 }
 
 /// The answers the SAP GUI for Windows gives to a splitter's size READS in
@@ -1310,7 +1379,6 @@ Map<String, _Box> _dockedBoxes(
   for (final c in fx.reg.created) {
     latestClass[c.shell] = c.cls;
   }
-  const sides = {'1': 'left', '2': 'right', '3': 'top', '4': 'bottom'};
   for (final e in latestClass.entries) {
     final h = e.key;
     // a hidden dock (SetProperty 290 = 0) takes no window space: SM12's
@@ -1319,7 +1387,7 @@ Map<String, _Box> _dockedBoxes(
       continue;
     }
     final p = fx.reg.props[h] ?? const {};
-    final side = sides[(p[propDockSide] ?? '').trim()];
+    final side = dockSideOf(p[propDockSide]);
     final wRaw = (p[propControlWidth] ?? '').trim(),
         hRaw = (p[propControlHeight] ?? '').trim();
     final wPx = wRaw.isEmpty ? 0 : int.tryParse(wRaw);
@@ -1404,6 +1472,39 @@ Map<String, _Box> _dockedBoxes(
       horizChanged = true;
     }
     if (b.side == 'left') b.left = -b.width;
+  }
+  // Several side docks: SMARTFORMS' Form Builder docks its tree left (120,
+  // 470 = 1, 300 = 200) and its Form Painter right (129, 470 = 8, 300 =
+  // 400) of the dynpro, and the server lays the area out to both requests
+  // (a recorded session srv[19]: area 193 of 268 = 268 - 25 - 50); the
+  // real GUI realizes each at its request and reports exactly those
+  // (a recorded session gui[11]: 120 300 = 200, 129 300 =
+  // 400). Every side dock carries a sash on its inner edge (the Java GUI's
+  // docklayout.Docker mSash, on the right edge of a LEFT dock and the left
+  // edge of a RIGHT one): a dock the user dragged ([ControlRegistry
+  // .draggedCols]) is drawn at its dragged width while the server still
+  // paints the pair of the drag, and takes what the server's re-laid-out
+  // area leaves beside the other docks once it moved — the lone-dock rule
+  // above, per dock.
+  if (horiz.length > 1 && winCols > areaCols && areaCols > 0) {
+    final delta = winCols - areaCols;
+    final dragged = [
+      for (final h in horiz)
+        if (fx.reg.draggedCols[h] != null) h,
+    ];
+    for (final h in dragged) {
+      final b = out[h]!;
+      if (fx.reg.draggedDelta[h] == delta) {
+        b.width = math.max(fx.reg.draggedCols[h]!, 1);
+      } else if (dragged.length == 1) {
+        var others = 0;
+        for (final k in horiz) {
+          if (k != h) others += out[k]!.width;
+        }
+        if (delta - others >= 1) b.width = delta - others;
+      }
+      horizChanged = true;
+    }
   }
   if (horizChanged && winCols > 0) {
     // the area is what the panes leave of the window (never below 1 col)
@@ -2117,6 +2218,11 @@ String _reason(String rung, String? shell, String note) {
   return b.toString();
 }
 
+/// How many times [composeScreen] ran (tests read it: a busy flip
+/// composes nothing, a turn composes the base window ONCE — regions and
+/// sashes in one call, SapSession.baseComposition).
+int debugComposeScreenCalls = 0;
+
 /// The window composition of [inputs.screen] (render orchestration:
 /// shell boxes -> content-sized docks -> carve -> cell items / dock hosts
 /// -> control regions through the ladder). Regions are in WINDOW cells
@@ -2127,6 +2233,7 @@ List<ScreenRegion> composeScreen(
   List<SplitterSash>? sashes,
   Map<String, CellRect>? boxesOut,
 }) {
+  debugComposeScreenCalls++;
   final fx = _Facts(reg, inputs);
   final m = inputs.screen;
   final modelBoxes = _shellBoxes(fx);
@@ -2254,6 +2361,17 @@ List<ScreenRegion> composeScreen(
   // the docks that paint nothing (render: note_stacked R1)
   boxes.forEach((dk, db) {
     if (db.kind != 'dock' || !db.paintsNothing) return;
+    // the controls under it no rung draws (SMARTFORMS' Form Painter 128,
+    // SAP.FormPainter.1, in the right dock 126 — a recorded session
+    // srv[15]): named, so the pane can say what the real GUI shows there
+    final hosted = [
+      for (final sh in fx.subtree(dk))
+        if (sh != dk &&
+            fx.shellLive(sh) &&
+            !fx.hidden(sh) &&
+            fx.kinds[sh] == 'control')
+          '${fx.classes[sh]} (shell $sh)',
+    ];
     regions.add(
       ScreenRegion(
         kind: 'control',
@@ -2265,7 +2383,8 @@ List<ScreenRegion> composeScreen(
           'R1',
           dk,
           'docked pane paints nothing — no delivered content under it '
-              '(extent ${db.px} px stays on the wire)',
+              '(extent ${db.px} px stays on the wire)'
+              '${hosted.isEmpty ? '' : '; hosts ${hosted.join(', ')}'}',
         ),
       ),
     );

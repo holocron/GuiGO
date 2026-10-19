@@ -264,7 +264,10 @@ const int _fmtRecord = 80;
         seg[ds] == 0x03 &&
         seg[ds + 1] == 0x02 &&
         bd.getUint16(ds + 2) == 8) {
-      final w = bd.getUint32(ds + 4), n = bd.getUint32(ds + 8);
+      // bounded like dp_cache's descriptors: a ~200-B push declaring 4 GB
+      // rows had decodeCanvasPush pad every row to it (audit
+      // 2026-10-17 P0-5)
+      final (w, n) = _boundedDims(bd.getUint32(ds + 4), bd.getUint32(ds + 8));
       for (var k = ds + 12; k < ds + 20 && k + 1 < seg.length; k++) {
         if (seg[k] == 0x03 && seg[k + 1] == 0x04) break; // inline rows
         if (seg[k] != 0x03 || seg[k + 1] != 0x05) continue;
@@ -280,6 +283,10 @@ const int _fmtRecord = 80;
   final (_, (w, n), cells) = dpColumnCells(seg, name);
   return (w, n, cells);
 }
+
+/// (0, 0) for a declared geometry past the decode cap (dp_cache's rule).
+(int, int) _boundedDims(int w, int n) =>
+    w > 0 && n > 0 && n > csMaxDecodedLength ~/ w ? (0, 0) : (w, n);
 
 int _indexOf(Uint8List b, List<int> needle) {
   for (var i = 0; i + needle.length <= b.length; i++) {
@@ -824,4 +831,4 @@ bool _digits(String? s) => s != null && _digitsOnlyRx.hasMatch(s.trim());
 // compiled per call (audit #7 / zcode P-12).
 final RegExp _canvasTextColumnRx = RegExp(r'^col_(\d+)$');
 final RegExp _canvasTextColumnRx2 = RegExp(r'^@\w{2,4}@$');
-final RegExp _digitsOnlyRx = RegExp(r'^\d+$');
+final RegExp _digitsOnlyRx = RegExp(r'^\d{1,9}$');

@@ -1,7 +1,8 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:diag_protocol/diag_protocol.dart' show editorVisibleLines;
+import 'package:diag_protocol/diag_protocol.dart'
+    show ab4InsertUndoSteps, editorVisibleLines;
 import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -134,6 +135,25 @@ class _BreakpointKeyIntent extends Intent {
   const _BreakpointKeyIntent();
 }
 
+class _PasteIntent extends Intent {
+  const _PasteIntent();
+}
+
+class _CutIntent extends Intent {
+  const _CutIntent();
+}
+
+/// The text a line of an edited source starts with in the platform's
+/// editing value: a zero-width space before the line's own text, so a
+/// Backspace at the line's start still deletes something the platform can
+/// report — the line break to join ([_SapSourceViewState.updateEditingValue]).
+const String _imeLead = '\u200B';
+
+final RegExp _lineBreakRx = RegExp('\r\n|\r|\n');
+
+/// The blanks a line starts with (its indentation).
+final RegExp _leadingBlanksRx = RegExp(r'^[ \t]*');
+
 /// The gutter mark of a breakpoint of another kind than the session one
 /// (an external / user breakpoint): SAP's ICON_USER_BREAKPOINT, a red dot
 /// with a small person over its corner.
@@ -192,11 +212,14 @@ class _ViewAction<T extends Intent> extends Action<T> {
 ///
 /// Gestures (touch first, as text reads on an iPad; a vertical swipe stays
 /// the scroll):
-/// * tap in the code: the caret ([onCaret]); a tap ANYWHERE in the gutter
-/// of a line — its number, the margin, a breakpoint dot on it — is the
+/// * tap in the code: the caret ([onCaret]); a tap in the gutter of a
+/// line — its left margin, its number, a breakpoint dot on it — is the
 /// editor's margin click on that line ([onToggleBreakpoint]: the server
 /// sets the session breakpoint, or removes the one there). It is the
-/// only thing a gutter tap does: never another key;
+/// only thing a gutter tap does: never another key. The 6-point gap
+/// between the gutter and the code belongs to the code: a finger that
+/// aimed at a line's first character and landed short parks the caret
+/// on column 1 instead of planting a breakpoint;
 /// * double tap on a token: navigate to its definition ([onNavigate],
 /// 1-based line and column, the editor's double-click; the first tap
 /// put the caret there, as the real GUI's click before its -601);
@@ -212,12 +235,29 @@ class _ViewAction<T extends Intent> extends Action<T> {
 /// / removes the session breakpoint on the caret's line
 /// ([onBreakpointKey], the editor's own shortcut).
 ///
-/// The view is read-only (the source changes on the server only): there
-/// is no cut or paste.
+/// Display mode (the default) is read-only: the source changes on the
+/// server only, there is no cut or paste and no keyboard comes up. With
+/// [editable] (the ABAP editor in change mode: the server's
+/// `SetCurrentDocReadOnly(0)`, SapSession.editorEditable) a tap also puts
+/// an editing caret in the code and brings the keyboard — the iPad's
+/// soft keyboard or a hardware one — and every edit is handed to
+/// [onEdit]: typing (a selection is replaced), Return splits the line —
+/// the new line indented as the text before the break, as the ABAP
+/// editor keeps a block's indentation on Enter — Backspace / Delete join
+/// lines at their ends, Cmd/Ctrl+V and the toolbar's Paste insert (a
+/// multi-line text splits into lines), Cut, the arrows / Home / End move
+/// the caret, Tab / Shift+Tab indent / outdent (the soft keyboards have
+/// no Tab: the long-press menu's Indent / Outdent shift the caret's line
+/// or the selected lines by two). Nothing is sent per keystroke: the
+/// real SAP GUI keeps the edit in the control and reports it in the next
+/// round (a recorded session: no traffic while typing; the
+/// F11 of a recorded session g[41] carries TextModified 1).
 class SapSourceView extends StatefulWidget {
   const SapSourceView({
     super.key,
     required this.lines,
+    this.editable = false,
+    this.onEdit,
     this.breakpoints = const {},
     this.otherBreakpoints = const {},
     this.externalBreakpoints = const {},
@@ -235,6 +275,24 @@ class SapSourceView extends StatefulWidget {
   });
 
   final List<String> lines;
+
+  /// Whether the user may edit the text (the editor in change mode); false
+  /// is display mode — no caret, no keyboard, no edit.
+  final bool editable;
+
+  /// An edit of an [editable] view: the whole text after it, the caret
+  /// (1-based line and column, the slot after its last character at most)
+  /// and how many undo steps the edit opens — 1 for a Return, a typed
+  /// character (each one: `ab` is 2, a recorded session
+  /// g[77]), a deletion, a cut; a paste's or a multi-line insert's
+  /// [ab4InsertUndoSteps] (the five lines of _long g[27]: 6). The
+  /// control's Version counts the steps.
+  final void Function(
+    List<String> lines,
+    int caretLine,
+    int caretCol,
+    int undoSteps,
+  )? onEdit;
 
   /// The lines with a SESSION breakpoint (the server's marker 2): a solid
   /// red dot.
@@ -266,9 +324,10 @@ class SapSourceView extends StatefulWidget {
   /// back to the same spot after the user scrolled away).
   final int scrollSerial;
 
-  /// A tap in the gutter of a line, with or without a dot on it (the
-  /// editor's margin click), or the long-press menu's breakpoint entry:
-  /// the one breakpoint action of the view.
+  /// A tap in the gutter of a line — its margin, its number or the dot on
+  /// it; not the gap before the code (the editor's margin click), or the
+  /// long-press menu's breakpoint entry: the one breakpoint action of the
+  /// view.
   final void Function(int line)? onToggleBreakpoint;
 
   /// Ctrl+Shift+F12 on a hardware keyboard: the breakpoint KEY with the
@@ -315,9 +374,14 @@ class SapSourceView extends StatefulWidget {
   State<SapSourceView> createState() => _SapSourceViewState();
 }
 
-class _SapSourceViewState extends State<SapSourceView> {
+class _SapSourceViewState extends State<SapSourceView> with TextInputClient {
   static const double _fontSize = 13;
   static const double _lineH = SapSourceView.lineHeight;
+
+  /// The gutter's content-free strip before the code (the number's right
+  /// padding): drawn and hit-tested with the same width, so a tap in it
+  /// is the code's — the caret on column 1 — and never a margin click.
+  static const double _gutterPad = 6;
   final _h = ScrollController();
   final _v = ScrollController();
   final _listKey = GlobalKey();
@@ -347,12 +411,29 @@ class _SapSourceViewState extends State<SapSourceView> {
   (int, int)? _firstTap;
   Offset? _firstTapAt;
 
+  // ---- editing (an [SapSourceView.editable] view) ----
+  /// The text as the user edited it, until the parent hands the same text
+  /// back as [SapSourceView.lines] (or the server replaces it).
+  List<String>? _doc;
+  List<String> get _lines => _doc ?? widget.lines;
+
+  /// The editing caret: (1-based line, 0-based character offset).
+  (int, int)? _caret;
+
+  TextInputConnection? _input;
+
+  /// The platform's editing value: [_imeLead] + the caret's line.
+  TextEditingValue _ime = const TextEditingValue();
+
+  bool get _editing => widget.editable && widget.onEdit != null;
+
   @override
   void initState() {
     super.initState();
     _v.addListener(_reportView);
     _v.addListener(_hideOnScroll);
     _h.addListener(_hideOnScroll);
+    _focus.addListener(_onFocus);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _follow();
       _reportView();
@@ -371,7 +452,7 @@ class _SapSourceViewState extends State<SapSourceView> {
       widget.onViewLines?.call(fits);
     }
     final cb = widget.onViewport;
-    final n = widget.lines.length;
+    final n = _lines.length;
     if (cb == null || n == 0) return;
     final first = (p.pixels / _lineH).floor().clamp(0, n - 1) + 1;
     final last = ((p.pixels + p.viewportDimension) / _lineH).ceil().clamp(first, n);
@@ -411,9 +492,32 @@ class _SapSourceViewState extends State<SapSourceView> {
     // into view only when off screen — the stale first visible line of the
     // last put must not undo the user's scroll ("I scroll down, set a
     // breakpoint, the code scrolls back to line 24"); a caret the user
-    // tapped is no server move at all
-    final newText = !identical(old.lines, widget.lines) &&
-        !listEquals(old.lines, widget.lines);
+    // tapped is no server move at all. The text the user edited, handed
+    // back as the same lines, is no new text either: the caret, the
+    // scroll and the keyboard stay
+    final shown = _doc ?? old.lines;
+    final newText = !identical(shown, widget.lines) &&
+        !listEquals(shown, widget.lines);
+    // the user's edit handed back as the session's own copy: the same
+    // text, the same longest line (no fold over the document again)
+    if (!newText && identical(shown, _longestFor)) {
+      _longestFor = widget.lines;
+      _longestLen = widget.lines.length;
+    }
+    _doc = null;
+    if (newText || !_editing) {
+      if (!_editing) {
+        _caret = null;
+        _closeInput();
+      } else if (_caret != null) {
+        // the server's text: the caret kept where it still exists
+        final n = widget.lines.length;
+        final l = _caret!.$1.clamp(1, n < 1 ? 1 : n);
+        final len = n == 0 ? 0 : widget.lines[l - 1].length;
+        _caret = (l, _caret!.$2.clamp(0, len));
+        WidgetsBinding.instance.addPostFrameCallback((_) => _syncInput());
+      }
+    }
     final scrolled = old.firstVisibleLine != widget.firstVisibleLine ||
         old.scrollSerial != widget.scrollSerial;
     if (scrolled || newText) {
@@ -463,6 +567,8 @@ class _SapSourceViewState extends State<SapSourceView> {
   void dispose() {
     _tapWindow?.cancel();
     _toolbar.remove();
+    _closeInput();
+    _focus.removeListener(_onFocus);
     _focus.dispose();
     _h.dispose();
     _v.dispose();
@@ -506,13 +612,13 @@ class _SapSourceViewState extends State<SapSourceView> {
     return Offset(l.dx, l.dy + _v.offset);
   }
 
-  int _lineOf(double y) => (y / _lineH).floor().clamp(0, widget.lines.length - 1) + 1;
+  int _lineOf(double y) => (y / _lineH).floor().clamp(0, _lines.length - 1) + 1;
 
   /// 1-based (line, col) of the character under a pointer (what a tap,
   /// a double tap, a navigation acts on).
   (int, int)? _cellAt(Offset global) {
     final c = _content(global);
-    if (c == null || widget.lines.isEmpty) return null;
+    if (c == null || _lines.isEmpty) return null;
     return (_lineOf(c.dy), ((c.dx - _textLeft) / _cw).floor().clamp(0, 1 << 20) + 1);
   }
 
@@ -520,15 +626,15 @@ class _SapSourceViewState extends State<SapSourceView> {
   /// pointer (a selection end).
   (int, int)? _posAt(Offset global) {
     final c = _content(global);
-    if (c == null || widget.lines.isEmpty) return null;
+    if (c == null || _lines.isEmpty) return null;
     final line = _lineOf(c.dy);
-    final len = widget.lines[line - 1].length;
+    final len = _lines[line - 1].length;
     return (line, ((c.dx - _textLeft) / _cw).round().clamp(0, len));
   }
 
   bool _inGutter(Offset global) {
     final c = _content(global);
-    return c != null && c.dx < _gutterW;
+    return c != null && c.dx < _gutterW - _gutterPad;
   }
 
   static int _cmp((int, int) a, (int, int) b) => a.$1 != b.$1 ? a.$1 - b.$1 : a.$2 - b.$2;
@@ -537,12 +643,12 @@ class _SapSourceViewState extends State<SapSourceView> {
   (int, int) get _start => _cmp(_anchor!, _extent!) <= 0 ? _anchor! : _extent!;
   (int, int) get _end => _cmp(_anchor!, _extent!) <= 0 ? _extent! : _anchor!;
 
-  String get _selectedText => _hasSelection ? sourceSelectionText(widget.lines, _start, _end) : '';
+  String get _selectedText => _hasSelection ? sourceSelectionText(_lines, _start, _end) : '';
 
   bool get _allSelected {
-    if (!_hasSelection || widget.lines.isEmpty) return false;
-    final n = widget.lines.length;
-    return _start == (1, 0) && _end == (n, widget.lines[n - 1].length);
+    if (!_hasSelection || _lines.isEmpty) return false;
+    final n = _lines.length;
+    return _start == (1, 0) && _end == (n, _lines[n - 1].length);
   }
 
   void _clearSelection() {
@@ -569,10 +675,17 @@ class _SapSourceViewState extends State<SapSourceView> {
   /// (b, len+1), as Select All's end (a recorded session
   /// (1,1)-(6,28); the capture holds no margin select of the last line).
   void _reportSelection() {
+    // editing, the caret sits at the selection's moving end and the
+    // keyboard comes up: what is typed next replaces the selection
+    final x = _extent;
+    if (_editing && x != null) {
+      _caret = x;
+      _openInput();
+    }
     if (_hasLineSelection) {
-      final n = widget.lines.length;
+      final n = _lines.length;
       final a = _start.$1, b = _end.$1;
-      final (el, ec) = b < n ? (b + 1, 1) : (b, widget.lines[b - 1].length + 1);
+      final (el, ec) = b < n ? (b + 1, 1) : (b, _lines[b - 1].length + 1);
       widget.onSelection?.call(a, 1, el, ec);
       return;
     }
@@ -588,11 +701,11 @@ class _SapSourceViewState extends State<SapSourceView> {
   }
 
   void _selectAll() {
-    final n = widget.lines.length;
+    final n = _lines.length;
     if (n == 0) return;
     setState(() {
       _anchor = (1, 0);
-      _extent = (n, widget.lines[n - 1].length);
+      _extent = (n, _lines[n - 1].length);
       _word = null;
       _lineMode = false;
     });
@@ -614,13 +727,473 @@ class _SapSourceViewState extends State<SapSourceView> {
     if (to != null) _v.jumpTo(to.clamp(p.minScrollExtent, p.maxScrollExtent));
   }
 
+  // ---- editing -----------------------------------------------------------
+
+  void _onFocus() {
+    if (!_focus.hasFocus) _closeInput();
+    if (mounted && _editing) setState(() {}); // the caret shows while focused
+  }
+
+  /// Put the editing caret at ([line], 0-based [offset]) and bring the
+  /// keyboard up — an [SapSourceView.editable] view only.
+  void _placeCaret(int line, int offset) {
+    if (!_editing) return;
+    final n = _lines.length;
+    final l = line.clamp(1, n < 1 ? 1 : n);
+    final len = n == 0 ? 0 : _lines[l - 1].length;
+    setState(() => _caret = (l, offset.clamp(0, len)));
+    _openInput();
+  }
+
+  /// The platform's editing value for the caret's line: [_imeLead] + its
+  /// text, the selection at the caret.
+  TextEditingValue _imeValue() {
+    final c = _caret;
+    final text = c == null || _lines.isEmpty ? '' : _lines[c.$1 - 1];
+    return TextEditingValue(
+      text: '$_imeLead$text',
+      selection: TextSelection.collapsed(
+        offset: _imeLead.length + (c?.$2 ?? 0).clamp(0, text.length),
+      ),
+    );
+  }
+
+  void _openInput() {
+    if (!_editing) return;
+    final i = _input;
+    if (i == null || !i.attached) {
+      _input = TextInput.attach(
+        this,
+        TextInputConfiguration(
+          inputType: TextInputType.multiline,
+          inputAction: TextInputAction.newline,
+          // ABAP source: no autocorrect, no suggestions, no smart quotes
+          // or dashes, no capitals put in
+          autocorrect: false,
+          enableSuggestions: false,
+          smartDashesType: SmartDashesType.disabled,
+          smartQuotesType: SmartQuotesType.disabled,
+          textCapitalization: TextCapitalization.none,
+          keyboardAppearance: Theme.of(context).brightness,
+        ),
+      );
+    }
+    _ime = _imeValue();
+    _input!.setEditingState(_ime);
+    _input!.show();
+  }
+
+  /// Hand the platform the caret's line again (after an edit or a caret
+  /// move it did not make itself).
+  void _syncInput() {
+    final i = _input;
+    if (!mounted || i == null || !i.attached) return;
+    _ime = _imeValue();
+    i.setEditingState(_ime);
+  }
+
+  void _closeInput() {
+    _input?.close();
+    _input = null;
+  }
+
+  /// Replace the text from [from] to [to] (each (1-based line, 0-based
+  /// offset), [from] first) with [text] — a multi-line text splits into
+  /// lines — and hand the result to [SapSourceView.onEdit]: the caret
+  /// after the inserted text, the selection gone.
+  ///
+  /// [sync]: hand the platform the caret's line afterwards (false: the
+  /// platform's own edit, whose value already is that line). [caretAt]:
+  /// where the caret goes instead (an indent / outdent keeps it on its
+  /// character).
+  void _replace((int, int) from, (int, int) to, String text,
+      {required int steps, bool sync = true, (int, int)? caretAt}) {
+    final doc = _lines.isEmpty ? <String>[''] : List<String>.of(_lines);
+    final la = from.$1.clamp(1, doc.length), lb = to.$1.clamp(1, doc.length);
+    final oa = from.$2.clamp(0, doc[la - 1].length);
+    final ob = to.$2.clamp(0, doc[lb - 1].length);
+    final parts = text.split(_lineBreakRx);
+    final head = doc[la - 1].substring(0, oa), tail = doc[lb - 1].substring(ob);
+    final inserted = parts.length == 1
+        ? ['$head${parts.single}$tail']
+        : [
+            '$head${parts.first}',
+            ...parts.sublist(1, parts.length - 1),
+            '${parts.last}$tail',
+          ];
+    // the longest line kept up to date: only the longest line replaced by
+    // shorter ones (a deletion in it) folds the document again
+    final memo = identical(_longestFor, _lines) &&
+        _lines.length == _longestLen;
+    var removed = 0, added = 0;
+    for (var i = la - 1; memo && i < lb && i < _lines.length; i++) {
+      if (_lines[i].length > removed) removed = _lines[i].length;
+    }
+    for (final l in inserted) {
+      if (l.length > added) added = l.length;
+    }
+    doc.replaceRange(la - 1, lb, inserted);
+    if (memo && (removed < _longest || added >= removed)) {
+      _longestFor = doc;
+      _longestLen = doc.length;
+      if (added > _longest) _longest = added;
+    }
+    var caret = (
+      la + parts.length - 1,
+      parts.length == 1 ? oa + parts.single.length : parts.last.length,
+    );
+    if (caretAt != null) {
+      final l = caretAt.$1.clamp(1, doc.length);
+      caret = (l, caretAt.$2.clamp(0, doc[l - 1].length));
+    }
+    setState(() {
+      _doc = doc;
+      _caret = caret;
+      _selected = (caret.$1, caret.$2 + 1);
+      _anchor = _extent = null;
+      _word = null;
+      _lineMode = false;
+    });
+    if (_toolbar.isShown) _toolbar.remove();
+    widget.onEdit?.call(doc, caret.$1, caret.$2 + 1, steps);
+    if (sync) _syncInput();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _revealCaret());
+  }
+
+  /// Type [text] at the caret, over the selection when one is up: each
+  /// typed character and each Return is an undo step of its own (a
+  /// multi-line text: [ab4InsertUndoSteps]).
+  void _insert(String text) {
+    final c = _caret;
+    if (c == null) return;
+    final sel = _hasSelection;
+    final from = sel ? _start : c, to = sel ? _end : c;
+    _replace(from, to, text, steps: ab4InsertUndoSteps(text));
+  }
+
+  /// The text a Return inserts at [at]: the line break and the
+  /// indentation of what stands BEFORE the break — the leading blanks of
+  /// the line up to the caret, as the ABAP editor carries a block's
+  /// indentation onto the next line. A Return inside the leading blanks
+  /// carries only the blanks before it (the rest stays with the tail), so
+  /// an indented line split at its start never doubles its indentation.
+  String _breakAt((int, int) at) {
+    final i = at.$1 - 1;
+    final line = i < 0 || i >= _lines.length ? '' : _lines[i];
+    final head = line.substring(0, at.$2.clamp(0, line.length));
+    return '\n${_leadingBlanksRx.firstMatch(head)!.group(0)!}';
+  }
+
+  /// Return: the line splits at the caret (over the selection, replacing
+  /// it), the new line indented as the text before the break — the one
+  /// undo step a Return is (the indentation is the editor's, not typed).
+  void _newline() {
+    final c = _caret;
+    if (c == null) return;
+    final sel = _hasSelection;
+    final from = sel ? _start : c, to = sel ? _end : c;
+    _replace(from, to, _breakAt(from), steps: 1);
+  }
+
+  /// Tab on a hardware keyboard: blanks up to the next 2-column stop at
+  /// the caret; over a selection, the selected lines indented. Taken here
+  /// so the key does not go on to the focus traversal, which would blur
+  /// the view and drop the keyboard.
+  void _tab() {
+    final c = _caret;
+    if (c == null) return;
+    if (_hasSelection) return _shiftLines(_start.$1, _end.$1, 2);
+    _insert(' ' * (2 - c.$2 % 2));
+  }
+
+  /// Indent ([by] > 0) or outdent the lines [a]..[b]: [by] blanks put
+  /// before each, or up to that many leading blanks taken off — one
+  /// replace over the whole range, one undo step; the caret keeps its
+  /// character when it sits in the range without a selection. Lines that
+  /// would not change (an outdent of unindented lines) are no edit.
+  void _shiftLines(int a, int b, int by) {
+    if (_lines.isEmpty || by == 0) return;
+    final lo = a.clamp(1, _lines.length), hi = b.clamp(lo, _lines.length);
+    final c = _caret;
+    final out = <String>[];
+    var caretShift = 0;
+    for (var l = lo; l <= hi; l++) {
+      final s = _lines[l - 1];
+      final String t;
+      if (by > 0) {
+        t = '${' ' * by}$s';
+      } else {
+        var k = 0;
+        while (k < -by && k < s.length && s[k] == ' ') {
+          k++;
+        }
+        t = s.substring(k);
+      }
+      if (c != null && c.$1 == l) caretShift = t.length - s.length;
+      out.add(t);
+    }
+    if (listEquals(out, _lines.sublist(lo - 1, hi))) return;
+    final keep = c != null && !_hasSelection && c.$1 >= lo && c.$1 <= hi
+        ? (c.$1, c.$2 + caretShift)
+        : null;
+    _replace((lo, 0), (hi, _lines[hi - 1].length), out.join('\n'),
+        steps: 1, caretAt: keep);
+  }
+
+  /// The long-press menu's Indent / Outdent: the selected lines, else the
+  /// caret's line, else the line the menu was opened on.
+  void _shiftFromMenu(int by, (int, int)? hit) {
+    if (_hasSelection) return _shiftLines(_start.$1, _end.$1, by);
+    final l = _caret?.$1 ?? hit?.$1;
+    if (l != null) _shiftLines(l, l, by);
+  }
+
+  /// Backspace: the selection, else the character before the caret, else
+  /// (at a line's start) the line break before it — the line joins the one
+  /// above.
+  void _backspace() {
+    final c = _caret;
+    if (c == null) return;
+    if (_hasSelection) return _replace(_start, _end, '', steps: 1);
+    if (c.$2 > 0) return _replace((c.$1, c.$2 - 1), c, '', steps: 1);
+    if (c.$1 > 1) {
+      final prev = _lines[c.$1 - 2].length;
+      _replace((c.$1 - 1, prev), c, '', steps: 1);
+    }
+  }
+
+  /// Delete: the selection, else the character after the caret, else (at a
+  /// line's end) the line break after it — the next line joins this one.
+  void _deleteForward() {
+    final c = _caret;
+    if (c == null || _lines.isEmpty) return;
+    if (_hasSelection) return _replace(_start, _end, '', steps: 1);
+    final len = _lines[c.$1 - 1].length;
+    if (c.$2 < len) return _replace(c, (c.$1, c.$2 + 1), '', steps: 1);
+    if (c.$1 < _lines.length) {
+      _replace(c, (c.$1 + 1, 0), '', steps: 1);
+    }
+  }
+
+  Future<void> _paste() async {
+    if (!_editing || _caret == null) return;
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text;
+    if (!mounted || text == null || text.isEmpty) return;
+    final c = _caret!;
+    // the OCX counts a step per line break, and one for the characters
+    // (a recorded session g[27]: five lines, +6)
+    _replace(_hasSelection ? _start : c, _hasSelection ? _end : c, text,
+        steps: ab4InsertUndoSteps(text));
+  }
+
+  Future<void> _cut() async {
+    if (!_editing || !_hasSelection) return;
+    final s = _start, e = _end;
+    await Clipboard.setData(ClipboardData(text: _selectedText));
+    if (!mounted) return;
+    _replace(s, e, '', steps: 1);
+  }
+
+  /// Move the caret to ([line], [offset]) (clamped), the selection dropped.
+  void _moveCaret(int line, int offset) {
+    final n = _lines.length;
+    if (n == 0) return;
+    final l = line.clamp(1, n);
+    setState(() {
+      _caret = (l, offset.clamp(0, _lines[l - 1].length));
+      _selected = (l, _caret!.$2 + 1);
+      _anchor = _extent = null;
+      _word = null;
+    });
+    widget.onCaret?.call(l, _caret!.$2 + 1);
+    _syncInput();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _revealCaret());
+  }
+
+  /// The hardware keys an editing view takes itself (the text a key types
+  /// comes through the platform's text input, [updateEditingValue]); every
+  /// other key — and every key in display mode — goes on up (Ctrl+S, the
+  /// function keys, the view's own shortcuts).
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    final c = _caret;
+    if (!_editing || c == null) return KeyEventResult.ignored;
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    final k = HardwareKeyboard.instance;
+    if (k.isMetaPressed || k.isControlPressed || k.isAltPressed) {
+      return KeyEventResult.ignored;
+    }
+    final key = event.logicalKey;
+    final len = _lines.isEmpty ? 0 : _lines[c.$1 - 1].length;
+    if (key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.numpadEnter) {
+      _newline();
+    } else if (key == LogicalKeyboardKey.tab) {
+      if (k.isShiftPressed) {
+        _shiftLines(_hasSelection ? _start.$1 : c.$1,
+            _hasSelection ? _end.$1 : c.$1, -2);
+      } else {
+        _tab();
+      }
+    } else if (key == LogicalKeyboardKey.backspace) {
+      _backspace();
+    } else if (key == LogicalKeyboardKey.delete) {
+      _deleteForward();
+    } else if (key == LogicalKeyboardKey.arrowLeft) {
+      if (c.$2 > 0) {
+        _moveCaret(c.$1, c.$2 - 1);
+      } else if (c.$1 > 1) {
+        _moveCaret(c.$1 - 1, _lines[c.$1 - 2].length);
+      }
+    } else if (key == LogicalKeyboardKey.arrowRight) {
+      if (c.$2 < len) {
+        _moveCaret(c.$1, c.$2 + 1);
+      } else if (c.$1 < _lines.length) {
+        _moveCaret(c.$1 + 1, 0);
+      }
+    } else if (key == LogicalKeyboardKey.arrowUp) {
+      _moveCaret(c.$1 - 1, c.$2);
+    } else if (key == LogicalKeyboardKey.arrowDown) {
+      _moveCaret(c.$1 + 1, c.$2);
+    } else if (key == LogicalKeyboardKey.home) {
+      _moveCaret(c.$1, 0);
+    } else if (key == LogicalKeyboardKey.end) {
+      _moveCaret(c.$1, len);
+    } else {
+      return KeyEventResult.ignored;
+    }
+    return KeyEventResult.handled;
+  }
+
+  /// Scroll the caret into view after an edit or a caret move.
+  void _revealCaret() {
+    final c = _caret;
+    if (!mounted || c == null) return;
+    if (_v.hasClients) {
+      final p = _v.position;
+      final top = (c.$1 - 1) * _lineH;
+      double? to;
+      if (top < p.pixels) {
+        to = top;
+      } else if (top + _lineH > p.pixels + p.viewportDimension) {
+        to = top + _lineH - p.viewportDimension;
+      }
+      if (to != null) _v.jumpTo(to.clamp(p.minScrollExtent, p.maxScrollExtent));
+    }
+    if (_h.hasClients) {
+      final p = _h.position;
+      final x = _textLeft + c.$2 * _cw;
+      double? to;
+      if (x - _textLeft < p.pixels) {
+        to = x - _textLeft;
+      } else if (x + 2 * _cw > p.pixels + p.viewportDimension) {
+        to = x + 2 * _cw - p.viewportDimension;
+      }
+      if (to != null) _h.jumpTo(to.clamp(p.minScrollExtent, p.maxScrollExtent));
+    }
+  }
+
+  // ---- the platform's text input (TextInputClient) ----
+
+  @override
+  TextEditingValue? get currentTextEditingValue => _ime;
+
+  @override
+  AutofillScope? get currentAutofillScope => null;
+
+  /// The platform's edit of the caret's line ([_imeLead] + its text): the
+  /// soft keyboard's (and a hardware keyboard's) typed text, a dictation, a
+  /// paste from the system menu, a Return ('\n': the line splits), a
+  /// Backspace — at the line's start it deletes [_imeLead]: the line joins
+  /// the one above. A value whose text is unchanged moves the caret only.
+  @override
+  void updateEditingValue(TextEditingValue value) {
+    final c = _caret;
+    if (!_editing || c == null) return;
+    final old = _ime;
+    if (value.text == old.text) {
+      _ime = value;
+      final off = value.selection.isValid
+          ? value.selection.extentOffset - _imeLead.length
+          : c.$2;
+      if (off >= 0 && off != c.$2) _moveCaret(c.$1, off);
+      return;
+    }
+    if (!value.text.startsWith(_imeLead)) {
+      // the lead deleted: Backspace at the line's start
+      _backspace();
+      return;
+    }
+    // what changed: the common head and tail kept, the middle replaced
+    final a = old.text, b = value.text;
+    var p = 0;
+    while (p < a.length && p < b.length && a.codeUnitAt(p) == b.codeUnitAt(p)) {
+      p++;
+    }
+    var q = 0;
+    while (q < a.length - p &&
+        q < b.length - p &&
+        a.codeUnitAt(a.length - 1 - q) == b.codeUnitAt(b.length - 1 - q)) {
+      q++;
+    }
+    final inserted = b.substring(p, b.length - q);
+    final lead = _imeLead.length;
+    // the soft keyboard's Return (one bare line break): the new line takes
+    // the indentation of the text before the break, as a hardware Return
+    // does — still the one step a Return is; a dictation or a pasted text
+    // that merely holds a break goes in as it is
+    final steps = ab4InsertUndoSteps(inserted);
+    final isReturn = inserted == '\n';
+    if (_hasSelection) {
+      // the selection is the view's, not the platform's: what was typed
+      // replaces it
+      _replace(_start, _end, isReturn ? _breakAt(_start) : inserted,
+          steps: steps);
+      return;
+    }
+    final from = (c.$1, (p - lead).clamp(0, 1 << 30));
+    final to = (c.$1, (a.length - q - lead).clamp(0, 1 << 30));
+    _replace(from, to, isReturn ? _breakAt(from) : inserted,
+        steps: steps, sync: false);
+    // the platform's value is the line now (a composition in progress kept
+    // as it is); a split / join changed the line: handed back
+    final want = _imeValue();
+    if (want.text == value.text) {
+      _ime = value;
+    } else {
+      _ime = want;
+      _input?.setEditingState(want);
+    }
+  }
+
+  // the Return of a multi-line input is the '\n' it inserts
+  @override
+  void performAction(TextInputAction action) {}
+
+  @override
+  void performPrivateCommand(String action, Map<String, dynamic> data) {}
+
+  @override
+  void updateFloatingCursor(RawFloatingCursorPoint point) {}
+
+  @override
+  void showAutocorrectionPromptRect(int start, int end) {}
+
+  @override
+  void connectionClosed() {
+    // the platform dropped the keyboard: the caret stays, a tap reopens it
+    _input = null;
+  }
+
   // ---- gestures ----------------------------------------------------------
 
   /// Whether a pointer is below the last line (the empty rest of a short
   /// text): a tap there hits no line.
   bool _pastText(Offset global) {
     final c = _content(global);
-    return c == null || c.dy >= widget.lines.length * _lineH;
+    return c == null || c.dy >= _lines.length * _lineH;
   }
 
   void _onTapUp(TapUpDetails d) {
@@ -629,18 +1202,30 @@ class _SapSourceViewState extends State<SapSourceView> {
       // a click below the text parks the caret in the slot after the last
       // character (a recorded session: (6, 28) on a 6-line
       // source whose last line has 27 characters)
-      final n = widget.lines.length;
+      final n = _lines.length;
       if (n > 0 && !_inGutter(d.globalPosition)) {
         _focus.requestFocus();
-        final end = (n, widget.lines[n - 1].length + 1);
+        final end = (n, _lines[n - 1].length + 1);
         setState(() => _selected = end);
+        _placeCaret(n, end.$2 - 1);
         widget.onCaret?.call(end.$1, end.$2);
+      } else if (n == 0 && _editing) {
+        // the empty document: its one (empty) line
+        _focus.requestFocus();
+        _placeCaret(1, 0);
       }
       return;
     }
     if (_inGutter(d.globalPosition)) {
       final hit = _cellAt(d.globalPosition);
-      if (hit != null) widget.onToggleBreakpoint?.call(hit.$1);
+      if (hit != null && widget.onToggleBreakpoint != null) {
+        // the margin click goes to the server at once and its dot comes
+        // back with the answer: the tap is acknowledged under the finger
+        // meanwhile (a haptic the iPad gives too; Feedback.forTap is
+        // silent on iOS)
+        HapticFeedback.selectionClick();
+        widget.onToggleBreakpoint!(hit.$1);
+      }
       return;
     }
     _focus.requestFocus();
@@ -666,8 +1251,14 @@ class _SapSourceViewState extends State<SapSourceView> {
     setState(() => _selected = hit);
     // the caret: past a line's end it parks in the slot after its last
     // character (len + 1), as the control's SelPos* report it
-    final len = widget.lines[hit.$1 - 1].length;
-    widget.onCaret?.call(hit.$1, hit.$2 > len + 1 ? len + 1 : hit.$2);
+    final len = _lines[hit.$1 - 1].length;
+    final col = hit.$2 > len + 1 ? len + 1 : hit.$2;
+    // editing, the caret goes to the character boundary nearest the finger
+    // and that is the column reported (the slot it types into)
+    final pos = _posAt(d.globalPosition);
+    final slot = pos?.$1 == hit.$1 ? pos!.$2 : col - 1;
+    _placeCaret(hit.$1, slot);
+    widget.onCaret?.call(hit.$1, _editing ? slot + 1 : col);
   }
 
   void _onLongPressStart(LongPressStartDetails d) {
@@ -689,13 +1280,13 @@ class _SapSourceViewState extends State<SapSourceView> {
         _lineAnchor = line;
         _word = null;
         _anchor = (line, 0);
-        _extent = (line, widget.lines[line - 1].length);
+        _extent = (line, _lines[line - 1].length);
         _menuAt = (line, 1);
         _selected = (line, 1);
       });
       return;
     }
-    final w = wordAt(widget.lines[line - 1], hit.$2 - 1);
+    final w = wordAt(_lines[line - 1], hit.$2 - 1);
     setState(() {
       _lineMode = false;
       _menuAt = hit;
@@ -722,7 +1313,7 @@ class _SapSourceViewState extends State<SapSourceView> {
         final a = _lineAnchor ?? pos.$1, b = pos.$1;
         final lo = math.min(a, b), hi = math.max(a, b);
         _anchor = (lo, 0);
-        _extent = (hi, widget.lines[hi - 1].length);
+        _extent = (hi, _lines[hi - 1].length);
         return;
       }
       final w = _word;
@@ -771,7 +1362,7 @@ class _SapSourceViewState extends State<SapSourceView> {
       _lineAnchor = pos.$1;
       if (gutter) {
         _anchor = (pos.$1, 0);
-        _extent = (pos.$1, widget.lines[pos.$1 - 1].length);
+        _extent = (pos.$1, _lines[pos.$1 - 1].length);
       } else {
         _anchor = _extent = pos;
       }
@@ -843,10 +1434,20 @@ class _SapSourceViewState extends State<SapSourceView> {
       primary = at ?? g(m!.$1, m.$2 - 1);
       secondary = at ?? g(m!.$1, m.$2 - 1, bottom: true);
     }
-    final hit = _menuAt ?? (_hasSelection ? (_start.$1, _start.$2 + 1) : null);
-    final word = hit == null ? null : wordAt(widget.lines[hit.$1 - 1], hit.$2 - 1);
+    final at0 = _menuAt ?? (_hasSelection ? (_start.$1, _start.$2 + 1) : null);
+    // an edit may have removed the line the menu was opened on
+    final hit = at0 != null && at0.$1 <= _lines.length ? at0 : null;
+    final word = hit == null ? null : wordAt(_lines[hit.$1 - 1], hit.$2 - 1);
     void close() => _toolbar.remove();
     final items = <ContextMenuButtonItem>[
+      if (_hasSelection && _editing)
+        ContextMenuButtonItem(
+          type: ContextMenuButtonType.cut,
+          onPressed: () {
+            close();
+            _cut();
+          },
+        ),
       if (_hasSelection)
         ContextMenuButtonItem(
           type: ContextMenuButtonType.copy,
@@ -855,7 +1456,15 @@ class _SapSourceViewState extends State<SapSourceView> {
             _copy();
           },
         ),
-      if (!_allSelected && widget.lines.isNotEmpty)
+      if (_editing)
+        ContextMenuButtonItem(
+          type: ContextMenuButtonType.paste,
+          onPressed: () {
+            close();
+            _paste();
+          },
+        ),
+      if (!_allSelected && _lines.isNotEmpty)
         ContextMenuButtonItem(
           type: ContextMenuButtonType.selectAll,
           onPressed: () {
@@ -864,9 +1473,27 @@ class _SapSourceViewState extends State<SapSourceView> {
             _showToolbar();
           },
         ),
+      // the soft keyboards have no Tab: the selected lines, else the line
+      // under the finger, shifted by two
+      if (_editing && _lines.isNotEmpty)
+        ContextMenuButtonItem(
+          label: 'Indent',
+          onPressed: () {
+            close();
+            _shiftFromMenu(2, hit);
+          },
+        ),
+      if (_editing && _lines.isNotEmpty)
+        ContextMenuButtonItem(
+          label: 'Outdent',
+          onPressed: () {
+            close();
+            _shiftFromMenu(-2, hit);
+          },
+        ),
       if (hit != null && widget.onNavigate != null)
         ContextMenuButtonItem(
-          label: word == null ? 'Naviguer' : 'Naviguer vers ${word.$1}',
+          label: word == null ? 'Navigate' : 'Navigate to ${word.$1}',
           onPressed: () {
             close();
             widget.onNavigate!(hit.$1, hit.$2);
@@ -874,7 +1501,7 @@ class _SapSourceViewState extends State<SapSourceView> {
         ),
       if (hit != null && widget.onWhereUsed != null)
         ContextMenuButtonItem(
-          label: "Liste d'utilisation",
+          label: 'Where-used list',
           onPressed: () {
             close();
             widget.onWhereUsed!(hit.$1, hit.$2);
@@ -916,7 +1543,7 @@ class _SapSourceViewState extends State<SapSourceView> {
     if (!_hasSelection) return null;
     final s = _start, e = _end;
     if (line < s.$1 || line > e.$1) return null;
-    final len = widget.lines[line - 1].length;
+    final len = _lines[line - 1].length;
     final a = line == s.$1 ? math.min(s.$2, len) : 0;
     final b = line == e.$1 ? math.min(e.$2, len) : len;
     final br = line < e.$1;
@@ -975,10 +1602,10 @@ class _SapSourceViewState extends State<SapSourceView> {
     };
     final selColor = DefaultSelectionStyle.of(context).selectionColor ?? scheme.primary.withValues(alpha: 0.3);
     final handleColor = DefaultSelectionStyle.of(context).cursorColor ?? scheme.primary;
-    final digits = '${widget.lines.length}'.length;
+    final digits = '${_lines.length}'.length;
     final double gutterW = digits * _cw + 28;
     _gutterW = gutterW;
-    final longest = _longestOf(widget.lines);
+    final longest = _longestOf(_lines);
     final double codeW = (longest + 2) * _cw;
     // one style per token kind for every row of the build
     final styles = {
@@ -1005,7 +1632,7 @@ class _SapSourceViewState extends State<SapSourceView> {
           Container(
             width: gutterW,
             height: _lineH,
-            padding: const EdgeInsets.only(right: 6),
+            padding: const EdgeInsets.only(right: _gutterPad),
             color: scheme.surfaceContainerHigh,
             child: Row(children: [
               SizedBox(
@@ -1026,6 +1653,7 @@ class _SapSourceViewState extends State<SapSourceView> {
               Expanded(
                 child: Text('$line',
                     textAlign: TextAlign.right,
+                    textScaler: TextScaler.noScaling,
                     style: _mono.copyWith(color: scheme.onSurfaceVariant, fontSize: 11)),
               ),
             ]),
@@ -1040,13 +1668,27 @@ class _SapSourceViewState extends State<SapSourceView> {
                   bottom: 0,
                   child: ColoredBox(color: selColor),
                 ),
+              // the editing caret (no selection up: typing replaces it)
+              if (_editing &&
+                  _focus.hasFocus &&
+                  !_hasSelection &&
+                  _caret?.$1 == line)
+                Positioned(
+                  key: const ValueKey('edit-caret'),
+                  left: 8 + _caret!.$2 * _cw - 1,
+                  width: 2,
+                  top: 1,
+                  bottom: 1,
+                  child: ColoredBox(color: handleColor),
+                ),
               Padding(
                 padding: const EdgeInsets.only(left: 8),
                 child: Align(
                   alignment: Alignment.centerLeft,
                   child: Text.rich(
                     TextSpan(children: [
-                      for (final t in tokenizeAbap(widget.lines[i]))
+                      for (final t in tokenizeAbap(
+                          i < _lines.length ? _lines[i] : ''))
                         TextSpan(
                           text: t.text,
                           style: styles[t.kind] ??
@@ -1058,6 +1700,7 @@ class _SapSourceViewState extends State<SapSourceView> {
                         ),
                     ]),
                     softWrap: false,
+                    textScaler: TextScaler.noScaling,
                   ),
                 ),
               ),
@@ -1103,7 +1746,8 @@ class _SapSourceViewState extends State<SapSourceView> {
                     child: ListView.builder(
                       key: _listKey,
                       controller: _v,
-                      itemCount: widget.lines.length,
+                      // an empty document being edited shows its one line
+                      itemCount: _lines.isEmpty && _editing ? 1 : _lines.length,
                       itemExtent: _lineH,
                       itemBuilder: row,
                     ),
@@ -1128,6 +1772,10 @@ class _SapSourceViewState extends State<SapSourceView> {
 
     return Shortcuts(
       shortcuts: const {
+        SingleActivator(LogicalKeyboardKey.keyV, meta: true): _PasteIntent(),
+        SingleActivator(LogicalKeyboardKey.keyV, control: true): _PasteIntent(),
+        SingleActivator(LogicalKeyboardKey.keyX, meta: true): _CutIntent(),
+        SingleActivator(LogicalKeyboardKey.keyX, control: true): _CutIntent(),
         SingleActivator(LogicalKeyboardKey.keyA, meta: true): _SelectAllIntent(),
         SingleActivator(LogicalKeyboardKey.keyA, control: true): _SelectAllIntent(),
         SingleActivator(LogicalKeyboardKey.keyC, meta: true): _CopyIntent(),
@@ -1139,15 +1787,19 @@ class _SapSourceViewState extends State<SapSourceView> {
         // enabled only when they apply: a key they do not take goes on up
         actions: {
           _SelectAllIntent: _ViewAction<_SelectAllIntent>(
-              () => widget.lines.isNotEmpty, _selectAll),
+              () => _lines.isNotEmpty, _selectAll),
           _CopyIntent: _ViewAction<_CopyIntent>(() => _hasSelection, _copy),
+          _PasteIntent: _ViewAction<_PasteIntent>(
+              () => _editing && _caret != null, _paste),
+          _CutIntent: _ViewAction<_CutIntent>(
+              () => _editing && _hasSelection, _cut),
           _ClearSelectionIntent: _ViewAction<_ClearSelectionIntent>(
               () => _hasSelection, _clearSelection),
           _BreakpointKeyIntent: _ViewAction<_BreakpointKeyIntent>(
-              () => widget.onBreakpointKey != null && widget.lines.isNotEmpty,
+              () => widget.onBreakpointKey != null && _lines.isNotEmpty,
               () => widget.onBreakpointKey!(_selected?.$1 ?? 1)),
         },
-        child: Focus(focusNode: _focus, child: view),
+        child: Focus(focusNode: _focus, onKeyEvent: _onKey, child: view),
       ),
     );
   }

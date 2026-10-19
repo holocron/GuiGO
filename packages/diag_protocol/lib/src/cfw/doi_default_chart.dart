@@ -40,7 +40,11 @@ const List<List<int>> defaultChartValues = [
 /// Whether [cls] is Excel's chart object class (`Excel.Chart`,
 /// `Excel.Chart.8`).
 bool isExcelChartClass(String cls) =>
-    RegExp(r'^excel\.chart(\.\d+)?$').hasMatch(cls.trim().toLowerCase());
+    _excelChartClassRx.hasMatch(cls.trim().toLowerCase());
+
+// hoisted: a RegExp built per call is compiled per call (audit
+// 2026-10-17 N1)
+final RegExp _excelChartClassRx = RegExp(r'^excel\.chart(\.\d+)?$');
 
 /// [doc] (a created `Excel.Chart`) as Excel makes it: the chart sheet
 /// first and active, then the data sheet, its values typed as numbers.

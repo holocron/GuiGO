@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 /// A password prompt that owns its text controller: the controller lives
 /// as long as the dialog's widget (through its exit animation) and is
 /// disposed with it. Pops the typed text, or null on [cancelLabel].
+/// Enter on the keyboard pops the text as [okLabel] does.
 class PasswordDialog extends StatefulWidget {
   const PasswordDialog({
     super.key,
@@ -12,7 +13,6 @@ class PasswordDialog extends StatefulWidget {
     this.note,
     this.cancelLabel = 'Cancel',
     this.okLabel = 'OK',
-    this.submitOnEnter = false,
   });
 
   final String title;
@@ -26,8 +26,6 @@ class PasswordDialog extends StatefulWidget {
   final String cancelLabel;
   final String okLabel;
 
-  /// Enter on the keyboard pops the text, as [okLabel] does.
-  final bool submitOnEnter;
 
   @override
   State<PasswordDialog> createState() => _PasswordDialogState();
@@ -35,6 +33,12 @@ class PasswordDialog extends StatefulWidget {
 
 class _PasswordDialogState extends State<PasswordDialog> {
   final _ctrl = TextEditingController();
+
+  /// The eye toggle: SAP passwords are case-sensitive and often complex,
+  /// typed blind on a phone keyboard they are mistyped — and a mistyped
+  /// value stored by the list screen is only found out as a refusal at
+  /// logon (which SAP counts towards its failed-logon lock).
+  bool _show = false;
 
   @override
   void dispose() {
@@ -47,12 +51,24 @@ class _PasswordDialogState extends State<PasswordDialog> {
     final error = widget.error, note = widget.note;
     final field = TextField(
       controller: _ctrl,
-      obscureText: true,
+      obscureText: !_show,
+      // once revealed the field is plain text to the keyboard: no
+      // autocorrect or suggestions on a password
+      autocorrect: false,
+      enableSuggestions: false,
       autofocus: true,
-      decoration: InputDecoration(labelText: widget.label),
-      onSubmitted: widget.submitOnEnter
-          ? (v) => Navigator.pop(context, v)
-          : null,
+      decoration: InputDecoration(
+        labelText: widget.label,
+        // the toggle never takes the focus from the field
+        suffixIcon: ExcludeFocus(
+          child: IconButton(
+            tooltip: _show ? 'Hide password' : 'Show password',
+            icon: Icon(_show ? Icons.visibility_off : Icons.visibility),
+            onPressed: () => setState(() => _show = !_show),
+          ),
+        ),
+      ),
+      onSubmitted: (v) => Navigator.pop(context, v),
     );
     return AlertDialog(
       title: Text(widget.title),

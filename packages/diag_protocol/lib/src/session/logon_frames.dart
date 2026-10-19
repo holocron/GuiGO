@@ -42,6 +42,9 @@ const String defaultLogonTerminal = 'GUIGO';
 /// names none (32NN, instance 00).
 const int defaultSapPort = 3200;
 
+/// The logon client a connection names when it names none.
+const String defaultLogonClient = '100';
+
 /// The logon language a connection names when it names none.
 const String defaultLogonLanguage = 'EN';
 
@@ -566,7 +569,6 @@ class LogonGeometry {
   const LogonGeometry({
     this.toolbarHeight = 0x22,
     this.scrollbarWidth = 0x11,
-    this.viewportPx = (938, 1694),
     this.areaRows = 26,
     this.areaCols = 146,
     this.visibleRows = 22,
@@ -580,10 +582,6 @@ class LogonGeometry {
 
   /// 16/4/23 TOOLBAR_HEIGHT, 16/4/22 SCROLLBAR_WIDTH (px).
   final int toolbarHeight, scrollbarWidth;
-
-  /// 16/4/42 (height, width px) — the reference client fixture's; the real Windows
-  /// logon submit sends none.
-  final (int, int) viewportPx;
 
   /// The logon dynpro's area and visible part (chars) and its scroll
   /// position, as the OK event / SCROLL_INFOS2 / container items spell them.
@@ -647,10 +645,15 @@ Uint8List logonMetricsXml(
 /// [winIdentity], the OK event, 16/12/8 the window pixels (the session
 /// window's — [window], the reference 853 x 1880 unless sized), the
 /// container reset, the credential atoms, the cursor, the METRICS XML.
-/// GuiGo keeps three items of the reference client fixture the real submit does not
-/// carry (16/4/42, the 16/12/6 SCROLL_INFOS2, the Java 16/15/1) and the
+/// GuiGo keeps two items of the reference client fixture the real submit does not
+/// carry (the 16/12/6 SCROLL_INFOS2, the Java 16/15/1) and the
 /// fixture's spelling of the SES dims (rows / cols), the OK event, the
-/// 16/10/1 and the METRICS block.
+/// 16/10/1 and the METRICS block. No 16/4/42: the fixture's 938 x 1694
+/// viewport drew 'invalid gui data' from a kernel whose reported 16/4/36
+/// display was smaller than it in either dimension (live the test system 2026-10-18:
+/// an iPhone's 874 x 402, also 874 x 2560 and 1440 x 402 — 1440 x 2560 and
+/// the reference GUI's 1049 x 3841 passed; without the atom 874 x 402
+/// logs on), and the real Windows submit sends none.
 List<Uint8List> logonItems({
   String? client,
   required String user,
@@ -691,7 +694,6 @@ List<Uint8List> logonItems({
     buildApplItem(6, 35, winCodepageValue),
     for (final (sid, value) in identity) buildApplItem(4, sid, value),
     for (final (sid, value) in winIdentity) buildApplItem(4, sid, value),
-    buildApplItem(4, 42, _u32s([g.viewportPx.$1, g.viewportPx.$2])),
     buildApplItem(5, 1, _logonOkEvent(g)),
     buildApplItem(12, 8, windowsEventWindowPx(w)),
     // SCROLL_INFOS2: scroll pair, area, (0, 0), visible part, flag 1

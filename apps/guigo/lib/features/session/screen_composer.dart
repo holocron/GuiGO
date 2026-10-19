@@ -153,13 +153,28 @@ class ScreenComposer extends StatefulWidget {
 /// there on its left, panes starting there on its right) or a horizontal
 /// one at row [at], spanning [from]..[to] along its length.
 class PaneSash {
-  PaneSash(this.vertical, this.at, this.from, this.to, this.before, this.after);
+  PaneSash(
+    this.vertical,
+    this.at,
+    this.from,
+    this.to,
+    this.before,
+    this.after, {
+    this.maxBefore,
+    this.maxAfter,
+  });
   final bool vertical;
   final double at;
   final double from, to;
 
-  /// Indexes of the panes ending at / starting at the divider.
+  /// Indexes of the panes ending at / starting at the divider. One side is
+  /// empty for a docking container's FREE edge ([dockEdgeSashes]).
   final List<int> before, after;
+
+  /// How far (cells) the divider may move toward its empty side's panes:
+  /// a free dock edge stops at the dynpro it faces. Null: as far as the
+  /// panes on that side give room.
+  final double? maxBefore, maxAfter;
 
   String get key => '${vertical ? 'v' : 'h'}:${at.toStringAsFixed(2)}';
 }
@@ -205,6 +220,85 @@ List<PaneSash> paneSashes(List<Rect> rects) {
     }
   }
   return out;
+}
+
+/// The FREE edges of the docking containers of [panes]: in SAP GUI every
+/// docking container carries a sash on its inner edge — the edge facing
+/// the dynpro (the Java GUI's docklayout.Docker mSash: on the right of a
+/// LEFT dock, the left of a RIGHT one, below a TOP one, above a BOTTOM
+/// one) — whether or not a pane touches it there. [paneSashes] finds a
+/// divider only where two panes meet; a dock whose neighbour is not
+/// directly adjacent (a blank band between the tree and the dynpro, the
+/// live SMARTFORMS Form Builder before its right dock was placed) had no
+/// grip at all. Each such edge is a divider with the dock's panes on one
+/// side and none on the other, stopping at the dynpro.
+List<PaneSash> dockEdgeSashes(List<ComposedPane> panes, List<PaneSash> have) {
+  final main = panes.where((p) => p.main).firstOrNull?.cells;
+  if (main == null) return const [];
+  final docks = <String, List<int>>{};
+  for (var i = 0; i < panes.length; i++) {
+    final d = panes[i].dock;
+    if (d != null && !panes[i].main) (docks[d] ??= []).add(i);
+  }
+  final out = <PaneSash>[];
+  docks.forEach((dock, idx) {
+    var span = panes[idx.first].cells;
+    for (final i in idx.skip(1)) {
+      span = span.expandToInclude(panes[i].cells);
+    }
+    final bool vertical;
+    final double at;
+    final bool dockBefore; // the dock's panes end at the edge
+    if (span.right <= main.left + _eps) {
+      (vertical, at, dockBefore) = (true, span.right, true);
+    } else if (span.left >= main.right - _eps) {
+      (vertical, at, dockBefore) = (true, span.left, false);
+    } else if (span.bottom <= main.top + _eps) {
+      (vertical, at, dockBefore) = (false, span.bottom, true);
+    } else if (span.top >= main.bottom - _eps) {
+      (vertical, at, dockBefore) = (false, span.top, false);
+    } else {
+      return; // a dock over the dynpro: no edge to take
+    }
+    double edgeOf(Rect r, bool far) => vertical
+        ? (far ? r.right : r.left)
+        : (far ? r.bottom : r.top);
+    final side = [
+      for (final i in idx)
+        if ((edgeOf(panes[i].cells, dockBefore) - at).abs() < _eps) i,
+    ];
+    if (side.isEmpty) return;
+    // a divider the panes already make there (the dock touching the
+    // dynpro) is the edge itself
+    if (have.any(
+      (sh) =>
+          sh.vertical == vertical &&
+          (sh.at - at).abs() < _eps &&
+          side.any((i) => sh.before.contains(i) || sh.after.contains(i)),
+    )) {
+      return;
+    }
+    final from = vertical ? span.top : span.left;
+    final to = vertical ? span.bottom : span.right;
+    // the gap to the dynpro: the edge stops there
+    final gap = dockBefore
+        ? (vertical ? main.left : main.top) - at
+        : at - (vertical ? main.right : main.bottom);
+    out.add(
+      dockBefore
+          ? PaneSash(vertical, at, from, to, side, const [], maxAfter: gap)
+          : PaneSash(vertical, at, from, to, const [], side, maxBefore: gap),
+    );
+  });
+  return out;
+}
+
+/// Every divider of [panes] the composer draws: where panes meet
+/// ([paneSashes]) and the docking containers' free edges
+/// ([dockEdgeSashes]).
+List<PaneSash> composerSashes(List<ComposedPane> panes) {
+  final meet = paneSashes([for (final p in panes) p.cells]);
+  return [...meet, ...dockEdgeSashes(panes, meet)];
 }
 
 /// Whether divider [sh] lies on the fixed line [line] (a zero-height rect
@@ -298,10 +392,14 @@ List<Rect> applySashes(
       moveB = sides.moveB;
       moveA = sides.moveA;
     }
-    final room = [for (final b in grow) size(out[b]) - _minPaneCells]
-        .fold<double>(double.infinity, math.min);
-    final roomAfter = [for (final a in shrink) size(out[a]) - _minPaneCells]
-        .fold<double>(double.infinity, math.min);
+    final room = [
+      for (final b in grow) size(out[b]) - _minPaneCells,
+      ?sh.maxBefore,
+    ].fold<double>(double.infinity, math.min);
+    final roomAfter = [
+      for (final a in shrink) size(out[a]) - _minPaneCells,
+      ?sh.maxAfter,
+    ].fold<double>(double.infinity, math.min);
     d = d.clamp(-math.max(0, room), math.max(0, roomAfter)).toDouble();
     for (final b in grow) {
       final r = out[b];
@@ -371,10 +469,7 @@ class _ScreenComposerState extends State<ScreenComposer> {
     } else if (_reported.isNotEmpty && !identical(old.panes, widget.panes)) {
       // the panes came back laid out to the reported dock: the divider
       // moved there, its offset would shift it a second time
-      final now = {
-        for (final sh in paneSashes([for (final p in widget.panes) p.cells]))
-          sh.key,
-      };
+      final now = {for (final sh in composerSashes(widget.panes)) sh.key};
       _reported.removeWhere((k) {
         if (now.contains(k)) return false;
         _offsets.remove(k);
@@ -384,8 +479,9 @@ class _ScreenComposerState extends State<ScreenComposer> {
   }
 
   /// The drag of divider [sh] ended at [rects]: a dock edge (the panes of
-  /// one docking container on one side, the dynpro on the other) is
-  /// reported with the dock's width — the span of all its panes.
+  /// one docking container on one side, the dynpro — or nothing, a free
+  /// edge — on the other) is reported with the dock's width — the span of
+  /// all its panes.
   void _dragEnded(PaneSash sh, List<Rect> rects) {
     final report = widget.onDockResize;
     if (report == null || !sh.vertical) return;
@@ -395,10 +491,11 @@ class _ScreenComposerState extends State<ScreenComposer> {
       return docks.length == 1 ? docks.single : null;
     }
 
-    bool hasMain(List<int> side) => side.any((i) => panes[i].main);
-    final dock = hasMain(sh.after)
+    bool facesDynpro(List<int> side) =>
+        side.isEmpty || side.any((i) => panes[i].main);
+    final dock = facesDynpro(sh.after)
         ? dockOf(sh.before)
-        : (hasMain(sh.before) ? dockOf(sh.after) : null);
+        : (facesDynpro(sh.before) ? dockOf(sh.after) : null);
     if (dock == null || (_offsets[sh.key] ?? 0) == 0) return;
     var lo = double.infinity, hi = -double.infinity;
     for (var i = 0; i < panes.length; i++) {
@@ -421,7 +518,7 @@ class _ScreenComposerState extends State<ScreenComposer> {
     final rigid = [for (final p in panes) p.rigidRows];
     final sashes = widget.resizable
         ? [
-            for (final sh in paneSashes(base))
+            for (final sh in composerSashes(panes))
               if (!widget.fixedSashes.any((l) => sashOnLine(sh, l)) &&
                   sashMovable(base, sh, rigid))
                 sh,
@@ -521,9 +618,14 @@ class _ScreenComposerState extends State<ScreenComposer> {
     ColorScheme scheme,
   ) {
     const grab = 28.0; // a finger's width: the divider is easy to take
-    final at = sh.vertical
-        ? rects[sh.before.first].right * cw
-        : rects[sh.before.first].bottom * ch;
+    // a free dock edge has its panes on one side only
+    final at = sh.before.isNotEmpty
+        ? (sh.vertical
+              ? rects[sh.before.first].right * cw
+              : rects[sh.before.first].bottom * ch)
+        : (sh.vertical
+              ? rects[sh.after.first].left * cw
+              : rects[sh.after.first].top * ch);
     final from = sh.from * (sh.vertical ? ch : cw);
     final len = (sh.to - sh.from) * (sh.vertical ? ch : cw);
     final active = _dragging == sh.key;

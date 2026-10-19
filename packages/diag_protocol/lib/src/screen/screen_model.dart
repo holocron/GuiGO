@@ -52,6 +52,7 @@ class ScreenField {
     this.dlg2 = 0,
     this.pageId,
     this.attr = 0,
+    this.labelWidth = 0,
     int? wireRow,
     int? wireCol,
     this.container,
@@ -110,6 +111,12 @@ class ScreenField {
   int dlg2;
   int? pageId; // tabstrip page
   int attr; // the painted atom's attribute byte (echoed on a value submit)
+
+  /// A radio's / checkbox's PAINTED visible label length (its atom's bytes
+  /// 14-15: the declared width, not the label text's character count —
+  /// 0x26 on a recorded session srv[46]'s INPLACE), echoed on its value
+  /// atom (a tick: frames.checkboxValueAtom). 0 for any other kind.
+  int labelWidth;
 
   /// The container plane a value write into this field travels (a field
   /// on a tabstrip page / in a nested subscreen chain), null on the
@@ -354,7 +361,17 @@ const String kKernelLogonProgram = 'SAPMSYST';
 /// any transaction runs).
 const String kKernelLogonTcode = 'S000';
 
-final RegExp _secretFieldName = RegExp(r'BCODE|PASSW|PWD', caseSensitive: false);
+/// The change-password dynpro's inputs: the new password and its
+/// repetition — the kernel's popup under [kKernelLogonProgram] after the
+/// credentials of an initial or expired password (SAP GUI scripting
+/// `wnd[1]/usr/pwdRSYST-NCODE`).
+const List<String> kNewPasswordFields = ['RSYST-NCODE', 'RSYST-NCOD2'];
+
+/// A secret's field name: the logon's BCODE, the change-password NCODE /
+/// NCOD2 (hidden even on a kernel painting them without the INVISIBLE
+/// bit), a PASSW* / PWD field.
+final RegExp _secretFieldName =
+    RegExp(r'BCODE|NCOD|PASSW|PWD', caseSensitive: false);
 
 /// Whether [f] holds a secret: an invisible (password) input, or a field
 /// named like one (a logon screen's BCODE, a PASSW* / PWD field) — its
@@ -377,10 +394,49 @@ class ScreenModel {
   /// Whether this screen reports the logon transaction ([kKernelLogonTcode]).
   bool get isKernelLogonTcode =>
       (tcode ?? '').trim().toUpperCase() == kKernelLogonTcode;
+
+  /// Whether this screen is the kernel's change-password dialog: the logon
+  /// program with an EDITABLE new-password input ([kNewPasswordFields])
+  /// painted — what an initial or expired password gets after the
+  /// credentials, a popup over the 0020 logon. Keyed on the INPUTS, not
+  /// on "a popup on the logon program": the multi-logon wall is such a
+  /// popup too, painted across split turns with its header frame first
+  /// and never an input. No recording of the dialog exists (a reference client
+  /// recording request is open); the field names are the kernel's.
+  bool get asksNewPassword =>
+      isKernelLogon &&
+      fields.any((f) =>
+          f.kind == FieldKind.input &&
+          !f.isProtected &&
+          kNewPasswordFields.contains((f.name ?? '').trim().toUpperCase()));
   String? guiStatus;
   String title = '';
+
+  /// The status-bar message as the kernel sends it (16/6/11): for an E / W
+  /// / A / I message the text is prefixed `E: ` … (an S carries no prefix
+  /// — the reference client's fold and every status pin keep it); [messageText] is
+  /// the display text.
   String message = '';
-  int messageSeverity = 0; // 0 none, 1 success, 2 info, 3 warning, 4 error
+
+  /// The message's severity: 0 none, 1 success, 2 info, 3 warning, 4 error
+  /// (an A abort counts as an error). Authoritative source: the structured
+  /// status item 16/12/3 (byte 0 = S / E / W / I / A, then the
+  /// NUL-separated message class, number, flag and msgv1..4 — reference client
+  /// screen_status._parse_status_struct); fallback: the `E: ` prefix of
+  /// the 16/6/11 text when no struct came in the same frame (over the
+  /// corpus every 16/6/11 is paired with its 16/12/3, the text first).
+  int messageSeverity = 0;
+
+  /// The message's T100 identity from the 16/12/3 struct — the
+  /// locale-independent class (`00`, `S#`) and number (`152`, `343`); null
+  /// without a struct. Reset with [message].
+  String? messageClass;
+  String? messageNumber;
+
+  /// [message] without its severity prefix (`E: Transaction XYZ123
+  /// inexistante` → `Transaction XYZ123 inexistante`): what a status bar
+  /// shows beside its severity icon, as the real GUI's does.
+  String get messageText => message.replaceFirst(_messagePrefix, '');
   int modalLevel = 0;
 
   /// The window's position on the screen in cells (SES y_pos / x_pos —
@@ -701,6 +757,8 @@ ScreenModel _foldSegment(
     if (seg.ses == null) {
       m.message = previous.message;
       m.messageSeverity = previous.messageSeverity;
+      m.messageClass = previous.messageClass;
+      m.messageNumber = previous.messageNumber;
     }
     // the menus / toolbar / keys are latest-wins per 18/11 sid: a repaint
     // that does not resend them keeps the previous paint's
@@ -1229,6 +1287,10 @@ class _ContainerPath {
 class _FoldState {
   final atoms = <_PlacedAtom>[];
   final path = _ContainerPath();
+
+  /// A 16/12/3 status struct folded in this segment (its severity wins
+  /// over the 16/6/11 text's prefix).
+  bool statusStruct = false;
   final tcs = <String, TcBuilder>{};
   final tableLevels = <String, _Level>{};
   final tableGeoms = <String, ScreenContainer>{};
@@ -1323,9 +1385,10 @@ void _foldInlineGraph(ScreenModel m, Uint8List v, _FoldState st) {
 
 void _foldAppl(ScreenModel m, DiagItem it, _FoldState st) {
   if (it.id == applStR3Info && it.sid == 35) {
-    st.graphCodepage =
-        netPlanCodepageOf(Uint8List.fromList(it.value)) ?? st.graphCodepage;
+    st.graphCodepage = netPlanCodepageOf(it.value) ?? st.graphCodepage;
   } else if (it.id == applGraph && it.sid == 5) {
+    // copied: the stream keeps it across turns (a view would pin the
+    // whole decoded frame body)
     _foldInlineGraph(m, Uint8List.fromList(it.value), st);
     return;
   }
@@ -1347,6 +1410,14 @@ void _foldAppl(ScreenModel m, DiagItem it, _FoldState st) {
           break;
         case 11:
           m.message = text;
+          // the severity the text's own prefix says, unless this frame's
+          // 16/12/3 already said (authoritative; the reference client's
+          // _fold_info_string: a prefix-less text drops a stale severity)
+          if (!st.statusStruct) {
+            m.messageSeverity = _prefixSeverity(text);
+            m.messageClass = null;
+            m.messageNumber = null;
+          }
           break;
         case 16:
           // the PF-status (16/6/16 — CSEL_POP_TS on SAPLALDB/3000); 16/6/15
@@ -1364,6 +1435,19 @@ void _foldAppl(ScreenModel m, DiagItem it, _FoldState st) {
       if (it.sid == 9 && it.value.isNotEmpty) {
         final t = wireDecode(it.value).trim();
         if (t.isNotEmpty) m.title = t;
+      } else if (it.type == itemAppl && it.sid == 3 && it.value.isNotEmpty) {
+        // the structured status message: the kernel's own severity byte
+        // and the message's T100 identity (a recorded session srv[93]:
+        // `E` NUL `S#` NUL `343` NUL … beside the 16/6/11 "E: …")
+        final v = it.value;
+        final sev = _severityOf(v[0]);
+        if (sev != 0) m.messageSeverity = sev;
+        final parts = wireDecode(v).split('\u0000');
+        final cls = parts.length > 1 ? parts[1].trim() : '';
+        final no = parts.length > 2 ? parts[2].trim() : '';
+        m.messageClass = cls.isEmpty ? null : cls;
+        m.messageNumber = no.isEmpty ? null : no;
+        st.statusStruct = true;
       } else if (it.type == itemAppl && it.sid == 11 && st.listAt != null) {
         _listRun(st, it.value);
       } else if (it.type == itemAppl && it.sid == 2 && it.value.length >= 24) {
@@ -1703,9 +1787,18 @@ void _buildFields(ScreenModel m, List<_PlacedAtom> placed) {
             )
             ..name = names[key]
             ..label = _labelFor(labels, p);
-    } else if (a.etype == etypeCheckButton3) {
+    } else if (a.etype == etypeCheckButton3 || a.etype == etypeRadioButton3) {
+      // a checkbox / radio: what its value atom echoes rides along — the
+      // painted dlg flags, attribute and visible label length — and the
+      // PROTECTED bit is the one read-only verdict of a box (reference client
+      // raw_checkbox.painted_checkboxes: the kernel answers a tick on a
+      // protected box with "input for protected field" and tears the
+      // transaction down); its event id is its own function code (a click
+      // fires PAI: the radio's `=TOGGLE` on SAPLSEWB_CONTROL/0400)
       f = ScreenField(
-        kind: FieldKind.checkbox,
+        kind: a.etype == etypeCheckButton3
+            ? FieldKind.checkbox
+            : FieldKind.radio,
         row: p.row,
         col: p.col,
         wireRow: a.row,
@@ -1716,28 +1809,15 @@ void _buildFields(ScreenModel m, List<_PlacedAtom> placed) {
             a.radiobuttonButton == 1 ||
             a.radiobuttonButton == 0x58 ||
             a.dlgFlag2 & 0x80 != 0,
+        fcode: _choiceFcode(a),
+        isProtected: a.isProtected,
         area: a.area,
         block: a.block,
         group: a.group,
-      )
-        ..name = names[key]
-        ..label = _radioLabel(a);
-    } else if (a.etype == etypeRadioButton3) {
-      f = ScreenField(
-        kind: FieldKind.radio,
-        row: p.row,
-        col: p.col,
-        wireRow: a.row,
-        wireCol: a.col,
-        container: p.container,
-        text: a.radiobuttonText ?? '',
-        on:
-            a.radiobuttonButton == 1 ||
-            a.radiobuttonButton == 0x58 ||
-            a.dlgFlag2 & 0x80 != 0,
-        area: a.area,
-        block: a.block,
-        group: a.group,
+        dlg1: a.dlgFlag1,
+        dlg2: a.dlgFlag2,
+        attr: a.attr,
+        labelWidth: a.radiobuttonVisibleLabelLength,
       )
         ..name = names[key]
         ..label = _radioLabel(a);
@@ -1915,6 +1995,26 @@ void _buildTableControls(ScreenModel m, _FoldState st) {
   }
 }
 
+/// The `E: ` / `W: ` / `A: ` / `I: ` / `S: ` prefix a 16/6/11 message
+/// text carries for a non-success message.
+final RegExp _messagePrefix = RegExp(r'^[EWAIS]: ');
+
+/// [ScreenModel.messageSeverity] of a message text by its prefix; 0 for a
+/// prefix-less text (an S message, or none).
+int _prefixSeverity(String text) {
+  final m = _messagePrefix.firstMatch(text);
+  return m == null ? 0 : _severityOf(text.codeUnitAt(0));
+}
+
+/// [ScreenModel.messageSeverity] of the kernel's severity byte.
+int _severityOf(int byte) => switch (byte) {
+      0x53 => 1, // S
+      0x49 => 2, // I
+      0x57 => 3, // W
+      0x45 || 0x41 => 4, // E, A
+      _ => 0,
+    };
+
 /// A radio / checkbox atom's display label: its text minus the leading
 /// event id (`radiobutton_event_id_len` bytes, e.g. "=STATSEL_CHANGE"
 /// before "Groupe …") — reference client screen_atoms `_radio` label `raw[elen:]`.
@@ -1925,4 +2025,15 @@ String _radioLabel(DyntAtom a) {
   if (n <= 0 || n >= t.length) return t.trimRight();
   final rest = t.substring(n).trimRight();
   return rest.isEmpty ? t.trimRight() : rest;
+}
+
+/// A radio / checkbox atom's own function code: the leading event id of
+/// its text (`radiobutton_event_id_len` bytes — reference client screen_checkbox
+/// .checkbox_payload `fcode`), null when it carries none.
+String? _choiceFcode(DyntAtom a) {
+  final t = a.radiobuttonText ?? '';
+  final n = a.radiobuttonEventIdLen;
+  if (n <= 0 || n > t.length) return null;
+  final id = t.substring(0, n).trim();
+  return id.isEmpty ? null : id;
 }

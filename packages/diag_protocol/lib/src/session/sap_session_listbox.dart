@@ -70,13 +70,17 @@ extension SapSessionListbox on SapSession {
       windowsValueSetRequestItems(ctx, ids, controls: controls),
     );
     await _send(clientFrame(items));
-    // the reply: the push(es), then the repaint
+    // the reply: the push(es), then the repaint — within one deadline, not
+    // per turn: 60 turns of 10 s each held the session 10 minutes (audit
+    // 2026-10-17 N12)
+    final until = DateTime.now().add(const Duration(minutes: 2));
     for (var i = 0; i < 60; i++) {
+      final left = until.difference(DateTime.now());
+      if (left <= Duration.zero) break;
+      final turn = Duration(seconds: i == 0 ? (offlineReplay ? 2 : 30) : 10);
       final List<Uint8List> got;
       try {
-        got = await recvTurn(
-          timeout: Duration(seconds: i == 0 ? (offlineReplay ? 2 : 30) : 10),
-        );
+        got = await recvTurn(timeout: turn < left ? turn : left);
       } on TimeoutException {
         if (i == 0) _trace('value-set request: no reply');
         break;
@@ -145,25 +149,9 @@ extension SapSessionListbox on SapSession {
         );
     final atoms = BytesBuilder(copy: false);
     if (ride) {
+      // typed values and staged ticks alike ([fieldWriteAtom])
       for (final s in _staged) {
-        final w = _writeOf(s);
-        atoms.add(
-          submitAtom(
-            w.row,
-            w.col,
-            w.text,
-            area: w.area,
-            block: w.block,
-            group: w.group,
-            dlg1: (w.mx != null && w.mlen != null && w.mx! > w.mlen!)
-                ? 4
-                : w.dlg1,
-            dlg2: w.dlg2,
-            mx: w.mx,
-            mlen: w.mlen,
-            attr: w.attr,
-          ),
-        );
+        atoms.add(fieldWriteAtom(_writeOf(s)));
       }
     }
     atoms.add(

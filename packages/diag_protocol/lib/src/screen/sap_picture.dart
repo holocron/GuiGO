@@ -179,7 +179,7 @@ bool _isImageClass(String cls) {
       u == 'COM.SAP.COMPONENTS.CONTROLS.IMAGE.SAPIMAGE';
 }
 
-final RegExp _digits = RegExp(r'^\d+$');
+final RegExp _digits = RegExp(r'^\d{1,9}$');
 
 /// The picture state of one session window: every image control's url and
 /// display mode by shell, and the pushed pictures by url (bounded).

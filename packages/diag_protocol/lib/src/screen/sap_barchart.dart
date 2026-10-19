@@ -440,25 +440,36 @@ class BarChartChart {
       math.max(columns, columnWidths.keys.fold(0, math.max));
 
   /// The data rows (1-based), the highest any box or node sits in.
-  int get rowCount {
-    var n = 0;
-    for (final b in boxes) {
-      if ((b.row ?? 0) > n) n = b.row!;
-    }
-    for (final x in nodes) {
-      if ((x.row ?? 0) > n) n = x.row!;
-    }
-    return n;
-  }
+  int get rowCount => _index()._rows;
 
   BarChartBox? get titleBox =>
       boxes.where((b) => b.isTitle).firstOrNull;
   BarChartBox? get headerBox =>
       boxes.where((b) => !b.isTitle && b.row == 0).firstOrNull;
-  BarChartBox? boxAt(int row) =>
-      boxes.where((b) => !b.isTitle && b.row == row).firstOrNull;
+
+  /// The table row box of [row] (the first non-title box placed there).
+  BarChartBox? boxAt(int row) => _index()._boxByRow[row];
+
+  /// The nodes drawn in [row], in the stream's order (read-only).
   List<BarChartNode> nodesAt(int row) =>
-      [for (final n in nodes) if (n.row == row) n];
+      _index()._nodesByRow[row] ?? const [];
+
+  // The rows indexed once, on first use: [boxes] and [nodes] are only
+  // filled inside [buildBarChart] (a change arrives as a fresh model), and
+  // the painter asks per row per frame — a scan of every box and node per
+  // question was O(rows x (boxes + nodes)) per paint, and the geometry's
+  // row heights the same per pinch frame. Rebuilt when the lists grew (a
+  // chart built by hand); a [BarChartBox.row] / [BarChartNode.row] set
+  // after the first question is not seen.
+  _BarChartRowIndex? _rowIndex;
+
+  _BarChartRowIndex _index() {
+    final i = _rowIndex;
+    if (i != null && i._boxes == boxes.length && i._nodes == nodes.length) {
+      return i;
+    }
+    return _rowIndex = _BarChartRowIndex(boxes, nodes);
+  }
 
   /// The header ribbons, coarsest unit on top (months over weeks).
   List<int> get ribbonUnits {
@@ -466,6 +477,38 @@ class BarChartChart {
       ..sort((a, b) => barChartUnitDays(b).compareTo(barChartUnitDays(a)));
     return u;
   }
+}
+
+/// A chart's rows: the highest row, the first row box per row, the nodes
+/// per row in order — what [BarChartChart.rowCount] / [BarChartChart.boxAt]
+/// / [BarChartChart.nodesAt] answered by scanning.
+class _BarChartRowIndex {
+  _BarChartRowIndex(List<BarChartBox> boxes, List<BarChartNode> nodes)
+      : _boxes = boxes.length,
+        _nodes = nodes.length {
+    final byRow = <int, List<BarChartNode>>{};
+    for (final b in boxes) {
+      final r = b.row;
+      if (r == null) continue;
+      if (r > _rows) _rows = r;
+      if (!b.isTitle) _boxByRow.putIfAbsent(r, () => b);
+    }
+    for (final n in nodes) {
+      final r = n.row;
+      if (r == null) continue;
+      if (r > _rows) _rows = r;
+      (byRow[r] ??= []).add(n);
+    }
+    for (final MapEntry(key: r, value: ns) in byRow.entries) {
+      _nodesByRow[r] = List.unmodifiable(ns);
+    }
+  }
+
+  /// The list lengths indexed (a grown list is indexed again).
+  final int _boxes, _nodes;
+  int _rows = 0;
+  final Map<int, BarChartBox> _boxByRow = {};
+  final Map<int, List<BarChartNode>> _nodesByRow = {};
 }
 
 /// A bar chart control as last delivered.
@@ -736,11 +779,10 @@ BarChartRecords? barChartStreamRecords(Uint8List body) {
 /// Whether [value] (an inline GRAPH item 16/2/5 — the non-OCX carrier
 /// SAPLGRAP sends when the frontend is no WN32 GUI: GRAPH_RECEIVE in
 /// BARCOCX1) is a bar chart stream: its `T$CHARTS` header.
-bool isInlineBarChart(Uint8List value) {
-  const mark = '\x00T\$CHARTS';
-  final s = latin1.decode(value, allowInvalid: true);
-  return s.contains(mark);
-}
+bool isInlineBarChart(Uint8List value) =>
+    // on the bytes: a latin-1 decode of the whole (up to 4 MB) value per
+    // test was the round-4 #8 pattern
+    containsBytes(value, '\x00T\$CHARTS');
 
 /// The records of the inline carrier (NUL tokens, `T$NAME n` headers,
 /// `C<value>` fields) decoded in SAP [codepage].
@@ -839,16 +881,23 @@ List<List<String>> barChartTableRows(Uint8List seg) {
 // Building the model
 // ---------------------------------------------------------------------------
 
+// Patterns hoisted out of their call sites: a RegExp built per call is
+// compiled per call — [barChartDate] runs per date value of a stream
+// (audit 2026-10-17 N1).
+final RegExp _digitRunRx = RegExp(r'\d+');
+final RegExp _dateLayoutRx = RegExp(r'YYYY|MM|DD');
+final RegExp _blankRunRx = RegExp(r'\s+');
+
 /// Parse "DD.MM.YYYY;hh:mm:ss;" in the stream's /$DATELAY layout.
 DateTime? barChartDate(String text,
     {String dateLayout = 'DD.MM.YYYY', String timeLayout = 'hh:mm:ss'}) {
   final parts = text.trim().split(';');
   final d = parts.first.trim();
   if (d.isEmpty) return null;
-  final digits = RegExp(r'\d+').allMatches(d).map((m) => m.group(0)!).toList();
+  final digits = _digitRunRx.allMatches(d).map((m) => m.group(0)!).toList();
   if (digits.length < 3) return null;
   final order = <String>[];
-  for (final m in RegExp(r'YYYY|MM|DD').allMatches(dateLayout.toUpperCase())) {
+  for (final m in _dateLayoutRx.allMatches(dateLayout.toUpperCase())) {
     order.add(m.group(0)!);
   }
   if (order.length != 3) order..clear()..addAll(['DD', 'MM', 'YYYY']);
@@ -857,7 +906,7 @@ DateTime? barChartDate(String text,
   if (y <= 0 || mo <= 0 || da <= 0) return null;
   var h = 0, mi = 0, s = 0;
   if (parts.length > 1) {
-    final t = RegExp(r'\d+')
+    final t = _digitRunRx
         .allMatches(parts[1])
         .map((m) => int.parse(m.group(0)!))
         .toList();
@@ -898,7 +947,7 @@ SapBarChartModel? buildBarChart(BarChartRecords records,
   final options = <String, String>{};
   for (final n in _setSections) {
     for (final r in sec(n)) {
-      final p = _f(r, 0).split(RegExp(r'\s+'));
+      final p = _f(r, 0).split(_blankRunRx);
       if (p.length >= 2 && p[0] == 'SET') {
         options[p[1]] = p.length > 2 ? p.sublist(2).join(' ') : '';
       }
@@ -1281,7 +1330,7 @@ Uint8List barChartStreamAnswer([String command = '']) {
 // The session-side tracker
 // ---------------------------------------------------------------------------
 
-final RegExp _digits = RegExp(r'^\d+$');
+final RegExp _digits = RegExp(r'^\d{1,9}$');
 final RegExp _pullUrlRx = RegExp('SAPR3://[0-9A-Za-z]+');
 
 int _indexOf(Uint8List b, List<int> needle) {
@@ -1729,7 +1778,7 @@ class SapBarChartTracker {
             .getUint32(0);
       }
       if (!it.isAppl || it.id != applRfcTr || it.value.isEmpty) continue;
-      final rfc = answerPull(Uint8List.fromList(it.value));
+      final rfc = answerPull(it.value); // read, never kept
       if (rfc == null) continue;
       out.add(
           clientFrame([stepItem(step), buildApplItem(8, 1, rfc), eomBytes]));

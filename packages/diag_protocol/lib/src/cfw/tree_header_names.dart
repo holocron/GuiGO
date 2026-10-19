@@ -383,7 +383,7 @@ Uint8List headerNamesPullAnswer(
   );
 }
 
-final RegExp _digits = RegExp(r'^\d+$');
+final RegExp _digits = RegExp(r'^\d{1,9}$');
 
 Uint8List _dims(int w, int n) {
   final d = ByteData(8)

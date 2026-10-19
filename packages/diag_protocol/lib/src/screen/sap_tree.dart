@@ -282,6 +282,15 @@ class SapTreeModel {
 
   bool get isEmpty => nodes.isEmpty;
 
+  /// Advances on every table [apply] folds in — a node table, an item
+  /// table, an update push — never on an ignored one. The model grows IN
+  /// PLACE as the real tree control does (an expansion's children push
+  /// extends the object the window holds; SapSession rebuilds a new one
+  /// only on a root push), so a view keys its memo of this model's rows on
+  /// the object's identity AND this revision: an UpdateR3Table can hide a
+  /// node without changing the node count.
+  int revision = 0;
+
   /// Fold one decoded DP table in: node tables (a NODE_KEY + RELATKEY
   /// pair) add or update nodes; item tables (NODE_KEY + ITEM_NAME + TEXT)
   /// set texts; an update push ([isTreeUpdateTable]) changes the flagged
@@ -290,12 +299,14 @@ class SapTreeModel {
   bool apply(DpTable t) {
     if (isTreeUpdateTable(t) && t.columns.contains('NODE_KEY')) {
       _applyUpdate(t);
+      revision++;
       return true;
     }
     if (t.columns.contains('RELATKEY') && t.columns.contains('NODE_KEY')) {
       for (final r in t.rows) {
         _addNode(r);
       }
+      revision++;
       return true;
     }
     if (t.columns.contains('ITEM_NAME') && t.columns.contains('TEXT')) {
@@ -309,6 +320,7 @@ class SapTreeModel {
         _setItem(c, r, (_) => true);
         _relabel(n);
       }
+      revision++;
       return true;
     }
     return false;

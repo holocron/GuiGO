@@ -76,7 +76,7 @@ extension _SapSessionGraph on SapSession {
       if (dec == null) continue;
       for (final it in dec.walk.items) {
         if (!it.isAppl || it.id != applGraph || it.sid != 5) continue;
-        final v = Uint8List.fromList(it.value);
+        final v = it.value; // read, never kept
         final reply = inlineProfileReply(v) ??
             (inlineGraphReplyOwed(v) ? inlineGraphDoneMessage() : null);
         if (reply != null) owed.add(reply);

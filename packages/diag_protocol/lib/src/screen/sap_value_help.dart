@@ -367,8 +367,10 @@ class SapValueHelpDialog {
   /// none or several match.
   int? rowOf(String value) {
     final v = value.trim();
+    final c = keyColumn; // one indexOf, not one per row
     for (var i = 0; i < resultRows.length; i++) {
-      if (keyOf(i + 1).trim() == v) return i + 1;
+      final r = resultRows[i];
+      if ((c < r.length ? r[c] : '').trim() == v) return i + 1;
     }
     int? hit;
     for (var i = 0; i < resultRows.length; i++) {
@@ -622,7 +624,7 @@ class SapValueHelpTracker {
   }
 }
 
-final RegExp _digits = RegExp(r'^\d+$');
+final RegExp _digits = RegExp(r'^\d{1,9}$');
 
 /// A push decoded by its FORMAT: [decodeNamedDpTable], else — a hit list
 /// whose FORMAT names no structure, only the columns (prefilled srv[23]:

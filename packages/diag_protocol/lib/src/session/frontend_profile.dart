@@ -525,7 +525,8 @@ List<Uint8List> windowsActionItems(List<Uint8List> items,
   var hasOkcode = false, hasAtom = false, hasValueAtom = false, keyed = false;
   var hasEventSource = false; // a 16/15/1 built in (a button's)
   var vkey = 0;
-  var elementKind = 1; // the focused element's UI-event control type
+  final valueAtoms = <DyntAtom>[]; // every 130 / 129 / 128 atom written
+  Uint8List? focus; // the round's 16/9/11
   for (final raw in items) {
     final walk = walkItems(raw);
     if (walk.items.length != 1) continue;
@@ -537,19 +538,26 @@ List<Uint8List> windowsActionItems(List<Uint8List> items,
       hasOkcode = true;
     } else if (it.isAppl && it.id == 15 && it.sid == 1) {
       hasEventSource = true;
+    } else if (it.isAppl && it.id == 9 && it.sid == 11) {
+      focus = it.value;
     } else if (it.isAppl && it.id == 9 && it.sid == 2) {
       hasAtom = true;
-      final atoms = parseDyntAtoms(Uint8List.fromList(it.value)).atoms;
-      if (atoms.any((a) => a.etype == 130)) hasValueAtom = true;
-      // a radio pick's etype-129 atoms ride the ONE Windows write builder
-      // too (reference client 7c4338e: select_radio -> _windows_write_items
-      // element_kind=2)
-      if (atoms.any((a) => a.etype == 129)) {
-        hasValueAtom = true;
-        elementKind = 2;
+      // a radio pick's etype-129 atoms and a checkbox tick's etype-128
+      // atom ride the ONE Windows write builder too (reference client 7c4338e:
+      // select_radio -> _windows_write_items element_kind=2; raw_checkbox
+      // .set_checkbox element_kind=3)
+      for (final a in parseDyntAtoms(it.value).atoms) {
+        if (_choiceElementKinds.containsKey(a.etype)) {
+          hasValueAtom = true;
+          valueAtoms.add(a);
+        }
       }
     }
   }
+  // the focused element's UI-event control type: the atom written at the
+  // round's focus cell (a tick beside typed values focuses the box when it
+  // was touched last), else the choice element the round carries
+  final elementKind = _focusedElementKind(valueAtoms, focus);
   final fieldRound = !controlEvent && hasValueAtom;
   final keyRound = !controlEvent && keyed && !hasOkcode && !hasAtom;
   // a typed okcode / menu function (no value, no event): reference client raw_okcode
@@ -920,14 +928,16 @@ List<Uint8List> windowsActionItems(List<Uint8List> items,
         it.isAppl &&
         it.id == 15 &&
         it.sid == 1 &&
-        elementKind == 2 &&
+        elementKind != 1 &&
         it.value.length >= 5 &&
         it.value[2] == 0x09 &&
-        it.value[4] == 0x02) {
+        it.value[4] == elementKind) {
       // a radio's element event on Enter (its own fcode): the Windows GUI
       // spells BUTTONPRESSED 0x09 as STATECHANGED 0x0b, bytes otherwise
       // equal (a recorded session g13 / g32
-      // `02 000b 0002 …`; the Java se39 gui[21] sends 0x09)
+      // `02 000b 0002 …`; the Java se39 gui[21] sends 0x09). A checkbox's
+      // (control type 3) follows the radio's rule: no Windows capture of a
+      // checkbox with its own function code exists
       out.add(buildApplItem(15, 1, Uint8List.fromList(it.value)..[2] = 0x0b));
     } else {
       out.add(raw);
@@ -996,7 +1006,9 @@ Uint8List _fieldKeySource(int vkey, List<int> focus, {int controlType = 1}) {
   final bd = out.buffer.asByteData();
   out[0] = 0x0a;
   out[2] = 0x07;
-  bd.setUint16(3, controlType); // 1 field, 2 radio (selscreen gui[5])
+  // 1 field, 2 radio (selscreen gui[5]), 3 checkbox (the radio's rule
+  // applied to its twin: no Windows checkbox key-round capture exists)
+  bd.setUint16(3, controlType);
   out[5] = vkey & 0xff;
   if (focus.length >= 5) {
     out.setRange(9, 13, focus.sublist(1, 5)); // row u16, col u16
@@ -1004,6 +1016,31 @@ Uint8List _fieldKeySource(int vkey, List<int> focus, {int controlType = 1}) {
   bd.setUint16(13, path.length);
   out.setRange(15, out.length, path);
   return out;
+}
+
+/// The UI-event control type a written atom's element has: 1 a field
+/// (etype 130), 2 a radio (129), 3 a checkbox (128).
+const Map<int, int> _choiceElementKinds = {
+  130: 1,
+  129: radioElementKind,
+  128: checkboxElementKind,
+};
+
+/// The control type of the element a field round's 16/15/1 names: the
+/// atom written at the [focus] cell (16/9/11 row / col) when one is, else
+/// the radio or the checkbox the round carries, else a field.
+int _focusedElementKind(List<DyntAtom> atoms, Uint8List? focus) {
+  if (focus != null && focus.length >= 5) {
+    final bd = ByteData.sublistView(focus);
+    final row = bd.getUint16(1), col = bd.getUint16(3);
+    for (final a in atoms) {
+      if (a.row == row && a.col == col) return _choiceElementKinds[a.etype]!;
+    }
+  }
+  for (final etype in const [129, 128]) {
+    if (atoms.any((a) => a.etype == etype)) return _choiceElementKinds[etype]!;
+  }
+  return 1;
 }
 
 /// A Windows field write's tabstrip-STATE groups moved after the atoms
@@ -1522,6 +1559,10 @@ bool _sameBytes(List<int> a, List<int> b) {
   return true;
 }
 
+// hoisted: a RegExp built per call is compiled per call (audit
+// 2026-10-17 N1)
+final RegExp _pageNameRx = RegExp(r'([A-Z_][A-Z0-9_]{2,})\x00');
+
 /// The client 16/9/15 for a tabstrip (reference client mode_envelope
 /// .client_tree_names): the server's 18/9/15 with the ACTIVE page's name
 /// filled into an empty first entry (the page leg's index, byte 4, into the
@@ -1538,8 +1579,7 @@ Uint8List clientTreeNames(Uint8List b, Uint8List pages, Uint8List pageLeg) {
     for (final p in tabstripDescriptorPages(pages)) String.fromCharCodes(p.name),
   ];
   if (names.isEmpty) {
-    for (final m in RegExp(r'([A-Z_][A-Z0-9_]{2,})\x00')
-        .allMatches(String.fromCharCodes(pages))) {
+    for (final m in _pageNameRx.allMatches(String.fromCharCodes(pages))) {
       if (!names.contains(m.group(1))) names.add(m.group(1)!);
     }
   }

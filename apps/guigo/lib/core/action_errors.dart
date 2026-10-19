@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:diag_protocol/diag_protocol.dart';
 
 /// Whether [e], thrown by an action on [session], is a CLIENT-SIDE refusal
@@ -18,6 +21,31 @@ bool isClientRefusal(Object e, SapSession? session) {
     return false;
   }
   return session.state == SessionState.ready && !session.closedByPeer;
+}
+
+/// Whether [e], thrown by an action on [session], is a TRANSPORT-class
+/// failure that leaves the logon of no further use: the action's deadline
+/// passed with no answer (a [TimeoutException] — the logon itself may
+/// still be live on the server, its idle watchdog running), the socket
+/// failed, went silent or broke its framing ([SocketException],
+/// [TlsException], [ConnectionLostError], [NiProtocolException]), or the
+/// session already ended (failed, closed, closed by the peer). The screen
+/// closes such a logon at once rather than leaving it a zombie on the
+/// server until the user retries. Never a [SessionClosedError] (the screen
+/// closed it) nor a client refusal ([isClientRefusal]).
+bool isTransportFailure(Object e, SapSession? session) {
+  if (session == null || e is SessionClosedError) return false;
+  if (e is TimeoutException ||
+      e is SocketException ||
+      e is TlsException ||
+      e is ConnectionLostError ||
+      e is NiProtocolException) {
+    return true;
+  }
+  if (isClientRefusal(e, session)) return false;
+  return session.state == SessionState.failed ||
+      session.state == SessionState.closed ||
+      session.closedByPeer;
 }
 
 /// The sentence a refusal snack bar shows: the refusal's own reason.

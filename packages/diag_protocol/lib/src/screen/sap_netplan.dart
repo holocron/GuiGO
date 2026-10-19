@@ -1070,7 +1070,7 @@ bool _isNetPlanClass(String cls) {
       c.contains('JNET');
 }
 
-final RegExp _digits = RegExp(r'^\d+$');
+final RegExp _digits = RegExp(r'^\d{1,9}$');
 
 class _Slot {
   _Slot(this.program, this.dynpro, this.modal);

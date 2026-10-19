@@ -706,11 +706,13 @@ const Map<String, String> _entities = {
 String _unescape(String s) =>
     s.replaceAllMapped(_unescapeRx, (m) {
       final e = m.group(1)!;
-      if (e.startsWith('#x')) {
-        return String.fromCharCode(int.parse(e.substring(2), radix: 16));
-      }
+      // a reference past U+10FFFF (or too long to parse) stays as written
+      // (audit 2026-10-17 P0-3)
       if (e.startsWith('#')) {
-        return String.fromCharCode(int.parse(e.substring(1)));
+        final v = e.startsWith('#x')
+            ? int.tryParse(e.substring(2), radix: 16)
+            : int.tryParse(e.substring(1));
+        return v != null && v <= 0x10FFFF ? String.fromCharCode(v) : m.group(0)!;
       }
       return _entities[e] ?? m.group(0)!;
     });

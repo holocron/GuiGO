@@ -34,6 +34,7 @@ import 'dart:async';
 import 'dart:isolate';
 import 'dart:typed_data';
 
+import '../lzh/zlib_ffi.dart' show RawInflate;
 import 'diag_frame.dart';
 import 'envelope.dart' show DiagItem, ItemWalk;
 
@@ -210,6 +211,8 @@ class _Worker {
         errorsAreFatal: false,
         onExit: _port.sendPort,
       );
+      // stopped while it was starting: it never gets a port to drain on
+      if (_dead) _isolate?.kill(priority: Isolate.immediate);
     } catch (_) {
       // no isolates here (or the spawn was refused): every frame inline
       _die(unavailable: true);
@@ -297,7 +300,19 @@ class _Worker {
     _waiting.clear();
     _queued.clear();
     _port.close();
-    _isolate?.kill(priority: Isolate.immediate);
+    final iso = _isolate, s = _send;
+    if (s == null) {
+      iso?.kill(priority: Isolate.immediate);
+    } else {
+      // the worker frees its pooled native inflaters (native memory its
+      // death does not return) and exits on its own once its port closes;
+      // the kill is the backstop for one that never gets to the message
+      // (a worker already gone drops it)
+      try {
+        s.send(_drainMessage);
+      } catch (_) {}
+      Timer(_drainGrace, () => iso?.kill(priority: Isolate.immediate));
+    }
     if (unavailable) FrameDecodeOffload._markUnavailable(this);
   }
 
@@ -307,11 +322,23 @@ class _Worker {
   }
 }
 
+/// The message that ends the worker: drain its inflater pool, close its
+/// port (the isolate then exits), after the frames sent before it.
+const String _drainMessage = 'drain';
+
+/// How long a stopped worker gets to drain before it is killed.
+const Duration _drainGrace = Duration(seconds: 2);
+
 /// The worker isolate: decode each frame with the package's own memoized
 /// decoder (its memo dies with the worker's copy) and reply in order.
 void _workerMain(SendPort reply) {
   final inbox = RawReceivePort();
   inbox.handler = (Object? msg) {
+    if (msg == _drainMessage) {
+      RawInflate.drainPool();
+      inbox.close();
+      return;
+    }
     if (msg is! List || msg.length != 2) return;
     final id = msg[0] as int;
     final frame = msg[1] as Uint8List;

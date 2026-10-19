@@ -124,11 +124,17 @@ bool _build(Document doc, DpTable data, DpTable info) {
   return true;
 }
 
+// Hoisted: [alvNumber] runs per numeric cell of every in-place sheet; a
+// RegExp built per call is compiled per call (audit 2026-10-17 N1).
+// The blanks: whitespace, NBSP and the narrow NBSP of a French grouping.
+final RegExp _alvBlankRx = RegExp(r'[\s  ]');
+final RegExp _alvDecimalRx = RegExp(r'^\d+(\.\d+)?$');
+
 /// An ALV cell's number: `1234`, `-5`, `5-` (ABAP's trailing sign),
 /// `1.234,56` / `1,234.56` / `1 234,56` (the user's format: the last
 /// separator is the decimal one when both occur), else null.
 num? alvNumber(String text) {
-  var s = text.replaceAll(RegExp(r'[\s  ]'), '');
+  var s = text.replaceAll(_alvBlankRx, '');
   var neg = false;
   if (s.endsWith('-')) {
     neg = true;
@@ -149,7 +155,7 @@ num? alvNumber(String text) {
         ? s.replaceAll(',', '.')
         : s.replaceAll(',', '');
   }
-  if (!RegExp(r'^\d+(\.\d+)?$').hasMatch(s)) return null;
+  if (!_alvDecimalRx.hasMatch(s)) return null;
   final v = num.parse(s);
   final n = v == v.roundToDouble() && v.abs() < 1e15 ? v.toInt() : v;
   return neg ? -n : n;

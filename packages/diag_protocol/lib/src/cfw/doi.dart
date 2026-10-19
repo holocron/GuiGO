@@ -497,7 +497,15 @@ String doiPushField(Uint8List raw, int type) {
 
 /// A DOI range push's rows decoded by its own FORMAT ([doiPushField] per
 /// column; [pushTableByFormat]'s layout), each a list of cell texts.
-List<List<String>> doiPushRows(Uint8List seg) {
+List<List<String>> doiPushRows(Uint8List seg) => _pushRows[seg] ??=
+    List.unmodifiable([for (final r in _doiPushRows(seg)) List<String>.unmodifiable(r)]);
+
+/// [doiPushRows] per cached segment: a push's rows are read by every
+/// verb that names it (Ranges / RangeDef / Content per range read), and a
+/// cached segment never changes (audit 2026-10-17 N7).
+final Expando<List<List<String>>> _pushRows = Expando('DOI push rows');
+
+List<List<String>> _doiPushRows(Uint8List seg) {
   final (_, (fw, fn), fcells) = dpColumnCells(seg, 'FORMAT');
   final fmt = BytesBuilder(copy: false);
   for (final c in fcells) {
@@ -2220,7 +2228,7 @@ Uint8List? doiAnswerDocumentPullRfc(DoiState st, Uint8List value,
   if (n > 0) {
     table
       ..add(wrap0305Cell(lzhCompress(padded)))
-      ..add(Uint8List.fromList([0x03, 0x06, 0x00, 0x00, 0x03, 0x06]));
+      ..add(cellTableClose);
   }
   table
     ..add(_tok('FORMAT'))
@@ -2247,6 +2255,6 @@ String _leU32Str(int v) => String.fromCharCodes([
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
 // compiled per call (audit #7 / zcode P-12).
-final RegExp _digitsOnlyRx = RegExp(r'^\d+$');
+final RegExp _digitsOnlyRx = RegExp(r'^\d{1,9}$');
 final RegExp _docForSourceRx = RegExp(r'^doc(\d+)$');
 final RegExp _dpgetInurlRx = RegExp('SAPR3://[0-9A-Fa-f]+');

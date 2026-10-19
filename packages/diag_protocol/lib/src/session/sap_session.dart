@@ -24,7 +24,7 @@ import '../cfw/datamanager_grammar.dart';
 import '../cfw/doi.dart';
 import '../cfw/doi_trace.dart';
 import '../cfw/office_document.dart';
-import '../cfw/dp_cache.dart' show DpCache;
+import '../cfw/dp_cache.dart' show DpCache, dpCacheMaxEntries;
 import '../cfw/dragdrop_service.dart';
 import '../cfw/ea_responder.dart';
 import '../cfw/flush_call.dart';
@@ -86,6 +86,7 @@ part 'sap_session_context_menu.dart';
 part 'sap_session_editor.dart';
 part 'sap_session_field_type_ahead.dart';
 part 'sap_session_fields.dart';
+part 'sap_session_checkbox.dart';
 part 'sap_session_graph.dart';
 part 'sap_session_grid.dart';
 part 'sap_session_grid_edit.dart';
@@ -112,7 +113,7 @@ class SapSystem {
     required this.host,
     this.port = defaultSapPort,
     this.routerString = '',
-    this.client = '100',
+    this.client = defaultLogonClient,
     this.user = '',
     this.language = defaultLogonLanguage,
   });
@@ -184,7 +185,7 @@ class SapSession {
         _screenCols = screenCols {
     // the logon's first window, DIAG mode 0 (sap_session_windows.dart)
     _modes.w = _modes.open[0] = _WindowState(0, SapWindowOrigin.logon,
-        screenRows: screenRows, screenCols: screenCols);
+        screenRows: screenRows, screenCols: screenCols, limits: limits);
     // the client's own window (an app that knows its screen): every round
     // reports the pixels of THIS window (sap_session_resize.dart)
     if (sizedWindow) _w.ctx.sizeWindow(screenRows, screenCols);
@@ -287,6 +288,7 @@ class SapSession {
   TransportLimits limits = const TransportLimits();
   int _inboxBytes = 0;
   Duration? _pingGap; // the server's learned idle NI_PING interval
+  Duration? _pingSample; // the previous idle ping's gap (sap_session_liveness)
   Timer? _watchdog;
   int _parkedDropped = 0;
 
@@ -512,9 +514,7 @@ class SapSession {
         _wakeReader();
       });
       if (route.isNotEmpty) {
-        await _openRoute(
-            [...route, RouteHop(system.host, system.port.toString())],
-            timeout);
+        await _openRoute(routeHops(route, system), timeout);
       }
       if (snc != null) {
         await _sncNegotiate();
@@ -559,6 +559,34 @@ class SapSession {
 
   /// Ask the SAProuter we are connected to for a route through [hops]; on
   /// NI_PONG the socket carries plain NI traffic to the target from here on.
+  /// The hops of the NI_ROUTE: the SAProuter string's with the application
+  /// server appended as its last hop — SAP GUI appends it blindly to its
+  /// "SAProuter string" field, the router prefix only. A route string that
+  /// ALREADY ends in the target (a full `/H/router/S/3299/H/host/S/3200`
+  /// path, the shape GuiGo's own form once hinted) is sent as it is: the
+  /// hop the user wrote keeps its `/W/` password, and the dispatcher at
+  /// the end is never handed an NI_ROUTE naming itself as a rest node
+  /// (what it answers with NI_RTERR, or never). The real GUI replicates
+  /// no such tolerance; only the logon pad's failure mode is not.
+  static List<RouteHop> routeHops(List<RouteHop> route, SapSystem system) {
+    if (route.isNotEmpty && _hopNamesTarget(route.last, system)) return route;
+    return [...route, RouteHop(system.host, system.port.toString())];
+  }
+
+  /// Whether [hop] is [system]'s application server: its host (case
+  /// aside) and its service resolved to the system's port (`/S/sapdp00`
+  /// is 3200); a service no table resolves is no match.
+  static bool _hopNamesTarget(RouteHop hop, SapSystem system) {
+    if (hop.host.trim().toLowerCase() != system.host.trim().toLowerCase()) {
+      return false;
+    }
+    try {
+      return resolveServicePort(hop.port) == system.port;
+    } on ArgumentError {
+      return false;
+    }
+  }
+
   Future<void> _openRoute(List<RouteHop> hops, Duration timeout) async {
     _sock!.add(niFrame(buildRouteRequest(hops)));
     await _sock!.flush();
@@ -692,7 +720,11 @@ class SapSession {
         ? FrameDecodeOffload.ahead(payload, live: !offlineReplay)
         : null;
     if (decoding != null) {
-      await decoding;
+      // within the read's deadline: a wedged worker never holds the
+      // session — the reader then decodes inline through the memo (audit
+      // 2026-10-17 R5)
+      final left = deadline.difference(DateTime.now());
+      if (left > Duration.zero) await decoding.timeout(left, onTimeout: () {});
       if (state == SessionState.closed) throw SessionClosedError();
     }
     return payload;
@@ -714,6 +746,9 @@ class SapSession {
     // every DIAG frame goes out in the mode of the window it addresses
     // (reference client raw_transport send_msg: SAPDiag(mode=self.mode); a recorded session
     // wingui_session raw gui[6] header `01 …` in window (2))
+    // the item stream an oversized frame was compressed from (read before
+    // the mode re-stamp copies the frame)
+    final plain = clientFrameBody(payload);
     if (_w.mode != 0 && payload.length >= diagHeaderLen && payload[0] == 0) {
       payload = Uint8List.fromList(payload)..[0] = _w.mode;
     }
@@ -727,7 +762,8 @@ class SapSession {
     final body = clientBodyLength(payload);
     // a reply over the kernel's request buffer goes out as the real GUI's
     // sid-4 request stream (sap_session_request_stream.dart)
-    if (body > kernelRequestBodyMax && await _sendRequestStream(payload)) {
+    if (body > kernelRequestBodyMax &&
+        await _sendRequestStream(payload, body: plain)) {
       return;
     }
     if (payload.length > diagHeaderLen &&
@@ -946,17 +982,39 @@ class SapSession {
   /// The frames of the most recent completed turn, raw as received
   /// (materialized stream paints included) — the wire log a diagnostic
   /// reads when a live flow diverges from every capture (the SFP Layout
-  /// tab's XDP push on some kernels). Bounded: the newest
-  /// [maxTurnWireFrames] frames of the last turn only.
+  /// tab's XDP push on some kernels). Opt-in through [keepTurnWire], empty
+  /// otherwise: a kept turn pins its wire frames AND their memoized decoded
+  /// bodies (the decode memo is keyed on the frame object) until the next
+  /// turn replaces it — megabytes per live logon on a grid / office /
+  /// paint turn, for a reader the shipped app has none of (its `turns`
+  /// subscriber discards the frames; tool/sfp_popup_trace dumps the wire
+  /// from `turns` itself). Bounded when kept: the newest
+  /// [maxTurnWireFrames] frames (at most [maxTurnWireBytes]) of the last
+  /// turn only.
   List<Uint8List> lastTurnFrames = const [];
 
-  /// How many frames of a turn [lastTurnFrames] keeps at most.
+  /// Whether [lastTurnFrames] keeps each turn — a diagnostic's knob, off
+  /// by default in every build; switched off mid-session it releases the
+  /// turn it kept on the next one.
+  bool keepTurnWire = false;
+
+  /// How many frames / bytes of a turn [lastTurnFrames] keeps at most.
   static const int maxTurnWireFrames = 512;
+  static const int maxTurnWireBytes = 32 << 20;
 
   void _rememberTurn(List<Uint8List> frames) {
-    lastTurnFrames = frames.length <= maxTurnWireFrames
-        ? List.unmodifiable(frames)
-        : List.unmodifiable(frames.sublist(frames.length - maxTurnWireFrames));
+    if (!keepTurnWire) {
+      lastTurnFrames = const [];
+      return;
+    }
+    var from = frames.length;
+    var bytes = 0;
+    while (from > 0 && frames.length - from < maxTurnWireFrames) {
+      bytes += frames[from - 1].length;
+      if (bytes > maxTurnWireBytes) break;
+      from--;
+    }
+    lastTurnFrames = List.unmodifiable(from == 0 ? frames : frames.sublist(from));
   }
 
   void _emitTurn(List<Uint8List> frames) {
@@ -970,7 +1028,20 @@ class SapSession {
         // a malformed push or paint never escapes the receive: the turn's
         // owed answers still go out (an unanswered flush blocks the
         // kernel in OLE_FLUSH_CALL) — counted, the folded-so-far kept
-        _guarded('screen fold', () => _fold(run));
+        var folded = false;
+        _guarded('screen fold', () {
+          _fold(run);
+          folded = true;
+        });
+        // a fold that threw part-way still syncs the dialog step: a stale
+        // ctx.step stamps every later action with a step the kernel
+        // silently discards (audit 2026-10-17 R3)
+        if (!folded) {
+          _guarded('step sync', () {
+            _syncStep(run);
+            ctx.step = step;
+          });
+        }
         _guarded('tree bind', _bindTree);
       });
     }
@@ -1001,6 +1072,24 @@ class SapSession {
       if (it.isEom) return true;
     }
     return false;
+  }
+
+  /// [step] (and the step clock) from the frames' 4/38 Step items.
+  void _syncStep(List<Uint8List> frames) {
+    for (final f in frames) {
+      // a materialized stream paint nests the paint's own (stale) step
+      if (isStreamCarrier(f)) continue;
+      final dec = decompressFrame(f);
+      if (dec == null) continue;
+      for (final it in dec.walk.items) {
+        if (it.isAppl && it.id == 4 && it.sid == 38 && it.value.length >= 4) {
+          step = it.value.buffer
+              .asByteData(it.value.offsetInBytes, 4)
+              .getUint32(0);
+          _noteClock(f);
+        }
+      }
+    }
   }
 
   void _fold(List<Uint8List> frames) {
@@ -1045,20 +1134,7 @@ class SapSession {
     }
     _noteGenerations();
     // mirror geometry into the action context
-    for (final f in frames) {
-      // a materialized stream paint nests the paint's own (stale) step
-      if (isStreamCarrier(f)) continue;
-      final dec = decompressFrame(f);
-      if (dec == null) continue;
-      for (final it in dec.walk.items) {
-        if (it.isAppl && it.id == 4 && it.sid == 38 && it.value.length >= 4) {
-          step = it.value.buffer
-              .asByteData(it.value.offsetInBytes, 4)
-              .getUint32(0);
-          _noteClock(f);
-        }
-      }
-    }
+    _syncStep(frames);
     // a 16/9/18 naming a CFW DIALOG box (SAPGUI.DIALOGCTRL.1 — the F1
     // Performance Assistant) is no window control focus: the real GUI's
     // next round keeps the dynpro cursor (a recorded session srv[134]
@@ -1258,10 +1334,10 @@ class SapSession {
             dialect: GuiDialect.windows,
             terminal: terminal,
             language: system.language,
-            // the recorded window: a device-sized WSIZE in the connect drew
-            // 'invalid gui data' from the test system at the credential submit (live
-            // 2026-10-13); re-enable only after a live A/B
-            window: null)
+            // the window the app sized, else the recorded one ('invalid gui
+            // data' at the credential submit on 2026-10-13 was the logon's
+            // fixture viewport, not this WSIZE: live the test system 2026-10-18)
+            window: _w.ctx.windowSized ? (screenRows, screenCols) : null)
         : windowsConnectFrame(fixture[0], language: system.language));
     await recvTurn();
     _trace('connect reply');
@@ -1306,8 +1382,14 @@ class SapSession {
     // without answering, the server waits forever for the next ack and
     // everything downstream (wall, Easy Access paint) stalls into timeouts.
     var contTurns = 0;
+    // The change-password dialog (an initial / expired password) is a
+    // kernel-logon paint too, with no error: it is the user's turn, so it
+    // ends the wait here — not after the 5 s timeout and the settle loop's
+    // three (~20 s of spinner before the dialog showed, ux1 initial-
+    // password-delay).
     while (!readWall(reply).isWall &&
         (screen?.isKernelLogon ?? false) &&
+        !(screen?.asksNewPassword ?? false) &&
         (screen?.messageSeverity ?? 0) < 3 &&
         contTurns < 60) {
       final List<Uint8List> got;
@@ -1326,9 +1408,18 @@ class SapSession {
     // still on the logon dynpro with an error/warning: SAP refused the logon
     // (wrong password, locked user, bad client…) — say so instead of
     // replaying the Easy Access answers into a silent server
+    // (an expired password can paint the change-password dialog WITH a
+    // warning / error message: that is the dialog, not a refusal)
     final m = screen;
-    if (m != null && m.isKernelLogonTcode && m.messageSeverity >= 3) {
+    if (m != null &&
+        m.isKernelLogonTcode &&
+        m.messageSeverity >= 3 &&
+        !m.asksNewPassword) {
       throw StateError('logon refused: ${m.message}');
+    }
+    if (m != null && m.asksNewPassword) {
+      _trace('logon asks for a new password: settled on the change-password '
+          'dialog');
     }
 
     // multi-logon wall — answered wherever in the bootstrap it appears
@@ -1344,7 +1435,9 @@ class SapSession {
     // leaves the wall unread and unanswered (the stuck empty "Info licence
     // …" screen with nothing to press).
     final wallScan = <Uint8List>[]; // reunites the wall's split turns
-    bool settled() => screen?.program != null && !screen!.isKernelLogon;
+    bool settled() =>
+        screen?.program != null &&
+        (!screen!.isKernelLogon || screen!.asksNewPassword);
     var idle = 0;
     for (var i = 0; i < 120 && !settled(); i++) {
       final List<Uint8List> got;
@@ -1795,8 +1888,7 @@ class SapSession {
       // _handBack — the debuggee's window after a debugger key)
       _modes
         ..awaitingReply = true
-        ..handedBack = false
-        ..lastParked = null;
+        ..handedBack = false;
       await _send(frame);
       if (staged != null) _gridStateFlushed();
       final all = <Uint8List>[];
@@ -1811,8 +1903,9 @@ class SapSession {
         // an offline replay has every frame of the exchange queued already:
         // nothing left means the server's part is done (no idle wait)
         if (offlineReplay && all.isNotEmpty && _inbox.isEmpty) break;
-        // ... and nothing read for this window yet, with frames parked on
-        // another: the conversation went there (the timeout case below)
+        // ... and nothing read for this window yet, with a frame addressing
+        // another window parked: the conversation went there (the timeout
+        // case below)
         if (offlineReplay && all.isEmpty && _inbox.isEmpty) {
           if (_handBackToParked()) continue;
         }
@@ -1828,13 +1921,20 @@ class SapSession {
         } on TimeoutException catch (e) {
           _throwIfAnswerOwed(failuresBefore, e);
           if (all.isNotEmpty) break; // the server finished; nothing more came
-          // the server went silent after parking its last frames on another
-          // window: it waits THERE, never on this one — follow it and read
-          // them as this action's (live the test system 2026-10-16: F6 in the debugger,
-          // window (2), answered only by a mode-0 frame; waited forever)
+          // the server went silent and another window holds a parked frame
+          // ADDRESSING it: it waits THERE, never on this one — follow it and
+          // read them as this action's. Parked ticks alone are no hand-back
+          // (a recorded session s[74] / s[77]): keep waiting
           if (_handBackToParked()) {
             i--; // the hand-back is not a turn
             continue;
+          }
+          // silent past the server's own ping cadence: the connection is
+          // gone, not the dialog step slow (audit 2026-10-17 R2)
+          if (_sockError == null && _silentTooLong()) {
+            final lost = ConnectionLostError(_silenceMessage());
+            _abortTransport(lost);
+            throw lost;
           }
           if (!offlineReplay &&
               _sockError == null &&
@@ -1902,8 +2002,7 @@ class SapSession {
       _modes
         ..actionCommand = null
         ..awaitingReply = false
-        ..handedBack = false
-        ..lastParked = null;
+        ..handedBack = false;
     }
   }
 
@@ -2176,17 +2275,35 @@ class SapSession {
             .getUint32(0);
       }
       if (!it.isAppl || it.id != 8 || (it.sid != 0 && it.sid != 1)) continue;
+      // tested on the view: only the rare pull is copied, not every OLE
+      // flush value of every frame (audit 2026-10-17 N8)
+      if (!isClientTablePull(it.value)) continue;
       final v = Uint8List.fromList(it.value);
-      if (!isClientTablePull(v)) continue;
       final url = clientTablePullUrl(v);
       if (url != null && (_netPlans.hasSink(url) || _barCharts.hasSink(url))) {
         continue;
       }
       // a value-help search's select options (sap_session_value_help.dart)
-      final selOpts = url == null ? null : _valueHelpPullAnswer(url, v);
+      final selOpts = url == null
+          ? null
+          : _guarded('value help pull', () => _valueHelpPullAnswer(url, v));
       if (selOpts != null) {
         out.add(clientFrame(
             [stepItem(at), buildApplItem(8, 1, selOpts), eomBytes]));
+        continue;
+      }
+      // an ABAP editor's document after its SaveDocToDP — the save: the
+      // editor's text, never the empty client table, which commits an
+      // EMPTY source (sap_session_editor.dart; a recorded session
+      // srv[47] -> g[44])
+      final doc = url == null
+          ? null
+          : _guarded('editor document pull', () => _editorDocPullAnswer(url, v));
+      if (doc != null) {
+        _loadedSinks.remove(url);
+        // a long source past the item's u16 length: APPL4, streamed
+        // ([rfcReplyItem])
+        out.add(clientFrame([stepItem(at), rfcReplyItem(doc), eomBytes]));
         continue;
       }
       // the DOI model's read-backs and the document save-back — a refused
@@ -2204,6 +2321,12 @@ class SapSession {
       final header = sink != null && headerNamesProps.contains(sink.prop)
           ? _headerNamesOf(sink.source)
           : null;
+      // a TextEdit's text read back (its TextAsR3Table: the Java bean's
+      // X-R3ABAP records, a recorded session srv[32] -> gui[22])
+      if (rfc == null && sink != null) {
+        rfc = _guarded<Uint8List?>(
+            'textedit pull', () => _textEditPullAnswer(sink, v));
+      }
       if (rfc == null && header != null) {
         rfc = headerNamesPullAnswer(
           header,
@@ -2448,13 +2571,21 @@ class SapSession {
     for (final f in frames) {
       dp.ingestFrame(f);
     }
-    var changed = false;
     // the pushes new since the last fold, by the cache's arrival counter
     // (an index into its order would shift under its eviction)
     final fresh = dp.addedSince(_dpSeen);
     // the watermark advances only once the fresh pushes were decoded: a
     // throw before it leaves them for the next fold, never dropped
     final seenTo = dp.seq;
+    // a root push starts the tree afresh: a NEW model object, made on the
+    // first table accepted after it (never the old one cleared — it may
+    // just have been parked whole in keptTrees, and a root push the
+    // ceiling refuses leaves the old tree as it is). Every other push is
+    // applied INTO the model the window holds, as the real tree control
+    // grows on an expansion; re-applying every retained table per batch
+    // was O(nodes) per push (audit perf5 tree-reapply), and a view keys on
+    // the object plus [SapTreeModel.revision]
+    var restart = false;
     for (final url in fresh) {
       final seg = dp.byUrl[url];
       if (seg == null) continue;
@@ -2472,22 +2603,23 @@ class SapSession {
         if (!_treeUnbound) {
           _keepOrRestoreTree(newTree: true);
           _treeTables.clear();
+          restart = true;
         }
         _treeUnbound = true;
       }
       if (!_treeTableFits(t)) continue; // the retained-bytes ceiling
       _treeTables.add(t);
       _noteTreeTable(url, t);
-      changed = true;
+      if (restart) {
+        _tree = SapTreeModel();
+        restart = false;
+      }
+      final m = _tree ??= SapTreeModel();
+      // guarded per table: a throw inside the apply must not leave the
+      // watermark behind (the batch's earlier tables would be re-added)
+      _guarded('tree apply', () => m.apply(t));
     }
     _dpSeen = seenTo;
-    if (changed) {
-      final m = SapTreeModel();
-      for (final t in _treeTables) {
-        m.apply(t);
-      }
-      _tree = m;
-    }
     // bind to the program the next paint names (the PBO flush precedes it)
     if (_treeUnbound && _paintsProgram(frames)) {
       _treeUnbound = false;
@@ -2826,7 +2958,9 @@ class SapSession {
             f.wireRow, // the kernel's container-local cell
             f.wireCol,
             identical(f, chosen),
-            f.text.length,
+            // the PAINTED visible label length (the atom's declared width,
+            // which the label text's length only usually equals)
+            f.labelWidth > 0 ? f.labelWidth : f.text.length,
           ),
     ];
     return _act(radioSelectItems(ctx, members,
@@ -3052,6 +3186,7 @@ class SapSession {
   Future<void> close() async {
     state = SessionState.closed;
     _password = null;
+    lastTurnFrames = const []; // a closed session pins no turn
     _sockError ??= SessionClosedError();
     _wakeReader();
     final sock = _sock;

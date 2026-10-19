@@ -1,5 +1,7 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show listEquals;
+import 'package:flutter/gestures.dart' show kTouchSlop;
 import 'package:flutter/material.dart';
 
 import 'sap_chart_xy.dart';
@@ -114,28 +116,31 @@ const _palette = [
 ];
 
 /// The chart's laid-out label texts, kept across paints and rebuilds: a
-/// repaint (a hover move, a server turn rebuilding the screen) draws the
-/// axis labels without laying them out again. Keyed by text, colour and
-/// size; [clear]ed when it grows past [_limit] (a re-pushed chart with new
-/// categories) and with the view.
+/// repaint (a hover move, a server turn rebuilding the screen, a bar
+/// chart's drag frame) draws the labels without laying them out again.
+/// Keyed by text, colour, size and width; [clear]ed when it grows past
+/// [_limit] (a re-pushed chart with new categories) and with the view.
 class ChartLabelCache {
-  final Map<(String, Color?, double), TextPainter> _labels = {};
+  final Map<(String, Color?, double, double), TextPainter> _labels = {};
   final Map<String, Size> _measured = {};
   static const _limit = 1024;
 
   /// How many label layouts the cache made (tests read it).
   int layouts = 0;
 
-  /// [s] laid out as an axis label (one line, at most 160 wide).
-  TextPainter label(String s, Color? color, double size) {
+  /// [s] laid out as a one-line label at most [maxWidth] wide (an axis
+  /// label's 160), cut with [ellipsis] when it does not fit.
+  TextPainter label(String s, Color? color, double size,
+      {double maxWidth = 160, String? ellipsis}) {
     if (_labels.length >= _limit) _clearLabels();
-    return _labels.putIfAbsent((s, color, size), () {
+    return _labels.putIfAbsent((s, color, size, maxWidth), () {
       layouts++;
       return TextPainter(
         text: TextSpan(text: s, style: TextStyle(color: color, fontSize: size)),
         textDirection: TextDirection.ltr,
         maxLines: 1,
-      )..layout(maxWidth: 160);
+        ellipsis: ellipsis,
+      )..layout(maxWidth: maxWidth);
     });
   }
 
@@ -173,6 +178,18 @@ class _SapChartViewState extends State<SapChartView> {
 
   /// How many label layouts the chart made (tests read it).
   int get labelLayouts => _labels.layouts;
+
+  /// The category the read-out shows (tests read it).
+  int? get readoutIndex => _hover;
+
+  @override
+  void didUpdateWidget(SapChartView old) {
+    super.didUpdateWidget(old);
+    // the read-out outlives the finger: a re-pushed chart with other
+    // categories drops it (a session rebuild hands fresh lists of the same
+    // chart — compared by content, not identity)
+    if (!listEquals(old.categories, widget.categories)) _hover = null;
+  }
 
   @override
   void dispose() {
@@ -227,8 +244,9 @@ class _SapChartViewState extends State<SapChartView> {
               labels: _labels,
               gapWidth: widget.gapWidth,
             );
-            // the read-out under the finger is its own layer of paint: a
-            // hover move repaints it, not the axes and the data
+            // the read-out under the finger is its own layer of paint over
+            // the chart's (each behind a RepaintBoundary): a hover move
+            // repaints the read-out, not the axes and the data
             final readout = _HoverPainter(chart: painter, hover: _hover);
             int? indexAt(Offset p) {
               if (n == 0) return null;
@@ -239,15 +257,43 @@ class _SapChartViewState extends State<SapChartView> {
               return (t * n).floor().clamp(0, n - 1);
             }
 
+            // the cross line of category [i] (the read-out's cPos)
+            double crossAt(int i) {
+              final plot = painter.plotRect(cons.biggest);
+              return kind == ChartKind.bar
+                  ? plot.top + (i + 0.5) / n * plot.height
+                  : plot.left + (i + 0.5) / n * plot.width;
+            }
+
+            // the read-out stays when the finger lifts (a scrub finds the
+            // category, the lift reads it — the finger covered it); a tap
+            // on its cross line clears it, a tap elsewhere moves it. By
+            // distance, not index: a 1 000-day history has categories
+            // under a pixel wide
             return GestureDetector(
               onPanStart: (d) => setState(() => _hover = indexAt(d.localPosition)),
               onPanUpdate: (d) => setState(() => _hover = indexAt(d.localPosition)),
-              onPanEnd: (_) => setState(() => _hover = null),
-              onTapDown: (d) => setState(() => _hover = indexAt(d.localPosition)),
-              child: CustomPaint(
-                size: cons.biggest,
-                painter: painter,
-                foregroundPainter: readout,
+              onTapDown: (d) => setState(() {
+                final h = _hover;
+                final p = kind == ChartKind.bar
+                    ? d.localPosition.dy
+                    : d.localPosition.dx;
+                _hover = h != null && h < n && (crossAt(h) - p).abs() <= kTouchSlop
+                    ? null
+                    : indexAt(d.localPosition);
+              }),
+              child: Stack(
+                children: [
+                  RepaintBoundary(
+                    child: CustomPaint(size: cons.biggest, painter: painter),
+                  ),
+                  RepaintBoundary(
+                    child: CustomPaint(
+                      size: cons.biggest,
+                      foregroundPainter: readout,
+                    ),
+                  ),
+                ],
               ),
             );
           }),

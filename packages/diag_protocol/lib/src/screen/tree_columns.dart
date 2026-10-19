@@ -115,10 +115,16 @@ class SapTreeColumns {
           if (!c.hidden) c,
       ];
     }
+    // a Set beside the list and one trimmed-name map per call: an
+    // `out.contains` and a declared-column scan per header name were
+    // O(k^2) per read (read per tree build)
     final out = <SapTreeColumn>[];
+    final seen = <SapTreeColumn>{};
+    Map<String, SapTreeColumn>? trimmed;
     for (final n in order) {
-      final c = byName[n] ?? _byTrimmed(n);
-      if (c != null && !c.hidden && !out.contains(c)) out.add(c);
+      final c = byName[n] ??
+          (trimmed ??= _byTrimmedName())[n.trim()];
+      if (c != null && !c.hidden && seen.add(c)) out.add(c);
     }
     return out;
   }
@@ -129,6 +135,16 @@ class SapTreeColumns {
       if (c.name.trim() == t) return c;
     }
     return null;
+  }
+
+  /// [_byTrimmed] for every name at once: the declared columns by trimmed
+  /// name, the first declared one per name.
+  Map<String, SapTreeColumn> _byTrimmedName() {
+    final m = <String, SapTreeColumn>{};
+    for (final c in byName.values) {
+      m.putIfAbsent(c.name.trim(), () => c);
+    }
+    return m;
   }
 
   /// Whether [name] names the hierarchy column (its item or its header).

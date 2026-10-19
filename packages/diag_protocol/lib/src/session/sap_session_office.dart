@@ -32,20 +32,35 @@ extension SapSessionOffice on SapSession {
   /// the SAP control (XXL then asks the user to save the data there:
   /// SOFFICEINTEGRATION 233); a CloseDocument, or the user closing it
   /// ([dismissOfficeWindow]), ends it.
-  List<SapOfficeDocument> get officeWindows {
+  List<SapOfficeDocument> get officeWindows => _officeWindowsIn(null);
+
+  /// [officeWindows] judged against [drawn], the base window's composed
+  /// regions a view already holds (SapSession.baseComposition) — the
+  /// getter composes them itself, and only when a created document needs
+  /// the verdict.
+  List<SapOfficeDocument> officeWindowsIn(List<ScreenRegion> drawn) =>
+      _officeWindowsIn(drawn);
+
+  List<SapOfficeDocument> _officeWindowsIn(List<ScreenRegion>? composed) {
     final st = _officeDoi;
     final gone = _dismissedOfficeWindows[st] ??= <Document>{};
-    final drawn = {
-      for (final r in regions)
-        if (r.shell != null) r.shell!,
-    };
+    // the shells the window's panes draw — read lazily: a session that
+    // never opened a document (the common one) composes nothing here, and
+    // a view passes the regions it composed already
+    Set<String>? drawn;
     final out = <SapOfficeDocument>[];
     for (final (sh, doc) in st.createdDocs.reversed) {
       if (!doc.outOfPlace || doc.closed || gone.contains(doc)) continue;
       // a pane of this window shows it (the chart demo's container)
       final held = identical(st.containers[sh]?['current'], doc);
-      if (held && drawn.contains(sh) && _onScreen(sh) && _shellVisible(sh)) {
-        continue;
+      if (held) {
+        drawn ??= {
+          for (final r in composed ?? regions)
+            if (r.shell != null) r.shell!,
+        };
+        if (drawn.contains(sh) && _onScreen(sh) && _shellVisible(sh)) {
+          continue;
+        }
       }
       final w = officeDocumentOf(sh, doc);
       _officeWindowDoc[w] = doc;

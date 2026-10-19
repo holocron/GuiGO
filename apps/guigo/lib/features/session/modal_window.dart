@@ -23,6 +23,7 @@ class ModalDynproWindow extends StatelessWidget {
     this.onRadio,
     this.radioSelection,
     this.onRadioTap,
+    this.onCheckbox,
     this.extraActions = const [],
     this.content,
     this.contentWidth,
@@ -37,10 +38,16 @@ class ModalDynproWindow extends StatelessWidget {
     this.onDoubleClick,
     this.listboxValueSet,
     this.onListboxPick,
+    this.onCancel,
   });
 
   final ScreenModel model;
   final bool busy;
+
+  /// SAP GUI's close box in the popup's title bar: its Cancel (F12) when
+  /// the popup's status defines it (the caller decides; null draws none —
+  /// the multi-logon wall carries its own Cancel among its actions).
+  final VoidCallback? onCancel;
   final Future<void> Function(ScreenField f, String text) onFill;
   final Future<void> Function(int vkey) onPress;
   final Future<void> Function(String cmd) onOkcode;
@@ -48,6 +55,9 @@ class ModalDynproWindow extends StatelessWidget {
   onRadio;
   final ScreenField? radioSelection;
   final void Function(List<ScreenField> group, ScreenField chosen)? onRadioTap;
+
+  /// A checkbox ticked / unticked ([DynproView.onCheckbox]).
+  final void Function(ScreenField f, bool on)? onCheckbox;
   final List<Widget> extraActions;
 
   /// The popup's composed body (its dynpro plus the grids / trees hosted
@@ -131,6 +141,24 @@ class ModalDynproWindow extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
+                  // compact, so the title row does not grow on a
+                  // phone-width popup; inert while a round runs (the
+                  // dialog's SessionBusy scope, as the default OK)
+                  if (onCancel != null)
+                    BusyBuilder(
+                      busy: busy,
+                      builder: (_, busy) => IconButton(
+                        tooltip: 'Cancel (F12)',
+                        icon: const Icon(Icons.close),
+                        padding: EdgeInsets.zero,
+                        visualDensity: VisualDensity.compact,
+                        constraints: const BoxConstraints.tightFor(
+                          width: 36,
+                          height: 36,
+                        ),
+                        onPressed: busy ? null : onCancel,
+                      ),
+                    ),
                 ],
               ),
               if (message.isNotEmpty)
@@ -170,6 +198,7 @@ class ModalDynproWindow extends StatelessWidget {
                   onRadio: onRadio,
                   radioSelection: radioSelection,
                   onRadioTap: onRadioTap,
+                  onCheckbox: onCheckbox,
                 ),
               if (actions.isNotEmpty)
                 Padding(

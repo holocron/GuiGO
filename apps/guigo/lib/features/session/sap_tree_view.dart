@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:diag_protocol/diag_protocol.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart' show CustomSemanticsAction;
 
 import '../../core/sap_icons.dart';
 import 'sap_graph_view.dart';
@@ -42,7 +43,23 @@ import 'session_busy.dart';
 ///
 /// A double tap is ONE gesture, as SAP GUI's double-click is: its taps do
 /// not also act as two clicks (the live SE80 tree, 2026-10-12, folded the
-/// folder its first tap had opened and fired a leaf twice).
+/// folder its first tap had opened and fired a leaf twice). That rule is
+/// for the nodes whose double tap is the double-click; a LINK item's tap
+/// is its own event (LINKCLICK 35, fired by the real GUI on the click
+/// itself), so a simple tree's link leaf fires on the tap at once, with no
+/// double-tap wait and no node double-click — the column tree's link cell
+/// model ([onItemClick]).
+///
+/// A screen reader gets each row as a button: its label, selected and
+/// expanded state, the click as the tap action and the double-click as a
+/// custom action ('Open') — VoiceOver / TalkBack have no double tap of
+/// their own; the expander is named 'Expand' / 'Collapse'.
+///
+/// A simple tree scrolls sideways as a whole when its rows' chrome (the
+/// indent, the expander, the icon and a label's room) outgrows the pane —
+/// SAP GUI's tree control scrolls the hierarchy sideways too — and a long
+/// label at natural row height wraps to two lines (the real GUI shows it
+/// on one and scrolls; a phone has no room for that).
 ///
 /// A COLUMN tree ([columns] with item columns: SAP.TableTreeControl.1, the
 /// ALV tree — /AIF/IFMON's interface overview) is drawn as SAP GUI draws
@@ -140,6 +157,11 @@ class SapTreeView extends StatefulWidget {
   /// The width of a folder's expander hit area: a finger's, not the
   /// arrow's 20 px.
   static const double expanderHitWidth = 36;
+
+  /// The least width a simple tree's row of [depth] is laid out at: its
+  /// indent, the expander and 140 points for the node's icon, paddings
+  /// and a label's room (about 90 points of text).
+  static double rowMinWidth(int depth) => 20.0 * depth + expanderHitWidth + 140;
 
   /// The points a column tree row of [depth] needs for its chrome beyond
   /// what the OCX's own takes inside the declared hierarchy width: GuiGo's
@@ -240,6 +262,7 @@ class _SapTreeViewState extends State<SapTreeView> {
   Set<String> _serverSeen = const {};
   SapTreeModel? _syncTree;
   int _syncNodes = -1;
+  int _syncRev = -1;
   Set<String> _syncWant = const {};
 
   /// Bumped whenever [_open] changes: the flattened rows ([_rowsOf]) are
@@ -249,6 +272,7 @@ class _SapTreeViewState extends State<SapTreeView> {
   SapTreeModel? _rowsTree;
   int _rowsGen = -1;
   int _rowsNodes = -1;
+  int _rowsRev = -1;
 
 
   /// Busy now — the view's flag or the session's ([SessionBusy]) — for a
@@ -280,6 +304,9 @@ class _SapTreeViewState extends State<SapTreeView> {
   final ScrollController _vItems = ScrollController();
   final ScrollController _hHier = ScrollController();
   final ScrollController _hItems = ScrollController();
+
+  /// A simple tree's sideways scroll (its rows wider than the pane).
+  final ScrollController _hPlain = ScrollController();
   bool _syncing = false;
 
   @override
@@ -296,6 +323,7 @@ class _SapTreeViewState extends State<SapTreeView> {
     _vItems.dispose();
     _hHier.dispose();
     _hItems.dispose();
+    _hPlain.dispose();
     super.dispose();
   }
 
@@ -359,29 +387,38 @@ class _SapTreeViewState extends State<SapTreeView> {
       return _columnTree(context, rows, cols);
     }
     final strip = widget.headerStrip;
-    if (widget.paneRows == null) return _plainTree(context, rows, strip, null);
     return LayoutBuilder(
       builder: (context, cons) => _plainTree(
         context,
         rows,
         strip,
-        SapTreeView.denseRowExtent(
-          paneHeight: cons.maxHeight,
-          paneRows: widget.paneRows,
-          rows: rows.length,
-          headerStrip: strip != null,
-        ),
+        widget.paneRows == null
+            ? null
+            : SapTreeView.denseRowExtent(
+                paneHeight: cons.maxHeight,
+                paneRows: widget.paneRows,
+                rows: rows.length,
+                headerStrip: strip != null,
+              ),
+        cons,
       ),
     );
   }
 
   /// A simple tree's list (under its header strip), its rows [dense]
-  /// points tall when given ([denseRowExtent]).
+  /// points tall when given ([denseRowExtent]), laid out at least as wide
+  /// as its deepest row's chrome ([SapTreeView.rowMinWidth]) and scrolled
+  /// sideways when that outgrows the pane (a docked SE80 object list, a
+  /// DBA cockpit tree on a phone: the real GUI's tree scrolls sideways
+  /// there, and clipped rows hid their labels for good). Always wrapped —
+  /// a wrap that came and went with an expand re-parented the list and
+  /// lost its scroll offset; at the pane's width it scrolls nothing.
   Widget _plainTree(
     BuildContext context,
     List<(SapTreeNode, int)> rows,
     String? strip,
     double? dense,
+    BoxConstraints cons,
   ) {
     _padTopNow = dense == null ? _padTop : 0;
     _padBottomNow = dense ?? 96;
@@ -394,7 +431,7 @@ class _SapTreeViewState extends State<SapTreeView> {
             _row(context, rows[i].$1, rows[i].$2, busy: busy, extent: dense),
       ),
     );
-    final Widget body = widget.onTopNode == null
+    final Widget listed = widget.onTopNode == null
         ? list
         : NotificationListener<ScrollEndNotification>(
             onNotification: (n) {
@@ -403,6 +440,29 @@ class _SapTreeViewState extends State<SapTreeView> {
             },
             child: list,
           );
+    Widget body = listed;
+    if (cons.hasBoundedWidth) {
+      var depth = 0;
+      for (final (_, d) in rows) {
+        if (d > depth) depth = d;
+      }
+      // the list's 8-point paddings either side
+      final width = 16 + SapTreeView.rowMinWidth(depth);
+      // outside the scroll-end listener: a sideways scroll's end never
+      // reports a top node
+      body = Scrollbar(
+        controller: _hPlain,
+        thumbVisibility: true,
+        child: SingleChildScrollView(
+          controller: _hPlain,
+          scrollDirection: Axis.horizontal,
+          child: SizedBox(
+            width: width > cons.maxWidth ? width : cons.maxWidth,
+            child: listed,
+          ),
+        ),
+      );
+    }
     if (strip == null) return body;
     final scheme = Theme.of(context).colorScheme;
     final labelStyle = Theme.of(context).textTheme.labelMedium;
@@ -452,12 +512,14 @@ class _SapTreeViewState extends State<SapTreeView> {
     // again only for another tree, more nodes or another set
     if (identical(tree, _syncTree) &&
         tree.nodes.length == _syncNodes &&
+        tree.revision == _syncRev &&
         now.length == _syncWant.length &&
         now.containsAll(_syncWant)) {
       return;
     }
     _syncTree = tree;
     _syncNodes = tree.nodes.length;
+    _syncRev = tree.revision;
     _syncWant = now;
     final own = <String, String>{
       for (final k in tree.nodes.keys) k.trim(): k,
@@ -481,9 +543,12 @@ class _SapTreeViewState extends State<SapTreeView> {
   /// The rows the open tree shows (node, depth), walked once per tree and
   /// set of open folders; the node count guards a model grown in place.
   List<(SapTreeNode, int)> _rowsOf(SapTreeModel tree) {
+    // a push applied into the SAME model (SapTreeModel.revision) relabels,
+    // hides or moves nodes without changing their count
     if (identical(tree, _rowsTree) &&
         _rowsGen == _openGen &&
-        _rowsNodes == tree.nodes.length) {
+        _rowsNodes == tree.nodes.length &&
+        _rowsRev == tree.revision) {
       return _rows;
     }
     sapTreeFlattens++;
@@ -504,6 +569,7 @@ class _SapTreeViewState extends State<SapTreeView> {
     _rowsTree = tree;
     _rowsGen = _openGen;
     _rowsNodes = tree.nodes.length;
+    _rowsRev = tree.revision;
     return rows;
   }
 
@@ -856,6 +922,8 @@ class _SapTreeViewState extends State<SapTreeView> {
     return Text(
       String.fromCharCode(cp),
       key: ValueKey('tree-icon-$code'),
+      // a private-use character: nothing for a screen reader to say
+      semanticsLabel: '',
       style: TextStyle(
         fontFamily: 'SapIcons',
         fontSize: size,
@@ -980,12 +1048,19 @@ class _SapTreeViewState extends State<SapTreeView> {
       );
     }
     if (n.disabled) return InkWell(key: key, child: content);
-    return _taps(
-      key: key,
-      n: n,
-      click: () => _select(n),
-      doubleClick: () => _doubleClickItem(n, cell.name),
-      child: content,
+    return Semantics(
+      onTap: () => _select(n),
+      customSemanticsActions: {
+        const CustomSemanticsAction(label: 'Open'): () =>
+            _doubleClickItem(n, cell.name),
+      },
+      child: _taps(
+        key: key,
+        n: n,
+        click: () => _select(n),
+        doubleClick: () => _doubleClickItem(n, cell.name),
+        child: content,
+      ),
     );
   }
 
@@ -1171,6 +1246,7 @@ class _SapTreeViewState extends State<SapTreeView> {
                 open ? Icons.expand_more : Icons.chevron_right,
                 size: iconSize,
                 color: scheme.onSurfaceVariant,
+                semanticLabel: open ? 'Collapse' : 'Expand',
               ),
             )
           : null,
@@ -1204,7 +1280,9 @@ class _SapTreeViewState extends State<SapTreeView> {
               child: Text(
                 label,
                 key: link ? ValueKey('tree-link-${n.key}') : null,
-                maxLines: 1,
+                // a long label wraps to two lines at natural height (a
+                // dense row's extent is fixed: one line, cut)
+                maxLines: extent == null ? 2 : 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   fontSize: fontSize,
@@ -1228,8 +1306,38 @@ class _SapTreeViewState extends State<SapTreeView> {
     );
     // the node: its icon and text — a tap selects, a double tap is the
     // double-click (serial taps: the click shows without the double-tap
-    // wait)
+    // wait). A LINK leaf's tap is its click at once, as a column tree's
+    // link cell (_itemCell): SAP GUI fires LINK_CLICK on the click itself,
+    // no double-tap wait, no node double-click (a second tap in time is
+    // dropped by the busy gate while the round runs).
+    final linkTap =
+        link && itemClick != null && !labelItem.disabled && !n.disabled;
+    // the reader's row: a button with the label (the Text and the icon
+    // glyph under it excluded: not read twice), its states, the click as
+    // its tap and the double-click as 'Open'
+    Widget readable(
+      Widget child, {
+      VoidCallback? onTap,
+      Map<CustomSemanticsAction, VoidCallback>? actions,
+    }) => Semantics(
+      button: true,
+      label: label,
+      selected: selected,
+      expanded: folder ? open : null,
+      enabled: !n.disabled,
+      excludeSemantics: true,
+      onTap: onTap,
+      customSemanticsActions: actions,
+      child: child,
+    );
     final node = InkWell(
+      onTap: linkTap
+          ? () {
+              if (_busyNow) return;
+              setState(() => _selected = n.key);
+              itemClick(n.key, labelItem.name);
+            }
+          : null,
       onSecondaryTapUp: menu == null || busy
           ? null
           : (d) => menu(n.key, d.globalPosition),
@@ -1240,41 +1348,52 @@ class _SapTreeViewState extends State<SapTreeView> {
               menu(n.key, box?.localToGlobal(Offset.zero) ?? Offset.zero);
             },
       borderRadius: BorderRadius.circular(6),
-      child: n.disabled
-          ? face
-          : _taps(
-              n: n,
-              click: link && itemClick != null && !labelItem.disabled
-                  ? () {
-                      if (_busyNow) return;
-                      setState(() => _selected = n.key);
-                      itemClick(n.key, labelItem.name);
-                    }
-                  : () => _select(n),
-              doubleClick: () => _doubleClick(n),
-              child: face,
+      child: n.disabled || linkTap
+          ? readable(face)
+          : readable(
+              _taps(
+                n: n,
+                click: () => _select(n),
+                doubleClick: () => _doubleClick(n),
+                child: face,
+              ),
+              onTap: () => _select(n),
+              actions: {
+                const CustomSemanticsAction(label: 'Open'): () =>
+                    _doubleClick(n),
+              },
             ),
     );
-    // a pane narrower than a row's chrome (a docked pane on a small window)
-    // clips the row instead of overflowing it
-    final row = LayoutBuilder(
-      builder: (context, cons) {
-        final content = Padding(
-          padding: EdgeInsets.only(
-            left: 20.0 * depth + (columnMode ? 4 : 0),
-            right: 8,
-          ),
-          child: Row(children: [expander, Expanded(child: node)]),
-        );
-        final minWidth = 20.0 * depth + SapTreeView.expanderHitWidth + 140;
-        if (cons.maxWidth >= minWidth) return content;
-        return SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          physics: const NeverScrollableScrollPhysics(),
-          child: SizedBox(width: minWidth, child: content),
-        );
-      },
+    final content = Padding(
+      padding: EdgeInsets.only(
+        left: 20.0 * depth + (columnMode ? 4 : 0),
+        right: 8,
+      ),
+      child: Row(
+        children: [
+          expander,
+          Expanded(child: node),
+        ],
+      ),
     );
+    // a COLUMN tree's row narrower than its chrome (the hierarchy column
+    // at its declared width, a deep row: hierarchyChromeExtra gives the
+    // deepest row the OCX's text room, no more) is clipped, as the OCX
+    // clips it, instead of overflowing; a simple tree's rows are laid out
+    // at the deepest row's width and scroll sideways (_plainTree)
+    final Widget row = columnMode
+        ? LayoutBuilder(
+            builder: (context, cons) {
+              final minWidth = SapTreeView.rowMinWidth(depth);
+              if (cons.maxWidth >= minWidth) return content;
+              return SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                physics: const NeverScrollableScrollPhysics(),
+                child: SizedBox(width: minWidth, child: content),
+              );
+            },
+          )
+        : content;
     final shell = widget.dragShell;
     if (shell == null || n.disabled) return row;
     return LongPressDraggable<TreeRowDrag>(

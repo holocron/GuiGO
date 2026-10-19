@@ -1221,7 +1221,12 @@ Uint8List _fixedHuffmanLiteral(Uint8List data) {
 /// decoder (a shorter one cannot hold such a distance: no preset dictionary,
 /// so a match never reaches before the input start), and one that reaches
 /// further is re-encoded with an 8K window (-13: 8 192 - 262), then the
-/// fallbacks as above.
+/// fallbacks as above. The walk is per (level, window, strategy) ONCE per
+/// isolate when the linked zlib is the encoder: [lzhDeflateKeepsSapDistance]
+/// offers it matches at every distance past the limit, and a build that
+/// takes none of them skips the per-payload walk (a pure-Dart bit-serial
+/// decode of every >16 KB payload — every request-stream chunk, every
+/// multi-MB VARS answer — on the UI isolate).
 Uint8List lzhCompress(Uint8List data, {int level = 6}) {
   if (data.isEmpty) {
     // noise=0 + BFINAL=1 + BTYPE=00 -> byte 0x04, then empty stored block
@@ -1241,7 +1246,10 @@ Uint8List lzhCompress(Uint8List data, {int level = 6}) {
         final fast = lzhInflate(stream, declaredBound: true);
         // misaligned STORED block: the next strategy, as with a 16K window
         if (fast == null || !_bytesEqual(fast, data)) break;
-        if (!_withinSapDistance(stream, data)) continue;
+        if (!_withinSapDistance(stream, data,
+            level: level, windowBits: windowBits, strategy: strategy)) {
+          continue;
+        }
         return stream;
       }
     }
@@ -1265,9 +1273,13 @@ bool _referenceRoundTrips(Uint8List stream, Uint8List data) {
 /// Whether the fast-path-verified [stream] of [data] keeps every
 /// back-reference within [lzhMaxDistance]. Debug builds (asserts on) also
 /// require the reference decoder to agree with the fast path.
-bool _withinSapDistance(Uint8List stream, Uint8List data) {
-  if (data.length <= lzhMaxDistance) {
-    // a distance is at most the match's output position (< data.length)
+bool _withinSapDistance(Uint8List stream, Uint8List data,
+    {required int level, required int windowBits, required int strategy}) {
+  // a distance is at most the match's output position (< data.length); a
+  // probed-compliant native zlib never emits one past the limit
+  if (data.length <= lzhMaxDistance ||
+      (lzhRawDeflateOverride == null &&
+          _nativeKeepsSapDistance(level, windowBits, strategy))) {
     assert(_referenceRoundTrips(stream, data),
         'lzhCompress: the zlib fast path accepted a stream the reference '
         'decoder rejects (${data.length} B)');
@@ -1286,6 +1298,86 @@ bool _withinSapDistance(Uint8List stream, Uint8List data) {
   assert(_bytesEqual(back, data),
       'lzhCompress: the reference decoder disagrees with the fast path '
       '(${data.length} B)');
+  return d.maxSeenDistance <= lzhMaxDistance;
+}
+
+/// The probe verdicts of the linked zlib, by [_probeKey] — one probe per
+/// (level, window, strategy) per isolate.
+final Map<int, bool> _nativeDistanceVerdicts = {};
+
+int _probeKey(int level, int windowBits, int strategy) =>
+    (level & 0xff) | ((windowBits & 0xff) << 8) | ((strategy & 0xff) << 16);
+
+bool _nativeKeepsSapDistance(int level, int windowBits, int strategy) =>
+    _nativeDistanceVerdicts[_probeKey(level, windowBits, strategy)] ??=
+        lzhDeflateKeepsSapDistance(_nativeRawDeflate,
+            level: level, windowBits: windowBits, strategy: strategy);
+
+/// The probe input: [_probeSpan] distinct 29-byte runs, run `i` at
+/// `61 i` and again at `61 i + lzhMaxDistance + 1 + i` — so its only long
+/// match sits at a distance of exactly `lzhMaxDistance + 1 + i`, every
+/// distance from 16 123 to 16 383 (the whole 16K window past the limit)
+/// once. 64-symbol pseudo-random filler around them (8-bit codes in both
+/// Huffman flavours, so zlib emits a coded block, never a STORED one the
+/// noise shift would misalign) holds no other long match.
+Uint8List _distanceProbeInput() {
+  const run = 29, stride = 61;
+  final n = lzhMaxDistance + 1 + stride * (_probeSpan - 1) + _probeSpan + run;
+  final out = Uint8List(n);
+  var x = 0x2545f491; // xorshift32: deterministic across platforms
+  int next() {
+    x ^= (x << 13) & 0xffffffff;
+    x ^= x >> 17;
+    x ^= (x << 5) & 0xffffffff;
+    return x;
+  }
+
+  for (var i = 0; i < n; i++) {
+    out[i] = 0x40 + (next() & 0x3f);
+  }
+  for (var i = 0; i < _probeSpan; i++) {
+    final at = stride * i;
+    out.setRange(at + lzhMaxDistance + 1 + i,
+        at + lzhMaxDistance + 1 + i + run, out, at);
+  }
+  return out;
+}
+
+/// lzhMaxDistance + 1 .. 16 383: every distance a 16K window holds past it.
+const int _probeSpan = _lzhWindowSize - 1 - lzhMaxDistance;
+
+/// Whether [deflate] at ([level], [windowBits], [strategy]) keeps every
+/// back-reference within [lzhMaxDistance] when the input offers long
+/// matches ONLY past it, at each distance the 16K window could reach. False
+/// (the per-payload walk stays on) when the probe stream is not a
+/// reference-decodable round trip, so an undecided build is never trusted.
+/// Exposed for the probe's own tests; [lzhCompress] caches the native verdict.
+bool lzhDeflateKeepsSapDistance(
+    Uint8List Function(Uint8List data,
+            {required int level,
+            required int windowBits,
+            required int strategy})
+        deflate,
+    {int level = 6,
+    int windowBits = -14,
+    int strategy = zDefaultStrategy}) {
+  final probe = _distanceProbeInput();
+  final Uint8List stream;
+  try {
+    stream = _noiseShiftDeflate(
+        deflate(probe,
+            level: level, windowBits: windowBits, strategy: strategy),
+        probe.length,
+        footer: 8);
+  } on Object {
+    return false;
+  }
+  final d = LzhReferenceDecoder(stream, declaredBound: true);
+  try {
+    if (!_bytesEqual(d.decode(), probe)) return false;
+  } on Object {
+    return false;
+  }
   return d.maxSeenDistance <= lzhMaxDistance;
 }
 

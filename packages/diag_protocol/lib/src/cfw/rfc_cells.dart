@@ -10,6 +10,9 @@ import '../lzh/lzh.dart';
 const int cellSeg = 250;
 const List<int> cellLead = [0x7b, 0x02, 0x00, 0xea];
 
+/// The empty `03 06` token that closes a table column's LZH cell.
+const List<int> cellTableClose = [0x03, 0x06, 0x00, 0x00, 0x03, 0x06];
+
 class Cell0305 {
   Cell0305(this.openOff, this.endOff, this.bytes);
   final int openOff;
@@ -22,10 +25,19 @@ class Cell0305 {
 /// Every `03 05` cell in [b]: a cell opens with the tag + u16-length
 /// segments, reframes `03 05 03 05` between segments, closes with a bare
 /// `03 05`.
+///
+/// Linear: a candidate whose chain breaks is retried one byte on, and the
+/// next candidate is often a reframe `03 05` of that same chain — whose
+/// walk joins the broken one at a segment header it already read. The
+/// chain from a given segment header has ONE outcome, so every header of a
+/// broken chain is marked and a walk that reaches one fails at once (a
+/// header of a WHOLE chain is never met again: the scan resumes past it).
 List<Cell0305> find0305Cells(Uint8List b) {
   final cells = <Cell0305>[];
   final n = b.length;
   final bd = b.buffer.asByteData(b.offsetInBytes, b.lengthInBytes);
+  Uint8List? broken; // segment-header offsets of chains that broke
+  final heads = <int>[];
   var i = 0;
   while (i < n - 1) {
     i = _find(b, 0x03, 0x05, i);
@@ -33,11 +45,13 @@ List<Cell0305> find0305Cells(Uint8List b) {
     var j = i + 2;
     final segs = BytesBuilder(copy: false);
     var ok = true;
+    heads.clear();
     while (true) {
-      if (j + 2 > n) {
+      if (j + 2 > n || (broken != null && broken[j] != 0)) {
         ok = false;
         break;
       }
+      heads.add(j);
       final sl = bd.getUint16(j);
       if (j + 2 + sl > n) {
         ok = false;
@@ -60,6 +74,10 @@ List<Cell0305> find0305Cells(Uint8List b) {
       cells.add(Cell0305(i, j, segs.takeBytes()));
       i = j;
     } else {
+      broken ??= Uint8List(n);
+      for (final h in heads) {
+        broken[h] = 1;
+      }
       i += 1;
     }
   }

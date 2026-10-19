@@ -8,6 +8,7 @@ dependencies:
   # MIT (Lukas Renggli) — the OOXML parts' XML
   xml: ^6.6.1
 dev_dependencies:
+  lints: ^6.1.0
   test: ^1.25.0
   # the recordings' DP pushes are decoded in place by the SO10 RTF test
   diag_protocol:

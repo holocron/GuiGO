@@ -233,6 +233,10 @@ GfwKind gfwKindOf(SapChartModel m) => switch (m.chartType) {
 double gfwPxPerDay(double mm) => mm * 96 / 25.4;
 
 class _GfwChartViewState extends State<GfwChartView> {
+  /// Per model: the pie's and the xy chart's painter series.
+  static final _pieSeries = Expando<List<ChartSeriesData>>();
+  static final _xySeries = Expando<List<ChartSeriesData>>();
+
   /// The time axis' pan: the first visible day's offset from the axis
   /// start, in days.
   double _pan = 0;
@@ -285,9 +289,11 @@ class _GfwChartViewState extends State<GfwChartView> {
         builder: (context, cons) => CustomPaint(
           size: cons.biggest,
           painter: switch (kind) {
+            // the series mapped once per model: a rebuild with the same
+            // model keeps the painters' shouldRepaint false
             GfwKind.pie => PieChartPainter(
               categories: m.categories,
-              series: [
+              series: _pieSeries[m] ??= [
                 for (final s in m.series) ChartSeriesData(s.label, s.values),
               ],
               text: text,
@@ -295,7 +301,7 @@ class _GfwChartViewState extends State<GfwChartView> {
             GfwKind.histogram => GfwHistogramPainter(m, scheme),
             GfwKind.milestone => GfwMtaPainter(m, scheme),
             GfwKind.xy => XyChartPainter(
-              series: [
+              series: _xySeries[m] ??= [
                 for (final (i, s) in m.series.indexed)
                   ChartSeriesData(s.label, s.values,
                       xs: s.xs, color: gfwSeriesLine(s, i)),
@@ -811,7 +817,10 @@ class GfwHistogramPainter extends CustomPainter {
 /// One header band: [cells] laid along [band] (horizontal: x from
 /// [pos]; vertical: y from [pos], upward), each a filled, bordered cell
 /// with its label — the full one where it fits, else the short one, else
-/// every [labelEvery]-th label (RI 1, RI 3, …).
+/// every [labelEvery]-th label (RI 1, RI 3, …). With [visible] (days,
+/// from–to) only the cells meeting it are drawn — a pan frame lays out the
+/// labels on screen, not the whole axis; the every-k labelling still
+/// counts from the first cell, so it holds still while panning.
 void gfwPaintBand(
   Canvas c,
   Rect band,
@@ -822,21 +831,27 @@ void gfwPaintBand(
   required Color border,
   required Color text,
   bool rotate = false,
+  (double, double)? visible,
 }) {
   final b = Paint()
     ..color = border
     ..style = PaintingStyle.stroke
     ..strokeWidth = 0.8;
   final f = Paint()..color = fill;
-  var widest = 0.0;
-  for (final cell in cells) {
-    widest = math.max(widest, _textWidth(cell.short.isEmpty ? cell.label : cell.short));
-  }
+  final widest = _widestShort[cells] ??= cells.fold<double>(
+    0,
+    (w, cell) =>
+        math.max(w, _textWidth(cell.short.isEmpty ? cell.label : cell.short)),
+  );
   double along(CalCell cell) => (pos(cell.to) - pos(cell.from)).abs();
   final typical = cells.isEmpty ? 0.0 : cells.map(along).reduce(math.max);
   final labelLen = vertical && !rotate ? 13.0 : widest;
   final every = labelEvery(labelLen, typical);
   for (final (i, cell) in cells.indexed) {
+    if (visible != null &&
+        (cell.to < visible.$1 || cell.from > visible.$2)) {
+      continue;
+    }
     final a = pos(cell.from), z = pos(cell.to);
     final r = vertical
         ? Rect.fromLTRB(band.left, math.min(a, z), band.right, math.max(a, z))
@@ -856,6 +871,9 @@ void gfwPaintBand(
         align: TextAlign.center, vertical: vertical && rotate, maxWidth: 200);
   }
 }
+
+/// Per cell list (a time axis' memoized weeks): its widest short label.
+final _widestShort = Expando<double>();
 
 // ---------------------------------------------------------------------------
 // The milestone trend analysis
@@ -1047,9 +1065,17 @@ class GfwTimeAxisPainter extends CustomPainter {
     for (var d = dayFloor(v0); d <= v1; d++) {
       c.drawLine(Offset(px(d), plot.top), Offset(px(d), plot.bottom), grid);
     }
-    // the two header rows below the plot: day labels, reporting intervals
+    // the two header rows below the plot: day labels, reporting intervals —
+    // the visible span's only (a label's cell from just left of it on, on
+    // the axis' own every-k grid from its first day)
     final every = labelEvery(_textWidth('00.00'), g.pxPerDay);
-    final days = dayCells(g.start, g.end, every);
+    final first = dayFloor(g.start);
+    final k = math.max(0, ((v0 - first) / every).floor() - 1);
+    final days = dayCells(
+      first + k * every,
+      math.min(g.end, v1 + every),
+      every,
+    );
     final fill = _pal(m.gfw?.headerFill) == null || m.gfw?.headerFill == 2
         ? scheme.surfaceContainerHighest
         : Color.alphaBlend(_pal(m.gfw!.headerFill)!.withValues(alpha: 0.28), scheme.surface);
@@ -1059,8 +1085,9 @@ class GfwTimeAxisPainter extends CustomPainter {
     }
     gfwPaintBand(c, Rect.fromLTRB(plot.left, plot.bottom + dayRow + 2, plot.right,
             plot.bottom + dayRow + riRow + 2),
-        weekCells(g.start, g.end), px,
-        vertical: false, fill: fill, border: scheme.outline, text: text);
+        _weeks[m] ??= weekCells(g.start, g.end), px,
+        vertical: false, fill: fill, border: scheme.outline, text: text,
+        visible: (v0 - 1, v1 + 1));
     // the series: thin dashed lines (style 34), square markers; a point
     // whose bundle switches its line off breaks the line into it
     c.clipRect(plot.inflate(5));
@@ -1095,6 +1122,10 @@ class GfwTimeAxisPainter extends CustomPainter {
       ..color = axis
       ..style = PaintingStyle.stroke);
   }
+
+  /// Per model: the axis' week cells (the range is the model's alone — a
+  /// pan frame reuses them and their measured labels).
+  static final _weeks = Expando<List<CalCell>>();
 
   @override
   bool shouldRepaint(GfwTimeAxisPainter o) =>

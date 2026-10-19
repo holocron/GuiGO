@@ -254,6 +254,9 @@ const int _infoWidth = 4;
 const int _infoStyle = 6;
 const int _infoColId = 17;
 
+/// The most rows one [SapGridAssembler.markRowsCovered] call marks.
+const int maxCoveredSpan = 1 << 16;
+
 /// ALV's MC_STYLE_HOTSPOT bit of the InfoTable style field (see
 /// [SapGridModel.hotspotColumns]).
 const int gridStyleHotspot = 0x00200000;
@@ -396,9 +399,15 @@ class SapGridAssembler {
   set firstVisibleRow(int v) {
     _firstVisibleRow = v;
     _version++;
+    _scrollBumps++;
   }
 
   int _firstVisibleRow = 1;
+
+  /// The [_version] bumps a scroll alone made: a build whose version moved
+  /// by these only reuses the derived maps of the last one (audit
+  /// 2026-10-17 N4).
+  int _scrollBumps = 0;
 
   bool get hasCatalog => _names.isNotEmpty;
 
@@ -435,8 +444,12 @@ class SapGridAssembler {
 
   /// Rows [first]..[last] (1-based) arrived whole in a DATAREQUEST reply
   /// whose line span covered them — a cell the provider omitted is ''.
+  /// At most [maxCoveredSpan] rows from [first] are marked: the span is
+  /// the request's, which a wire count drove to ~10^9 rows (audit
+  /// 2026-10-17 P0-8).
   void markRowsCovered(int first, int last) {
     _version++;
+    if (last - first >= maxCoveredSpan) last = first + maxCoveredSpan - 1;
     for (var r = first; r <= last; r++) {
       // a row only changes if it was not covered yet and holds cells
       if (_covered.add(r) && _cells.containsKey(r)) _dirtyRows.add(r);
@@ -677,30 +690,36 @@ class SapGridAssembler {
     if (total == null && cc != null && n > 0 && cc % (n + 1) == 0) {
       total = cc ~/ (n + 1);
     }
+    final key = _version - _scrollBumps;
+    final prev = _built;
+    final d = prev != null && _derivedKey == key && _sameHandles(prev.handles, handles)
+        ? prev
+        : null;
+    _derivedKey = key;
     return SapGridModel(
       shell: shell,
-      columns: List.of(_names),
-      titles: List.of(_titles),
-      widths: _widths.length == n ? List.of(_widths) : [],
+      columns: d?.columns ?? List.of(_names),
+      titles: d?.titles ?? List.of(_titles),
+      widths: d?.widths ?? (_widths.length == n ? List.of(_widths) : []),
       rows: rows,
       totalRows: total,
-      columnIds: List.of(_colIds),
+      columnIds: d?.columnIds ?? List.of(_colIds),
       rowIds: rowIds,
-      handles: Map.of(handles),
+      handles: d?.handles ?? Map.of(handles),
       loadedRows: loaded,
       loadedRowIds: loadedIds,
       firstVisibleRow: firstVisibleRow,
       lineCount: _cellCount,
       optPacket: optPacket,
-      modifiedCells: {
+      modifiedCells: d?.modifiedCells ?? {
         for (final e in pendingEdits.entries)
           e.key: {
             for (final c in e.value.entries)
               if (c.key >= 1 && c.key <= n) _names[c.key - 1]: c.value,
           },
       },
-      hotspotColumns: Set.of(_hotspots),
-      hotspotCells: {
+      hotspotColumns: d?.hotspotColumns ?? Set.of(_hotspots),
+      hotspotCells: d?.hotspotCells ?? {
         for (final e in _hotspotCells.entries)
           if (e.value.any((c) => c >= 1 && c <= n))
             e.key: {
@@ -708,7 +727,7 @@ class SapGridAssembler {
                 if (c >= 1 && c <= n) _names[c - 1],
             },
       },
-      checkboxCells: {
+      checkboxCells: d?.checkboxCells ?? {
         for (final e in _checkboxCells.entries)
           if (e.value.isNotEmpty)
             e.key: {
@@ -718,9 +737,11 @@ class SapGridAssembler {
       },
       selectionMode: selectionMode,
       toolbar: _toolbar,
-      toolbarMenus: Map.unmodifiable(_toolbarMenus),
+      toolbarMenus: d?.toolbarMenus ?? Map.unmodifiable(_toolbarMenus),
     );
   }
+
+  int _derivedKey = -1;
 }
 
 /// Fold every grid push of one complete OLE_FLUSH_CALL RFC value into

@@ -14,9 +14,13 @@ class TransportLimits {
     this.parkedFramesPerWindow = 256,
     this.parkedBytes = 64 << 20,
     this.treeDecodedBytes = 64 << 20,
+    this.dpCacheEntries = dpCacheMaxEntries,
+    this.dpCacheBytes = 12 << 20,
     this.watchdogPeriod = const Duration(seconds: 15),
     this.silentPingIntervals = 3,
     this.minPingInterval = const Duration(seconds: 10),
+    this.minSilence = const Duration(minutes: 5),
+    this.silenceRecheck = const Duration(seconds: 2),
   });
 
   /// NI payloads / bytes one receive turn may read before it ends — a peer
@@ -40,6 +44,17 @@ class TransportLimits {
   /// past it is refused (counted as an ingest failure), the tree kept.
   final int treeDecodedBytes;
 
+  /// A window's DataProvider push cache caps ([EaSession.dpCache]): the
+  /// entries unpinned pushes are held under, and the bytes every push is —
+  /// its wire segment plus the decoded memos its readers pinned on it
+  /// ([DpCache.decodedBytes]). The phone figure, per window (six open
+  /// windows worst-case ~72 MB) — the package's own 32 MB default counted
+  /// the segments alone. A push a reader finds evicted falls back to its
+  /// call's own one-call cache. Read when a window is born: the logon's
+  /// first window takes the defaults.
+  final int dpCacheEntries;
+  final int dpCacheBytes;
+
   /// How often the idle watchdog looks, and how many of the server's own
   /// NI_PING intervals of silence declare the connection lost. The
   /// interval is LEARNED from the pings the server sends (the real GUI
@@ -47,10 +62,23 @@ class TransportLimits {
   /// SAProuter / dispatcher pings an idle GUI every 200 s on
   /// a recorded session) — a server that never pinged is never declared
   /// silent. A ping arriving sooner than [minPingInterval] after other
-  /// traffic says nothing about the idle cadence and is not learned.
+  /// traffic says nothing about the idle cadence and is not learned; nor
+  /// is one idle gap alone — two consecutive pings must agree (an
+  /// unsolicited push shortly before a ping measured a "cadence" of
+  /// seconds, and a ping read on resume after a suspension one of hours:
+  /// audit 2026-10-17 R1).
   final Duration watchdogPeriod;
   final int silentPingIntervals;
   final Duration minPingInterval;
+
+  /// The least silence that declares the connection lost, whatever the
+  /// learned cadence says.
+  final Duration minSilence;
+
+  /// How long a watchdog trip waits before it condemns the connection:
+  /// a tick overdue after the app was suspended runs before the socket
+  /// delivers what queued meanwhile (audit 2026-10-17 R6).
+  final Duration silenceRecheck;
 }
 
 /// The connection went silent past what the server's own NI_PING cadence
@@ -71,19 +99,24 @@ extension SapSessionLiveness on SapSession {
   /// closed by the peer, and not silent past the server's own ping cadence
   /// (a silent one is dropped now: [closed] fires). [grace] first lets the
   /// socket deliver what queued while the app was suspended (the pings a
-  /// backgrounded app could not read) — the probe sends NOTHING (the real
-  /// GUI never pings the server).
+  /// backgrounded app could not read, the FIN / reset of a logon the
+  /// server ended) — the probe sends NOTHING (the real GUI never pings the
+  /// server). The grace is honoured whether or not a cadence was learned:
+  /// a close queued during the suspension reaches the socket listener only
+  /// through the event loop, never a synchronous look at the state — a
+  /// probe answering alive at once on a server that never pinged showed
+  /// the stale screen for a flicker before the close flipped it.
   /// A server that has not pinged yet gives no cadence to judge silence
-  /// by: the probe then only reads the state (and waits no [grace]).
+  /// by: after the grace the probe then only reads the state.
   Future<bool> probeLiveness({
     Duration grace = const Duration(milliseconds: 500),
   }) async {
     bool dead() =>
         state != SessionState.ready || closedByPeer || _sockError != null;
     if (dead()) return false;
-    if (_pingGap == null) return true;
     if (grace > Duration.zero) await Future<void>.delayed(grace);
     if (dead()) return false;
+    if (_pingGap == null) return true;
     if (_silentTooLong()) {
       _abortTransport(ConnectionLostError(_silenceMessage()));
       return false;
@@ -157,16 +190,30 @@ extension SapSessionLiveness on SapSession {
     if (_inboxBytes < 0 || _inbox.isEmpty) _inboxBytes = 0;
   }
 
-  /// A server NI_PING arrived [idle] after the previous wire traffic.
+  /// A server NI_PING arrived [idle] after the previous wire traffic: the
+  /// cadence is learned (or re-learned) when it agrees with the previous
+  /// idle ping's gap within a quarter, the longer of the two kept.
   void _notePing(Duration? idle) {
     if (idle == null || idle < limits.minPingInterval) return;
-    _pingGap = idle;
+    final prev = _pingSample;
+    _pingSample = idle;
+    if (prev == null) return;
+    final (lo, hi) = prev < idle ? (prev, idle) : (idle, prev);
+    if (lo * 4 >= hi * 3) _pingGap = hi;
+  }
+
+  /// The silence past which the connection is lost (null: no cadence).
+  Duration? get _silenceLimit {
+    final gap = _pingGap;
+    if (gap == null) return null;
+    final n = gap * limits.silentPingIntervals;
+    return n < limits.minSilence ? limits.minSilence : n;
   }
 
   bool _silentTooLong() {
-    final gap = _pingGap, last = _lastWire;
-    if (gap == null || last == null) return false;
-    return DateTime.now().difference(last) > gap * limits.silentPingIntervals;
+    final limit = _silenceLimit, last = _lastWire;
+    if (limit == null || last == null) return false;
+    return DateTime.now().difference(last) > limit;
   }
 
   String _silenceMessage() {
@@ -183,11 +230,16 @@ extension SapSessionLiveness on SapSession {
     _stopWatchdog();
     if (offlineReplay) return;
     _watchdog = Timer.periodic(limits.watchdogPeriod, (_) {
-      // an action's own receive deadline covers a running one
+      // a running action checks silence in its own wait (sap_session.dart)
       if (state != SessionState.ready || busy || _sock == null) return;
-      if (_silentTooLong()) {
-        _abortTransport(ConnectionLostError(_silenceMessage()));
-      }
+      if (!_silentTooLong()) return;
+      // condemned only if still silent once the socket had its turn
+      Timer(limits.silenceRecheck, () {
+        if (state != SessionState.ready || busy || _sock == null) return;
+        if (_silentTooLong()) {
+          _abortTransport(ConnectionLostError(_silenceMessage()));
+        }
+      });
     });
   }
 

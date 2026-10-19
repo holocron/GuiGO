@@ -85,7 +85,9 @@ class _OfficeWindowsPageState extends State<OfficeWindowsPage> {
       body: current == null
           ? const Center(child: Text('No Office window is open.'))
           : SapOfficeView(
-              key: ValueKey('office-window-${current.shell}-$_index'),
+              // by shell alone: a tab closed or shifted keeps the view (and
+              // its parsed document) of the window still shown
+              key: ValueKey('office-window-${current.shell}'),
               document: current,
             ),
     );

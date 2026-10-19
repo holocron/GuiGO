@@ -1,12 +1,17 @@
 import 'package:diag_protocol/diag_protocol.dart'
     show defaultLogonLanguage, defaultSapPort;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../core/connections.dart';
-import '../../core/input_history.dart';
+import '../../core/input_history_menu.dart';
 import '../../core/password_dialog.dart';
 import '../session/session_screen.dart';
 import '../session/type_ahead.dart';
+
+/// The widest a system card gets: on a tablet or a desktop window the list
+/// stays a readable column (the M3 modal sheet caps itself at 640).
+const double _maxContentWidth = 600;
 
 class ConnectionListScreen extends StatefulWidget {
   const ConnectionListScreen({super.key});
@@ -44,6 +49,10 @@ class _ConnectionListScreenState extends State<ConnectionListScreen> {
     final saved = await showModalBottomSheet<ConnectionEntry>(
       context: context,
       isScrollControlled: true,
+      // the form can be taller than the screen minus the keyboard: the
+      // sheet then starts below the status bar / notch, not under it
+      useSafeArea: true,
+      showDragHandle: true,
       builder: (_) => Padding(
         padding: EdgeInsets.only(
           bottom: MediaQuery.of(context).viewInsets.bottom,
@@ -57,7 +66,17 @@ class _ConnectionListScreenState extends State<ConnectionListScreen> {
     if (!saved.storePassword) {
       await store.deletePassword(saved.id);
     } else if (!await store.hasPassword(saved.id)) {
-      final pw = await _askPassword();
+      final pw = await _askPassword(
+        title: saved.user.isEmpty
+            ? 'Password for ${saved.label}'
+            : 'Password for ${saved.user} on ${saved.label}',
+        // the value is stored unverified; the logon path stores one only
+        // once SAP accepted it, which is what skipping here leads to
+        note:
+            'Not checked until you log on. "Ask at logon" asks then and '
+            'stores the password once SAP accepts it.',
+        cancelLabel: 'Ask at logon',
+      );
       if (pw != null && pw.isNotEmpty) {
         await store.savePassword(saved.id, pw);
       }
@@ -77,13 +96,12 @@ class _ConnectionListScreenState extends State<ConnectionListScreen> {
   Future<void> _delete(ConnectionEntry e) async {
     final store = _store;
     if (store == null) return;
-    final label = e.name.isEmpty ? '${e.host}:${e.port}' : e.name;
     final ok = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
         title: const Text('Delete system?'),
         content: Text(
-          'Delete "$label"? Its stored password is deleted too.',
+          'Delete "${e.label}"? Its stored password is deleted too.',
         ),
         actions: [
           TextButton(
@@ -108,13 +126,36 @@ class _ConnectionListScreenState extends State<ConnectionListScreen> {
     setState(() => _entries = entries);
   }
 
-  Future<String?> _askPassword() {
+  /// Replace the stored password of [e] (after a password change in SAP)
+  /// without the toggle-off-Save-toggle-on-Save detour. Not verified
+  /// here: a mistyped value is corrected at the next logon, where SAP's
+  /// refusal re-asks and the accepted password overwrites the stored one.
+  Future<void> _changePassword(ConnectionEntry e) async {
+    final store = _store;
+    if (store == null) return;
+    final pw = await _askPassword(
+      title: 'Change stored password',
+      cancelLabel: 'Cancel',
+    );
+    if (pw == null || pw.isEmpty || !mounted) return;
+    await store.savePassword(e.id, pw);
+    if (!mounted) return;
+    // a secure-store write is otherwise invisible
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('Stored password changed')));
+  }
+
+  Future<String?> _askPassword({
+    required String title,
+    String? note,
+    String cancelLabel = 'Cancel',
+  }) {
     return showDialog<String>(
       context: context,
-      builder: (c) => const PasswordDialog(
-        title: 'Password',
-        label: 'Password (stored securely)',
-        cancelLabel: 'Skip',
+      builder: (c) => PasswordDialog(
+        title: title,
+        note: note,
+        cancelLabel: cancelLabel,
         okLabel: 'Save',
       ),
     );
@@ -160,38 +201,60 @@ class _ConnectionListScreenState extends State<ConnectionListScreen> {
               itemCount: _entries.length,
               itemBuilder: (c, i) {
                 final e = _entries[i];
-                return Card(
-                  margin: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 6,
-                  ),
-                  child: ListTile(
-                    leading: const CircleAvatar(child: Icon(Icons.storage)),
-                    title: Text(
-                      e.name.isEmpty ? '${e.host}:${e.port}' : e.name,
+                // the list stays full width (it scrolls from anywhere),
+                // each card is capped and centred
+                return Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(
+                      maxWidth: _maxContentWidth,
                     ),
-                    subtitle: Text(
-                      '${e.host}:${e.port} · client ${e.client} · ${e.user} · ${e.language}',
-                    ),
-                    trailing: PopupMenuButton<String>(
-                      onSelected: (v) async {
-                        if (v == 'edit') return _edit(e);
-                        if (v == 'clone') return _edit(e, true);
-                        if (v == 'delete') return _delete(e);
-                      },
-                      itemBuilder: (c) => const [
-                        PopupMenuItem(value: 'edit', child: Text('Edit')),
-                        PopupMenuItem(
-                          value: 'clone',
-                          child: Text('Clone for another user'),
+                    child: Card(
+                      margin: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
+                      child: ListTile(
+                        leading: const CircleAvatar(child: Icon(Icons.storage)),
+                        title: Text(e.label),
+                        subtitle: Text(
+                          '${e.host}:${e.port} · client ${e.client} · ${e.user} · ${e.language}',
                         ),
-                        PopupMenuItem(value: 'delete', child: Text('Delete')),
-                      ],
-                    ),
-                    onTap: () => Navigator.pushNamed(
-                      context,
-                      '/session',
-                      arguments: SessionArgs(e, _store!),
+                        trailing: PopupMenuButton<String>(
+                          key: ValueKey('system-menu-${e.id}'),
+                          onSelected: (v) async {
+                            if (v == 'edit') return _edit(e);
+                            if (v == 'clone') return _edit(e, true);
+                            if (v == 'password') return _changePassword(e);
+                            if (v == 'delete') return _delete(e);
+                          },
+                          itemBuilder: (c) => [
+                            const PopupMenuItem(
+                              value: 'edit',
+                              child: Text('Edit'),
+                            ),
+                            const PopupMenuItem(
+                              value: 'clone',
+                              child: Text('Clone for another user'),
+                            ),
+                            // greyed with storage off: flipping the switch
+                            // on and saving asks for the password anyway
+                            PopupMenuItem(
+                              value: 'password',
+                              enabled: e.storePassword,
+                              child: const Text('Change stored password…'),
+                            ),
+                            const PopupMenuItem(
+                              value: 'delete',
+                              child: Text('Delete'),
+                            ),
+                          ],
+                        ),
+                        onTap: () => Navigator.pushNamed(
+                          context,
+                          '/session',
+                          arguments: SessionArgs(e, _store!),
+                        ),
+                      ),
                     ),
                   ),
                 );
@@ -215,6 +278,7 @@ class _ConnectionForm extends StatefulWidget {
 }
 
 class _ConnectionFormState extends State<_ConnectionForm> {
+  final _formKey = GlobalKey<FormState>();
   final _name = TextEditingController();
   final _host = TextEditingController();
   final _port = TextEditingController();
@@ -224,7 +288,6 @@ class _ConnectionFormState extends State<_ConnectionForm> {
   final _router = TextEditingController();
   bool _storePw = true;
   bool _keepOthers = false;
-  String? _portError;
 
   @override
   void initState() {
@@ -249,12 +312,13 @@ class _ConnectionFormState extends State<_ConnectionForm> {
     super.dispose();
   }
 
+  /// Refuses with the fields' own errors and keeps the sheet open: nothing
+  /// below checks these again — an empty host only fails at the socket,
+  /// an empty user or a 2-digit client is sent to SAP and comes back as a
+  /// logon refusal inside the password prompt, where nothing typed can
+  /// fix it (and every round trip costs a biometric prompt).
   void _save() {
-    final port = parsePort(_port.text);
-    if (port == null) {
-      setState(() => _portError = 'A port number from 1 to 65535');
-      return;
-    }
+    if (!_formKey.currentState!.validate()) return;
     Navigator.pop(
       context,
       ConnectionEntry(
@@ -263,7 +327,7 @@ class _ConnectionFormState extends State<_ConnectionForm> {
             DateTime.now().microsecondsSinceEpoch.toRadixString(36),
         name: _name.text.trim(),
         host: _host.text.trim(),
-        port: port,
+        port: parsePort(_port.text)!,
         routerString: _router.text.trim(),
         client: _client.text.trim(),
         user: _user.text.trim().toUpperCase(),
@@ -276,106 +340,185 @@ class _ConnectionFormState extends State<_ConnectionForm> {
 
   @override
   Widget build(BuildContext context) {
+    // every field validates on Save, and again as it is typed into once it
+    // was refused; Next walks Name → Host → Port → Client → Language →
+    // User → Router (reading order), Done on the last one saves
+    const next = TextInputAction.next;
+    const refused = AutovalidateMode.onUserInteraction;
     // scrolls when the sheet is shorter than the form (landscape phone,
     // keyboard up)
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(
-            widget.existing == null
-                ? 'Add system'
-                : widget.clone
-                ? 'Clone system'
-                : 'Edit system',
-            style: Theme.of(context).textTheme.titleLarge,
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _name,
-            decoration: const InputDecoration(labelText: 'Name'),
-          ),
-          const SizedBox(height: 8),
-          TextField(
-            controller: _host,
-            decoration: const InputDecoration(
-              labelText: 'Application server host',
+    return Form(
+      key: _formKey,
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              widget.existing == null
+                  ? 'Add system'
+                  : widget.clone
+                  ? 'Clone system'
+                  : 'Edit system',
+              style: Theme.of(context).textTheme.titleLarge,
             ),
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  key: const ValueKey('connection-port'),
-                  controller: _port,
-                  keyboardType: TextInputType.number,
-                  onChanged: (_) {
-                    if (_portError != null) setState(() => _portError = null);
-                  },
-                  decoration: InputDecoration(
-                    labelText: 'Port',
-                    errorText: _portError,
+            const SizedBox(height: 12),
+            TextFormField(
+              key: const ValueKey('connection-name'),
+              controller: _name,
+              // a new system: the keyboard is up at once; an edit starts
+              // with nothing focused
+              autofocus: widget.existing == null,
+              textCapitalization: TextCapitalization.words,
+              textInputAction: next,
+              decoration: const InputDecoration(labelText: 'Name'),
+            ),
+            const SizedBox(height: 8),
+            TextFormField(
+              key: const ValueKey('connection-host'),
+              controller: _host,
+              // a host name is not a word: no autocorrect, no suggestions
+              keyboardType: TextInputType.url,
+              autocorrect: false,
+              enableSuggestions: false,
+              textInputAction: next,
+              autovalidateMode: refused,
+              validator: (v) => hostError(v ?? ''),
+              decoration: const InputDecoration(
+                labelText: 'Application server host',
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              // a field showing its error grows; the others stay aligned
+              // to the top
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    key: const ValueKey('connection-port'),
+                    controller: _port,
+                    // iPhone's number pad has no Return key: Next is only
+                    // reachable there from the text fields
+                    keyboardType: TextInputType.number,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    textInputAction: next,
+                    autovalidateMode: refused,
+                    validator: (v) => parsePort(v ?? '') == null
+                        ? 'A port number from 1 to 65535'
+                        : null,
+                    decoration: const InputDecoration(
+                      labelText: 'Port',
+                      errorMaxLines: 4,
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: TextField(
-                  controller: _client,
-                  decoration: const InputDecoration(labelText: 'Client'),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: TextFormField(
+                    key: const ValueKey('connection-client'),
+                    controller: _client,
+                    keyboardType: TextInputType.number,
+                    // MANDT is CLNT 3
+                    inputFormatters: [
+                      FilteringTextInputFormatter.digitsOnly,
+                      LengthLimitingTextInputFormatter(3),
+                    ],
+                    textInputAction: next,
+                    autovalidateMode: refused,
+                    validator: (v) => clientError(v ?? ''),
+                    decoration: const InputDecoration(
+                      labelText: 'Client',
+                      errorMaxLines: 4,
+                    ),
+                  ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: TextField(
-                  controller: _lang,
-                  decoration: const InputDecoration(labelText: 'Language'),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: TextFormField(
+                    key: const ValueKey('connection-language'),
+                    controller: _lang,
+                    // RSYST-LANGU is 2 characters: an ISO code or a SAP
+                    // one-letter key
+                    inputFormatters: [LengthLimitingTextInputFormatter(2)],
+                    textCapitalization: TextCapitalization.characters,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    textInputAction: next,
+                    autovalidateMode: refused,
+                    validator: (v) => languageError(v ?? ''),
+                    decoration: const InputDecoration(
+                      labelText: 'Language',
+                      errorMaxLines: 4,
+                    ),
+                  ),
                 ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            TextFormField(
+              key: const ValueKey('connection-user'),
+              controller: _user,
+              // RSYST-BNAME is 12 characters; the capitalization is a soft
+              // keyboard hint only, _save uppercases regardless
+              inputFormatters: [LengthLimitingTextInputFormatter(12)],
+              textCapitalization: TextCapitalization.characters,
+              autocorrect: false,
+              enableSuggestions: false,
+              textInputAction: next,
+              autovalidateMode: refused,
+              validator: (v) => userError(v ?? ''),
+              decoration: const InputDecoration(labelText: 'User'),
+            ),
+            const SizedBox(height: 8),
+            TextFormField(
+              key: const ValueKey('connection-router'),
+              controller: _router,
+              keyboardType: TextInputType.url,
+              autocorrect: false,
+              enableSuggestions: false,
+              textInputAction: TextInputAction.done,
+              onFieldSubmitted: (_) => _save(),
+              // SAP GUI's SAProuter string: the router hops only — the
+              // session appends the application server as the last hop
+              // itself, a string that already ends in it sends the
+              // dispatcher a route it cannot serve
+              decoration: const InputDecoration(
+                labelText: 'SAProuter string (optional)',
+                hintText: '/H/saprouter.example.com/S/3299',
+                helperText:
+                    'Router hops only; the application server above is '
+                    'appended automatically',
+                helperMaxLines: 2,
               ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          TextField(
-            controller: _user,
-            decoration: const InputDecoration(labelText: 'User'),
-          ),
-          const SizedBox(height: 8),
-          TextField(
-            controller: _router,
-            decoration: const InputDecoration(
-              labelText: 'SAProuter string (optional)',
-              hintText: '/H/router/S/3299/H/host/S/3200',
             ),
-          ),
-          SwitchListTile(
-            value: _storePw,
-            onChanged: (v) => setState(() => _storePw = v),
-            title: const Text('Store password'),
-            subtitle: const Text(
-              'Released after Face ID / Touch ID / fingerprint. On a device '
-              'without biometrics it is used directly, protected only by '
-              'the secure store',
+            SwitchListTile(
+              value: _storePw,
+              onChanged: (v) => setState(() => _storePw = v),
+              title: const Text('Store password'),
+              subtitle: const Text(
+                'Released after Face ID / Touch ID / fingerprint. On a device '
+                'without biometrics it is used directly, protected only by '
+                'the secure store',
+              ),
+              dense: true,
             ),
-            dense: true,
-          ),
-          SwitchListTile(
-            value: _keepOthers,
-            onChanged: (v) => setState(() => _keepOthers = v),
-            title: const Text(
-              'Already logged on: continue without ending the other sessions',
+            SwitchListTile(
+              value: _keepOthers,
+              onChanged: (v) => setState(() => _keepOthers = v),
+              title: const Text(
+                'Already logged on: continue without ending the other sessions',
+              ),
+              subtitle: const Text(
+                'Off (SAP default): ask, preselected to not log on',
+              ),
+              dense: true,
             ),
-            subtitle: const Text('Off (SAP default): ask, preselected to not log on'),
-            dense: true,
-          ),
-          const SizedBox(height: 8),
-          FilledButton(
-            onPressed: _save,
-            child: const Text('Save'),
-          ),
-        ],
+            const SizedBox(height: 8),
+            FilledButton(onPressed: _save, child: const Text('Save')),
+          ],
+        ),
       ),
     );
   }
@@ -388,45 +531,32 @@ int? parsePort(String text) {
   return (p == null || p < 1 || p > 65535) ? null : p;
 }
 
-/// SAP GUI's "Local Data > History" options for every connection: input
-/// history On / Off (on by default) and "Clear History" (all systems).
-class InputHistoryMenu extends StatelessWidget {
-  const InputHistoryMenu({super.key, required this.history});
+// The editor's other checks, null = accepted. They live in the form, not
+// in ConnectionEntry / SapSystem: an empty user becomes legitimate once
+// SNC single sign-on is wired from the UI.
 
-  final InputHistoryStore history;
-
-  @override
-  Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: history,
-      builder: (context, _) => PopupMenuButton<String>(
-        tooltip: 'Input history',
-        icon: const Icon(Icons.history),
-        onSelected: (v) async {
-          if (v == 'toggle') {
-            await history.setEnabled(!history.enabled);
-          } else if (v == 'clear') {
-            await history.clear();
-            if (context.mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Input history cleared')),
-              );
-            }
-          }
-        },
-        itemBuilder: (context) => [
-          CheckedPopupMenuItem(
-            value: 'toggle',
-            checked: history.enabled,
-            child: const Text('Input history'),
-          ),
-          PopupMenuItem(
-            value: 'clear',
-            enabled: !history.isEmpty,
-            child: const Text('Clear input history'),
-          ),
-        ],
-      ),
-    );
-  }
+/// Non-empty, no blanks — needed even with a SAProuter string, which holds
+/// the router hops only (the session appends this host as the last hop).
+String? hostError(String text) {
+  final t = text.trim();
+  if (t.isEmpty) return 'Enter the application server host';
+  if (RegExp(r'\s').hasMatch(t)) return 'A host name or address, no spaces';
+  return null;
 }
+
+/// MANDT is CLNT 3: exactly three digits (the editor prefills 100).
+String? clientError(String text) => RegExp(r'^\d{3}$').hasMatch(text.trim())
+    ? null
+    : 'A client of 3 digits (100)';
+
+/// Sent as RSYST-BNAME: SAP refuses an empty one on the logon screen.
+String? userError(String text) => text.trim().isEmpty ? 'Enter the user' : null;
+
+/// RSYST-LANGU is a 2-character plane: empty (the user's default language,
+/// the atom is then left out), a 2-letter ISO code or a 1-character SAP
+/// language key. The keys are not limited to the ones `connectLanguage`
+/// maps — a system may define more (M, 2, Y, Z …).
+String? languageError(String text) =>
+    RegExp(r'^([A-Z0-9]|[A-Z]{2})?$').hasMatch(text.trim().toUpperCase())
+    ? null
+    : 'Empty, a 2-letter ISO code (EN) or an SAP language key (E)';

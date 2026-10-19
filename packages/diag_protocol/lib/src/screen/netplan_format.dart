@@ -152,6 +152,11 @@ class NetPlanSplit extends NetPlanCell {
       '(${children.join(across ? (ruled ? '//' : '/') : (ruled ? '--' : '-'))})';
 }
 
+// Hoisted: the field-name test ran per CHARACTER of a layout expression,
+// compiling a RegExp each time (audit 2026-10-17 N1).
+final RegExp _fieldCharRx = RegExp(r'[A-Za-z0-9_]');
+final RegExp _blankRunRx = RegExp(r'\s+');
+
 /// The layout expression [text] (`[$a--$b--($c//$d)]`) as cells; null
 /// when it holds no field.
 NetPlanCell? parseNetPlanLayout(String text) {
@@ -163,7 +168,7 @@ NetPlanCell? parseNetPlanLayout(String text) {
     final c = s[i];
     if (c == r'$' || c == '@') {
       var j = i + 1;
-      while (j < s.length && RegExp(r'[A-Za-z0-9_]').hasMatch(s[j])) {
+      while (j < s.length && _fieldCharRx.hasMatch(s[j])) {
         j++;
       }
       toks.add(s.substring(i, j));
@@ -423,7 +428,7 @@ class NetPlanDecor {
     final opts = s[r'/$OPTS'];
     if (opts != null) {
       for (final o in opts) {
-        final p = o.trim().split(RegExp(r'\s+'));
+        final p = o.trim().split(_blankRunRx);
         if (p.length >= 2 && p[0] == 'SET') {
           options[p[1]] = p.length > 2 ? p.sublist(2).join(' ') : '';
         }

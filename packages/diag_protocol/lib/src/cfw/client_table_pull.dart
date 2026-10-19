@@ -20,8 +20,8 @@ import 'dart:typed_data';
 import '../lzh/lzh.dart';
 import 'dp_cache.dart' show dpColumnCells;
 import 'flush_call.dart';
-import 'reply_container.dart' show buildDpAnswer;
-import 'rfc_cells.dart' show wrap0305Cell;
+import 'reply_container.dart' show buildDpAnswer, rfcToken;
+import 'rfc_cells.dart' show cellTableClose, wrap0305Cell;
 import 'tree_header_names.dart' show collapseInlineRow;
 
 /// One control-property read-back sink: the data object a SaveDataToUrl
@@ -193,10 +193,18 @@ List<Uint8List> pushedTableFormatRows(Uint8List seg) {
 
 /// The declared DATAASC record width of a pull request (its `03 02`
 /// geometry; 1024 on the F1 help-table pull), 0 without one.
-int clientTablePullRowWidth(Uint8List v) {
-  final i = _indexOf(v, [0x03, 0x01, 0x00, 0x07, ...'DATAASC'.codeUnits]);
+int clientTablePullRowWidth(Uint8List v) => clientTablePullTableWidth(v);
+
+/// The declared record width of table [name] of a pull request (its `03 02`
+/// geometry after the `03 01 <name> 03 01` token): DATAASC 1024 on the F1
+/// help-table pull, DATAASC 765 on the TextEdit's X-R3ABAP read-back
+/// (a recorded session srv[32]), DATABIN 120 on the ABAP
+/// editor's document pull (a recorded session srv[47]); 0 when the
+/// request declares no such table.
+int clientTablePullTableWidth(Uint8List v, [String name = 'DATAASC']) {
+  final i = _indexOf(v, [0x03, 0x01, 0x00, name.length, ...name.codeUnits]);
   if (i < 0) return 0;
-  final j = i + 4 + 7 + 2;
+  final j = i + 4 + name.length + 2;
   if (j + 12 > v.length || v[j] != 0x03 || v[j + 1] != 0x02) return 0;
   final w = ByteData.sublistView(v, j + 4, j + 12).getUint32(0);
   // a wire u32: a record wider than any decode could produce is hostile —
@@ -330,10 +338,10 @@ Uint8List htmlPostPullAnswer(
     ..setUint32(0, htmlPostRowWidth)
     ..setUint32(4, n);
   final table = BytesBuilder(copy: false)
-    ..add(_tok(0x03, 0x01, Uint8List.fromList('DATABIN'.codeUnits)))
-    ..add(_tok(0x03, 0x02, dims.buffer.asUint8List()))
+    ..add(rfcToken(0x03, 0x01, Uint8List.fromList('DATABIN'.codeUnits)))
+    ..add(rfcToken(0x03, 0x02, dims.buffer.asUint8List()))
     ..add(wrap0305Cell(lzhCompress(padded)))
-    ..add(const [0x03, 0x06, 0x00, 0x00, 0x03, 0x06])
+    ..add(cellTableClose)
     ..add(_htmlPostFormatProps);
   return buildDpAnswer(
     scalars: {
@@ -419,12 +427,15 @@ Uint8List htmlWindowsPostAnswer(Uint8List body, {DateTime? now}) {
   );
 }
 
+/// The width of a tree NODE_KEY (C(11)) in the node-key tables.
+const int nodeKeyWidth = 11;
+
 /// The `octet-stream` FORMAT record of the node-key table (one C(11)
 /// column, offset 0) — a recorded session gui[101].
 final Uint8List nodeKeyFormatRecord = Uint8List.fromList([
   ...'octet-stream'.codeUnits,
   ...List.filled(48, 0x20),
-  1, 0, 0, 0, 0, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0, 0x43, 0x20,
+  1, 0, 0, 0, 0, 0, 0, 0, nodeKeyWidth, 0, 0, 0, 0, 0, 0, 0, 0x43, 0x20,
 ]);
 
 /// The answer to a tree's node-key read-back (`ExpandedKeys`,
@@ -435,11 +446,11 @@ Uint8List nodeKeyTableAnswer(List<String> keys, {DateTime? now}) {
   if (keys.isEmpty) return clientTableAnswer(now: now);
   final rows = [
     for (final k in keys)
-      Uint8List.fromList([..._rjust(k.trim(), 11).codeUnits, 0x20]),
+      Uint8List.fromList([..._rjust(k.trim(), nodeKeyWidth).codeUnits, 0x20]),
   ];
   return clientTableAnswer(
     rows: rows,
-    totalSize: 11 * rows.length,
+    totalSize: nodeKeyWidth * rows.length,
     formatRecord: nodeKeyFormatRecord,
     now: now,
   );
@@ -469,14 +480,14 @@ List<String> nodeKeyTableKeys(Uint8List seg) {
     return [
       for (final c in cells)
         if (latin1.decode(c).trim() case final k when k.isNotEmpty)
-          _rjust(k, 11),
+          _rjust(k, nodeKeyWidth),
     ];
   }
   return [
     for (var r = 0; r < n && (r + 1) * w <= data.length; r++)
       if (latin1.decode(Uint8List.sublistView(data, r * w, (r + 1) * w))
           case final rec when rec.trim().isNotEmpty)
-        _rjust(rec.trim(), 11),
+        _rjust(rec.trim(), nodeKeyWidth),
   ];
 }
 
@@ -487,26 +498,16 @@ String _rjust(String s, int w) {
 
 Uint8List _column(String name, int width, List<Uint8List> rows) {
   final b = BytesBuilder(copy: false)
-    ..add(_tok(0x03, 0x01, Uint8List.fromList(name.codeUnits)));
+    ..add(rfcToken(0x03, 0x01, Uint8List.fromList(name.codeUnits)));
   final dims = ByteData(8)
     ..setUint32(0, width)
     ..setUint32(4, rows.length);
-  b.add(_tok(0x03, 0x02, dims.buffer.asUint8List()));
+  b.add(rfcToken(0x03, 0x02, dims.buffer.asUint8List()));
   for (final r in rows) {
-    b.add(_tok(0x03, 0x04, r));
+    b.add(rfcToken(0x03, 0x04, r));
   }
   return b.takeBytes();
 }
-
-Uint8List _tok(int a, int c, Uint8List data) => Uint8List.fromList([
-  a,
-  c,
-  (data.length >> 8) & 0xff,
-  data.length & 0xff,
-  ...data,
-  a,
-  c,
-]);
 
 int _indexOf(Uint8List hay, List<int> needle) {
   outer:

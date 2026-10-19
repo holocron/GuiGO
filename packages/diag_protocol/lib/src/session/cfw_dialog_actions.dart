@@ -198,7 +198,7 @@ List<Uint8List> cfwEventItems(
   stepItem(ctx.step),
   _ses(ctx),
   buildApplItem(6, 35, winCodepageValue),
-  buildApplItem(12, 4, wireText('%_GC $shell $eventId')),
+  buildApplItem(12, 4, wireText(cfwGenericEventOkcode(shell, eventId))),
   for (final (sid, value) in winIdentity) buildApplItem(4, sid, value),
   ..._tail(ctx),
   if (sourcePath != null) buildApplItem(15, 1, uiEventControlAt(sourcePath)),

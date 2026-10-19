@@ -304,7 +304,7 @@ List<Uint8List> gridEventItems(
     stepItem(ctx.step),
     windowsEventSes(ctx),
     buildApplItem(6, 35, winCodepageValue),
-    buildApplItem(12, 4, wireText('%_GC $shell $eventId')),
+    buildApplItem(12, 4, wireText(cfwGenericEventOkcode(shell, eventId))),
     for (final (sid, value) in winIdentity) buildApplItem(4, sid, value),
     buildApplItem(5, 1, Uint8List(22)..[1] = okMode ?? gridOkMode(ctx)),
     buildApplItem(
