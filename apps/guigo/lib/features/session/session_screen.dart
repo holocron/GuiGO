@@ -3696,8 +3696,13 @@ class _SessionScreenState extends State<SessionScreen>
                           // one strut line whatever the text: an empty
                           // line, or a fallback font's taller glyphs, keep
                           // the bar's height
+                          // — the theme's body style, the Material's own
+                          // default for the text (this State's context sits
+                          // above the Scaffold's Material: DefaultTextStyle
+                          // there is MaterialApp's 48 pt fallback, and the
+                          // line was 69 pt — live 2026-10-19)
                           strutStyle: StrutStyle.fromTextStyle(
-                            DefaultTextStyle.of(context).style,
+                            Theme.of(context).textTheme.bodyMedium!,
                             forceStrutHeight: true,
                           ),
                         ),

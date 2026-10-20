@@ -1,3 +1,4 @@
+import 'package:diag_protocol/diag_protocol.dart';
 import 'package:flutter/widgets.dart';
 
 import 'screen_composer.dart';
@@ -22,7 +23,15 @@ import 'screen_composer.dart';
 /// width; a dynpro never exceeds 255).
 /// * ROWS so the composer's cell (body width / cols, times the aspect)
 /// fills the body height: the server's resizable areas then end at the
-/// bottom of the body instead of a fixed share of it.
+/// bottom of the body instead of a fixed share of it. Floored at the
+/// session's own [SapSession.minWindowRows], no higher: a phone held
+/// sideways holds ~18 rows at the width-fitting cell, and a 20-row floor
+/// had the composer (which fits the WHOLE window to the body) shrink the
+/// cell to 5.5 pt and the Easy Access window to 78 % of the width (live
+/// 2026-10-19). The kernel honours small windows: at 18 x 124 the Easy
+/// Access tree and picture filled the body edge to edge (live), and at
+/// 13 x 81 — a 4-inch phone sideways — the reference client's oracle had
+/// SE38 paint its editor container r1c0 12x81, the rows asked, not more.
 ///
 /// The cell ASPECT stays the renderer's 2:1, not the kernel's 22:7 (~3.14).
 /// The kernel never sees GuiGo's points: the session reports the window
@@ -39,7 +48,7 @@ import 'screen_composer.dart';
   double cellWidth = 7.0,
   int minCols = 80,
   int maxCols = 255,
-  int minRows = 20,
+  int minRows = SapSession.minWindowRows,
   int maxRows = 200,
 }) {
   if (!body.width.isFinite ||
