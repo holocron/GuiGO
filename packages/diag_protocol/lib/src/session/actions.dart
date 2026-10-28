@@ -11,12 +11,31 @@ import '../framing/envelope.dart';
 import '../items/dynt_atom.dart';
 import '../screen/screen_model.dart';
 import 'frames.dart';
+import 'table_cell.dart' show tcWindowsHeaderEcho;
 import 'xml17_blob.dart';
 
 /// One table-control group of a paint's SAP GUI for Windows container
 /// echo ([ActionContext.paintedTableEcho]): the control's container [path]
 /// and its echo [items].
-typedef WindowsTableEcho = ({List<int> path, List<Uint8List> items});
+typedef WindowsTableEcho = ({
+  List<int> path,
+  List<Uint8List> items,
+  // the painted 18/9/14 the group's 16/9/14 echoes: a round rebuilds that
+  // item from it under the user's column layout ([ActionContext.tcLayouts])
+  Uint8List? header,
+});
+
+/// The column layout the USER gave a classic table control — its column
+/// widths in characters (by column id: catalog order) and / or its display
+/// order (the column ids 1..n by position). The SAP GUI for WINDOWS reports
+/// it in the 16/9/14 echo of the next round, the server mirrors it in its
+/// next 18/9/14 (a recorded session, table_cell.dart tcWindowsHeaderEcho).
+class TcColumnLayout {
+  const TcColumnLayout({this.widths, this.order});
+  final List<int>? widths;
+  final List<int>? order;
+}
+
 
 /// The recording Windows GUI's own client window (px): the 16/12/8 of
 /// every real event round (table_cell.dart winEventWindowPx, the reference client's
@@ -290,12 +309,36 @@ class ActionContext {
   /// a recorded session gui[23] no — the same TC_1211).
   List<WindowsTableEcho> paintedTableEcho = const [];
 
+  /// The column layouts the USER gave this window's classic table controls
+  /// ([TcColumnLayout] by [tcHeaderKey]): every Windows round's 16/9/14
+  /// echo carries one in the full header form while the server's latest
+  /// 18/9/14 differs from it ([tcWindowsHeaderEcho]); an entry the server
+  /// has mirrored is dropped (SapSession.noteTableColumnLayout).
+  final Map<String, TcColumnLayout> tcLayouts = {};
+
   /// Every echo-eligible group of the paint, ungated: [paintedTableEcho]'s
   /// items, then [paintedTabstripEcho].
   List<Uint8List> get paintedEcho => [
-        for (final t in paintedTableEcho) ...t.items,
+        for (final t in paintedTableEcho) ...tableEchoItems(t),
         ...paintedTabstripEcho,
       ];
+
+  /// [t]'s echo items as THIS round sends them: its 16/9/14 the full
+  /// header while the user's column layout ([tcLayouts]) differs from the
+  /// painted one, else the short form it was built with.
+  List<Uint8List> tableEchoItems(WindowsTableEcho t) {
+    final h = t.header;
+    if (h == null || tcLayouts.isEmpty) return t.items;
+    final echo = tcWindowsHeaderEcho(h, tcLayouts);
+    if (echo == null) return t.items;
+    return [
+      for (final it in t.items)
+        if (it.length >= 3 && it[0] == itemAppl && it[1] == 9 && it[2] == 14)
+          buildApplItem(9, 14, echo)
+        else
+          it,
+    ];
+  }
 
   /// The TABSTRIP-STATE groups of the paint's Windows container echo —
   /// `[16/10/1 zeros, legs, 16/10/8, 16/9/15 short]` per tabstrip: echoed

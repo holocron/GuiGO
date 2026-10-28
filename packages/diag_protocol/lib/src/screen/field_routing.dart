@@ -27,6 +27,12 @@ import 'dart:typed_data';
 
 import 'table_controls.dart' show TcPlaneItem;
 
+/// The classic dynpro window height in rows — the geometry the window
+/// root's 16/12/6 carries on a default-sized SAP GUI (26 rows), the row
+/// filter of [RoutingFrame.rootOpen]'s last resort (audit 2026-10-23 §6.3;
+/// the reference client's ContainerTree reads the same height).
+const int classicScreenRows = 26;
+
 /// A field's write plane, resolved from its paint ([RoutingFrame.routingFor]).
 class FieldRouting {
   FieldRouting({
@@ -199,11 +205,45 @@ class RoutingFrame {
       if (geoms.contains(win)) root = win;
     }
     if (root == null) {
-      final kinds = {
-        for (final g in geoms)
-          if (g.$1 == 0x1a) g,
-      };
-      if (kinds.length == 1) root = kinds.single;
+      // No geometry the 16/12/7 names exactly: the ONE geometry with the
+      // window's row count is the window root (a subscreen never spans the
+      // full height) — the 16/12/7 area rows when the paint carries the
+      // item, else the classic height; a classic-height one stands in when
+      // the window's own count matches none. That height was a bare `0x1a`
+      // here, so a session resized past 26 rows lost its nested-write
+      // routing silently (audit 2026-10-23 §6.3). A paint with a 26-row
+      // window resolves exactly as before: the same unique geometry, or
+      // none when several share the height.
+      final winRows = w != null && w.length >= 16
+          ? ByteData.sublistView(w).getUint32(8)
+          : classicScreenRows;
+      (int, int)? unique(int rows) {
+        final k = {
+          for (final g in geoms)
+            if (g.$1 == rows) g,
+        };
+        return k.length == 1 ? k.single : null;
+      }
+      root = unique(winRows) ??
+          (winRows == classicScreenRows ? null : unique(classicScreenRows));
+      if (root == null &&
+          !geoms.any((g) => g.$1 == winRows || g.$1 == classicScreenRows)) {
+        // No geometry of either height at all (no 16/12/7 on a resized
+        // window): the largest area, when unique — the window encloses
+        // every subscreen. Never reached by a paint holding a geometry of
+        // the window's height, ambiguous or not.
+        (int, int)? best;
+        var tie = false;
+        for (final g in geoms) {
+          if (best == null || g.$1 * g.$2 > best.$1 * best.$2) {
+            best = g;
+            tie = false;
+          } else if (g.$1 * g.$2 == best.$1 * best.$2 && g != best) {
+            tie = true;
+          }
+        }
+        if (!tie) root = best;
+      }
     }
     if (root == null) return null;
     return Uint8List(9)

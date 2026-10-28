@@ -377,6 +377,11 @@ Map<String, String> _options(List<BasisToken> tokens) {
 /// twice in one number or is followed by exactly three digits groups
 /// thousands (`153.470` under logon FR is 153 470), any other one is the
 /// decimal mark; both in one number: the later is the decimal.
+// Compiled once, not per number / per `$INDX` row of the netplan parse
+// (audit 2026-10-23 P-2).
+final RegExp _nonDigitRx = RegExp(r'[^0-9]');
+final RegExp _blankRunRx = RegExp(r'\s+');
+
 String _decimalMark(Iterable<String> numbers, String? scdecc) {
   final d = scdecc?.trim() ?? '';
   if (d == ',' || d == '.') return d;
@@ -392,7 +397,7 @@ String _decimalMark(Iterable<String> numbers, String? scdecc) {
     for (final (mark, at) in [('.', dot), (',', comma)]) {
       if (at < 0) continue;
       final twice = s.indexOf(mark) != at;
-      final digits = s.substring(at + 1).replaceAll(RegExp(r'[^0-9]'), '');
+      final digits = s.substring(at + 1).replaceAll(_nonDigitRx, '');
       if (!twice && digits.length != 3) {
         mark == '.' ? dotDecimal++ : commaDecimal++;
       } else {
@@ -585,7 +590,7 @@ SapBusinessGraphic _busg(String iface, List<BasisSection> sections) {
         }
       case r'$INDX':
         for (final x in t.take(maxBasisGraphicPoints * 4)) {
-          final p = x.$2.trim().split(RegExp(r'\s+'));
+          final p = x.$2.trim().split(_blankRunRx);
           final r = p.isNotEmpty ? int.tryParse(p.first) : null;
           final c = p.length > 1 ? int.tryParse(p[1]) : null;
           index.add(r != null && c != null ? (r, c) : null);

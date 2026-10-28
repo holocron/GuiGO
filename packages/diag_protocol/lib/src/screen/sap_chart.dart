@@ -185,21 +185,21 @@ final RegExp _chartTypeRx = RegExp(
 final RegExp _captionRx = RegExp(r'<Caption>(.*?)</Caption>', dotAll: true);
 
 List<String> _elements(String doc, String tag) => [
-  for (final m in RegExp(
-    '<$tag(?:\\s[^>]*)?>(.*?)</$tag>',
-    dotAll: true,
-  ).allMatches(doc))
-    _unescape(m.group(1)!.trim()),
+  for (final m in _tagRx(tag).allMatches(doc)) _unescape(m.group(1)!.trim()),
 ];
 
 /// The span between `<tag…>` and `</tag>` (first occurrence), or null.
-String? _span(String doc, String tag) {
-  final m = RegExp(
-    '<$tag(?:\\s[^>]*)?>(.*?)</$tag>',
-    dotAll: true,
-  ).firstMatch(doc);
-  return m?.group(1);
-}
+String? _span(String doc, String tag) => _tagRx(tag).firstMatch(doc)?.group(1);
+
+/// `<tag…>…</tag>`, compiled once per tag: the tags are the dozen literals
+/// of this file's folds, not per-document data, and the chart fold runs
+/// per paint (audit 2026-10-23 P-2).
+RegExp _tagRx(String tag) => _tagRxs[tag] ??= RegExp(
+  '<$tag(?:\\s[^>]*)?>(.*?)</$tag>',
+  dotAll: true,
+);
+
+final Map<String, RegExp> _tagRxs = {};
 
 String _unescape(String s) {
   if (!s.contains('&')) return s;

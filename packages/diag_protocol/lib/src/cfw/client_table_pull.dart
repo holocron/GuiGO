@@ -41,14 +41,20 @@ class PropertySink {
 
 /// The read-back sinks [call] registers: `AssignProperty2(src, prop, dp,
 /// 'data')` followed by `SaveDataToUrl(…, SAPR3://sink)` on the same queue
-/// (the reference client's control_property_sinks).
+/// (the reference client's control_property_sinks) — and the SAP GUI for Windows'
+/// TextEdit read-back, whose object is an X-R3ABAP table:
+/// `AssignProperty2(<editor>, TextAsR3Table, <obj>, r3TableAutoObj)` +
+/// `SaveDataToUrl(APPLICATION, X-R3ABAP, sink)` (a recorded session
+/// longtext_probe s[24], the `Force(APPLICATION, X-R3ABAP)` object filled
+/// from the long-text control; [isTextEditReadBack]).
 Map<String, PropertySink> propertySinksOf(FlushCall call) {
   final out = <String, PropertySink>{};
   PropertySink? pending;
   for (var i = 1; i <= call.verbs.length; i++) {
     final verb = call.verbs[i - 1];
     final a = verbNamedArgs(call, i);
-    if (verb == 'AssignProperty2' && (a['#4'] ?? '').trim() == 'data') {
+    if (verb == 'AssignProperty2' &&
+        ((a['#4'] ?? '').trim() == 'data' || isTextEditReadBack(a))) {
       pending = PropertySink((a['#1'] ?? '').trim(), (a['#2'] ?? '').trim());
     } else if (verb == 'SaveDataToUrl') {
       final url = (a['#3'] ?? '').trim();
@@ -58,6 +64,18 @@ Map<String, PropertySink> propertySinksOf(FlushCall call) {
   }
   return out;
 }
+
+/// The TextEdit properties a read-back fills an object from.
+const Set<String> textEditTextProps = {'TextAsR3Table', 'TextAsR3Stream'};
+
+/// Whether the named args [a] of an `AssignProperty2` read a TextEdit's
+/// text INTO an X-R3ABAP table object (`#2` TextAsR3Table / Stream, `#4`
+/// r3TableAutoObj) — the Windows read-back ([propertySinksOf]); the push
+/// the other way round names the control in `#3` and the property in
+/// `#4`.
+bool isTextEditReadBack(Map<String, String> a) =>
+    textEditTextProps.contains((a['#2'] ?? '').trim()) &&
+    (a['#4'] ?? '').trim() == 'r3TableAutoObj';
 
 /// True when the RFC value [v] is a SAPLCNDP DP_GET_CLIENT_TABLE pull.
 bool isClientTablePull(Uint8List v) =>
@@ -133,7 +151,8 @@ Set<String> loadedObjectSinksOf(FlushCall call) {
   for (var i = 1; i <= call.verbs.length; i++) {
     final verb = call.verbs[i - 1];
     final a = verbNamedArgs(call, i);
-    if (verb == 'AssignProperty2' && (a['#4'] ?? '').trim() == 'data') {
+    if (verb == 'AssignProperty2' &&
+        ((a['#4'] ?? '').trim() == 'data' || isTextEditReadBack(a))) {
       property = true;
     } else if (verb == 'SaveDataToUrl') {
       final url = (a['#3'] ?? '').trim();

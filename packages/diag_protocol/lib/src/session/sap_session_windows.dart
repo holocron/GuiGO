@@ -138,6 +138,8 @@ class _WindowState {
          dpCacheEntries: limits.dpCacheEntries,
          dpCacheBytes: limits.dpCacheBytes,
        ),
+       autoStream =
+           AutomationStream(maxPendingBytes: limits.automationStreamBytes),
        ctx = ActionContext(screenRows: screenRows, screenCols: screenCols);
 
   final int mode;
@@ -228,7 +230,9 @@ class _WindowState {
   /// (`ABAPWidth(<chars>, 0)` after its `ItemEx` / `HierarchyHeader`) —
   /// what a `WidthInChar` read answers (sap_session_tree.dart)
   final Map<String, int> headerWidths = {};
-  final AutomationStream autoStream = AutomationStream();
+  /// The window's chunked-call assembly, bounded by
+  /// [TransportLimits.automationStreamBytes] (audit 2026-10-23 R-6).
+  final AutomationStream autoStream;
   final StreamPaintAssembler streamPaints = StreamPaintAssembler();
   final AnsweredCalls answeredFlushes = AnsweredCalls();
 
@@ -633,6 +637,9 @@ extension SapSessionWindows on SapSession {
   }
 
   _WindowState _bornWindow(int mode, int step) {
+    // room first: the table holds [TransportLimits.openWindows] at most
+    // (audit 2026-10-23 R-2, sap_session_liveness.dart)
+    _retireForBirth();
     final parent = _modes.live;
     final origin = _modes.actionCommand == _ModeCommand.open
         ? SapWindowOrigin.client
@@ -707,9 +714,9 @@ extension SapSessionWindows on SapSession {
       ..awaitingReply = false
       ..handedBack = true;
     if (win.queue.isEmpty) return false;
-    _inbox.addFirst(payload);
+    _inboxRequeue(payload); // counted again (audit 2026-10-23 R-8)
     for (final p in win.queue.reversed) {
-      _inbox.addFirst(p);
+      _inboxRequeue(p);
     }
     win.queue.clear();
     _modes.requeued = true;
@@ -749,7 +756,7 @@ extension SapSessionWindows on SapSession {
       ..awaitingReply = false
       ..handedBack = true;
     for (final p in win.queue.reversed) {
-      _inbox.addFirst(p);
+      _inboxRequeue(p);
     }
     win.queue.clear();
     _notifyWindows();
@@ -810,7 +817,7 @@ extension SapSessionWindows on SapSession {
     );
     // what the server sent the parent meanwhile is its continuation
     for (final p in parent.queue.reversed) {
-      _inbox.addFirst(p);
+      _inboxRequeue(p);
     }
     parent.queue.clear();
   }
@@ -838,7 +845,7 @@ extension SapSessionWindows on SapSession {
   Future<void> _deliverParked(_WindowState win) async {
     if (win.queue.isEmpty) return;
     for (final p in win.queue.reversed) {
-      _inbox.addFirst(p);
+      _inboxRequeue(p);
     }
     win.queue.clear();
     await _drainPending();

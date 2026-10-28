@@ -5,6 +5,62 @@ import 'package:flutter/material.dart';
 
 import 'sap_graph_view.dart' show jnetColor;
 
+/// The laid-out texts of a painter whose labels carry their own STYLE
+/// (font, weight, slant, family, alignment, line count), kept across
+/// paints: the net plan's and the Adobe form's painters lay a label out
+/// once and draw it on every repaint after — a zoom click, a field tap
+/// (`shouldRepaint` on zoom / selection) draws the page's texts without
+/// laying any of them out again (audit 2026-10-23 P-8). The chart
+/// painters' [ChartLabelCache] (sap_chart_view.dart) is the same pattern
+/// keyed on text, colour, size and width alone; this one keys on the
+/// whole [TextStyle], the alignment, the line count and the min / max
+/// width the painter lays out at. Both belong side by side in
+/// sap_chart_view.dart; this one lives here until that file is free to
+/// take it. [clear]ed when it grows past [_limit] (a re-pushed graph with
+/// new captions) and with the view.
+class StyledLabelCache {
+  final Map<(String, TextStyle, TextAlign, int?, double, double), TextPainter>
+      _labels = {};
+  static const _limit = 2048;
+
+  /// How many label layouts the cache made (tests read it).
+  int layouts = 0;
+
+  /// [text] laid out in [style], aligned [align], at most [maxLines] lines
+  /// (null: as many as it takes), between [minWidth] and [maxWidth] wide,
+  /// cut with [ellipsis] when it does not fit. The painter returned is the
+  /// cache's: callers draw it, never dispose it.
+  TextPainter label(
+    String text,
+    TextStyle style, {
+    TextAlign align = TextAlign.left,
+    int? maxLines = 1,
+    double minWidth = 0,
+    required double maxWidth,
+    String? ellipsis,
+  }) {
+    if (_labels.length >= _limit) clear();
+    return _labels.putIfAbsent((text, style, align, maxLines, minWidth, maxWidth),
+        () {
+      layouts++;
+      return TextPainter(
+        text: TextSpan(text: text, style: style),
+        textAlign: align,
+        textDirection: TextDirection.ltr,
+        maxLines: maxLines,
+        ellipsis: ellipsis,
+      )..layout(minWidth: minWidth, maxWidth: maxWidth);
+    });
+  }
+
+  void clear() {
+    for (final tp in _labels.values) {
+      tp.dispose();
+    }
+    _labels.clear();
+  }
+}
+
 /// A NetPlan graph (SAPGUI.NetPlanGraphics.1) drawn the way SAPnetz.OCX
 /// draws it, from the stream's own look ([NetPlanDecor]): every node in
 /// its format's SHAPE (rectangle / table box, capsule, hexagon,
@@ -56,10 +112,19 @@ class _SapNetPlanViewState extends State<SapNetPlanView> {
     return _scene!;
   }
 
+  /// The laid-out texts of the graph, kept across paints: a zoom click
+  /// or a scroll frame draws them, it lays none out again (audit
+  /// 2026-10-23 P-8).
+  final _labels = StyledLabelCache();
+
+  /// How many text layouts the graph made (tests read it).
+  int get labelLayouts => _labels.layouts;
+
   @override
   void dispose() {
     _h.dispose();
     _v.dispose();
+    _labels.clear();
     super.dispose();
   }
 
@@ -99,7 +164,7 @@ class _SapNetPlanViewState extends State<SapNetPlanView> {
         key: const ValueKey('netplan-canvas'),
         child: CustomPaint(
           size: s.size * _zoom,
-          painter: NetPlanPainter(g, s, zoom: _zoom),
+          painter: NetPlanPainter(g, s, zoom: _zoom, labels: _labels),
         ),
       ),
     );
@@ -917,11 +982,16 @@ class NetPlanPainter extends CustomPainter {
     this.seen,
     this.seenColor = Colors.green,
     this.overview = false,
+    this.labels,
   });
 
   final SapNetPlanModel graph;
   final NetPlanScene scene;
   final double zoom;
+
+  /// The view's laid-out texts, kept across paints (audit 2026-10-23
+  /// P-8); null lays each out per paint (a painter built on its own).
+  final StyledLabelCache? labels;
 
   /// The overview's frame of the visible part (control points).
   final Rect? seen;
@@ -1243,13 +1313,23 @@ class NetPlanPainter extends CustomPainter {
           'r' => TextAlign.right,
           _ => TextAlign.center,
         };
-    final tp = TextPainter(
-      text: TextSpan(text: text, style: style),
-      textAlign: ta,
-      textDirection: TextDirection.ltr,
-      maxLines: f?.lines ?? 1,
-      ellipsis: '…',
-    )..layout(minWidth: r.width, maxWidth: r.width);
+    // the rects are scene coordinates (the canvas is scaled by [zoom]):
+    // a zoom click keys the same layouts
+    final cache = labels;
+    final tp = cache != null
+        ? cache.label(text, style,
+            align: ta,
+            maxLines: f?.lines ?? 1,
+            minWidth: r.width,
+            maxWidth: r.width,
+            ellipsis: '…')
+        : (TextPainter(
+            text: TextSpan(text: text, style: style),
+            textAlign: ta,
+            textDirection: TextDirection.ltr,
+            maxLines: f?.lines ?? 1,
+            ellipsis: '…',
+          )..layout(minWidth: r.width, maxWidth: r.width));
     final dy = switch (f?.valign) {
       't' => 0.0,
       'b' => r.height - tp.height,
@@ -1259,7 +1339,7 @@ class NetPlanPainter extends CustomPainter {
     canvas.clipRect(r.inflate(1));
     tp.paint(canvas, Offset(r.left, r.top + dy));
     canvas.restore();
-    tp.dispose();
+    if (cache == null) tp.dispose();
   }
 
   static Color _contrast(Color fill) =>

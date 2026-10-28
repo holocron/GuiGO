@@ -42,6 +42,8 @@ library;
 import 'dart:typed_data';
 
 import '../cfw/dp_cache.dart';
+import '../cfw/reply_container.dart'
+    show rfcTagAt, rfcTagParamName, rfcTagParamValue;
 import '../codepages.dart';
 import '../framing/diag_frame.dart';
 import '../items/dynt_atom.dart';
@@ -248,7 +250,7 @@ ValueSet? decodeValueSetPush(Uint8List seg) {
 String? _scalar(Uint8List seg, String name) {
   final n = name.codeUnits;
   for (var i = 0; i + 4 + n.length + 6 <= seg.length; i++) {
-    if (seg[i] != 0x02 || seg[i + 1] != 0x01) continue;
+    if (rfcTagAt(seg, i) != rfcTagParamName) continue;
     final ln = (seg[i + 2] << 8) | seg[i + 3];
     if (ln != n.length) continue;
     var same = true;
@@ -260,7 +262,7 @@ String? _scalar(Uint8List seg, String name) {
     }
     if (!same) continue;
     final j = i + 4 + ln + 2;
-    if (j + 4 > seg.length || seg[j] != 0x02 || seg[j + 1] != 0x03) continue;
+    if (j + 4 > seg.length || rfcTagAt(seg, j) != rfcTagParamValue) continue;
     final vl = (seg[j + 2] << 8) | seg[j + 3];
     if (j + 4 + vl > seg.length) return null;
     return String.fromCharCodes(seg, j + 4, j + 4 + vl).trim();

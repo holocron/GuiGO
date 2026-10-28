@@ -22,12 +22,13 @@ import 'dart:typed_data';
 
 import '../framing/diag_frame.dart';
 import '../lzh/lzh.dart' show csMaxDecodedLength;
+import 'reply_container.dart' show rfcTagBytes, rfcTagParamName;
 
 /// The bracketed TLV parameter name that introduces the nested stream.
-const List<int> streamAnchor = [
-  0x02, 0x01, 0x00, 0x06, // tag, u16 len 6
+final List<int> streamAnchor = [
+  ...rfcTagBytes(rfcTagParamName), 0x00, 0x06, // tag, u16 len 6
   0x53, 0x54, 0x52, 0x45, 0x41, 0x4d, // "STREAM"
-  0x02, 0x01,
+  ...rfcTagBytes(rfcTagParamName),
 ];
 
 /// The fixed RFC_TR header every self-contained RFC value opens with

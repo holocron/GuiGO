@@ -265,14 +265,20 @@ class _ScrollingButtonRowState extends State<ScrollingButtonRow> {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final bg = Theme.of(context).scaffoldBackgroundColor;
+    // the arrow as wide as its icon plus a margin: 32 at the natural 24,
+    // narrower in a compact control row
+    final arrowWidth = widget.arrowSize + 8;
     Widget arrow(int dir) => SizedBox(
-      width: 32,
+      width: arrowWidth,
       child: IconButton(
         tooltip: dir < 0
             ? 'More buttons to the left'
             : 'More buttons to the right',
         padding: EdgeInsets.zero,
         visualDensity: VisualDensity.compact,
+        style: IconButton.styleFrom(
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
         iconSize: widget.arrowSize,
         icon: Icon(dir < 0 ? Icons.chevron_left : Icons.chevron_right),
         color: scheme.primary,
@@ -293,18 +299,30 @@ class _ScrollingButtonRowState extends State<ScrollingButtonRow> {
         ),
       ),
     );
-    return Row(
-      children: [
-        if (_left) arrow(-1),
-        Expanded(
-          child: ShaderMask(
-            blendMode: BlendMode.dstIn,
-            shaderCallback: _maskOf(bg),
-            child: row,
-          ),
-        ),
-        if (_right) arrow(1),
-      ],
+    final body = Expanded(
+      child: ShaderMask(
+        blendMode: BlendMode.dstIn,
+        shaderCallback: _maskOf(bg),
+        child: row,
+      ),
+    );
+    // the arrows only while they leave the viewport at least an arrow's
+    // width: in a row narrower than that (a one-cell dock pane) they would
+    // page nothing and overflow the row — the faded edge and the scroll
+    // bar still say there is more
+    return LayoutBuilder(
+      builder: (context, box) {
+        final shown = (_left ? 1 : 0) + (_right ? 1 : 0);
+        final room =
+            !box.maxWidth.isFinite || box.maxWidth >= (shown + 1) * arrowWidth;
+        return Row(
+          children: [
+            if (_left && room) arrow(-1),
+            body,
+            if (_right && room) arrow(1),
+          ],
+        );
+      },
     );
   }
 }

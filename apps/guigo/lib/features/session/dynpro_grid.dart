@@ -84,7 +84,10 @@ class DynproGrid {
       first = math.min(first, c.row);
     }
     for (final tc in m.tableControls) {
-      cols = math.max(cols, tc.col + tc.width);
+      // the box VISIBLE inside its subscreen, not the kernel's declared
+      // width (SE24's methods table MC 255 inside CSS 122 widened the grid,
+      // and the program's zoom memory, to 256 columns)
+      cols = math.max(cols, tc.col + tc.boxWidth);
       rows = math.max(rows, tc.row + tc.height);
       first = math.min(first, tc.row);
     }
@@ -99,11 +102,45 @@ class DynproGrid {
 
 /// One field on the grid: its cell and its width in cells.
 class GridCell {
-  GridCell(this.field, this.row, this.col, this.width);
+  GridCell(this.field, this.row, this.col, this.width) : own = width;
   final ScreenField field;
   final int row;
   final int col;
   int width;
+
+  /// The field's own painted width in cells, before its row clamped it
+  /// to the room left before the next cell.
+  final int own;
+
+  /// The row clamped the cell below its own width: its text runs past
+  /// the column's visible length (SE24's 55-character method names in a
+  /// 35-cell column), which SAP GUI clips.
+  bool get clamped => width < own;
+}
+
+/// Container kinds the kernel resizes with the window: 3 SUBSCREEN,
+/// 8 TABSTRIP, 10 CONTROL, 16 AREA.
+const _windowKinds = {3, 8, 10, 16};
+
+/// Whether a main-window paint's layout follows the window ([rows] its
+/// rows): a table control or a resizable container reaches the window's
+/// last rows (SAPLSEOD/2000 at 18 x 124: CTS r1c0 17x124, the methods
+/// table r4c1 13x122) — the kernel laid it out for exactly the rows the
+/// session reported, so it is drawn at the window's own cell. A fixed-size
+/// dynpro that ends above them (a selection screen, SE38's fields) and
+/// every popup keep the free-standing grid.
+bool followsWindow(ScreenModel m, int rows) {
+  if (m.modalLevel != 0 || rows <= 0) return false;
+  final last = rows - 1;
+  for (final tc in m.tableControls) {
+    if (tc.row + tc.height >= last) return true;
+  }
+  for (final c in m.containers.values) {
+    if (_windowKinds.contains(c.kind) && c.row + c.height >= last) {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool _isText(ScreenField f) =>

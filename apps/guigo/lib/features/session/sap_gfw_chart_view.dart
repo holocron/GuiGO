@@ -4,7 +4,8 @@ import 'package:diag_protocol/diag_protocol.dart';
 import 'package:flutter/material.dart';
 
 import 'gfw_calendar.dart';
-import 'sap_chart_view.dart' show ChartSeriesData, categoryLabel, niceTicks;
+import 'sap_chart_view.dart'
+    show ChartLabelCache, ChartSeriesData, categoryLabel, niceTicks;
 import 'sap_chart_xy.dart';
 
 /// The GFW business graphic (Graphitti chart fed by SAPGUI.GraphittiAdapt.1)
@@ -56,43 +57,79 @@ Color? gfwSeriesOutline(SapChartSeries s) =>
     _pal(s.gfw?.line) ??
     (_pal(s.gfw?.fill ?? s.color) == null ? const Color(0xFF000000) : null);
 
-void _txt(Canvas c, String s, Offset at, Color color,
+/// The GFW painters' texts: laid out through the view's [ChartLabelCache]
+/// when the painter holds one ([labels]), so a repaint — a pan frame of
+/// the time axis, a server turn rebuilding the screen — draws the labels
+/// without laying them out again (audit 2026-10-23 P-8); a painter built
+/// on its own lays each out per paint.
+mixin _GfwText {
+  ChartLabelCache? get labels;
+
+  void _txt(Canvas c, String s, Offset at, Color color,
+          {TextAlign align = TextAlign.left,
+          double size = 11,
+          double? maxWidth,
+          bool vertical = false,
+          Color? box,
+          Color? boxBorder}) =>
+      _txtWith(labels, c, s, at, color,
+          align: align,
+          size: size,
+          maxWidth: maxWidth,
+          vertical: vertical,
+          box: box,
+          boxBorder: boxBorder);
+
+  double _textWidth(String s, {double size = 11}) =>
+      _textWidthWith(labels, s, size: size);
+}
+
+/// [_GfwText._txt] for a text laid out through [cache] (null: per paint).
+void _txtWith(ChartLabelCache? cache, Canvas c, String s, Offset at, Color color,
     {TextAlign align = TextAlign.left,
     double size = 11,
     double? maxWidth,
     bool vertical = false,
     Color? box,
     Color? boxBorder}) {
-  final tp = TextPainter(
-    text: TextSpan(text: s, style: TextStyle(color: color, fontSize: size)),
-    textDirection: TextDirection.ltr,
-    maxLines: 1,
-    ellipsis: '…',
-  )..layout(maxWidth: maxWidth ?? 400);
-  final dx = switch (align) {
-    TextAlign.right => -tp.width,
-    TextAlign.center => -tp.width / 2,
-    _ => 0.0,
-  };
-  c.save();
-  c.translate(at.dx, at.dy);
-  if (vertical) c.rotate(-math.pi / 2);
-  final r = Rect.fromLTWH(dx, -tp.height / 2, tp.width, tp.height);
-  if (box != null) {
-    final b = r.inflate(3);
-    c.drawRect(b, Paint()..color = box);
-    if (boxBorder != null) {
-      c.drawRect(b, Paint()
-        ..color = boxBorder
-        ..style = PaintingStyle.stroke);
+  {
+    final width = maxWidth ?? 400;
+    final tp = cache != null
+        ? cache.label(s, color, size, maxWidth: width, ellipsis: '…')
+        : (TextPainter(
+            text: TextSpan(text: s, style: TextStyle(color: color, fontSize: size)),
+            textDirection: TextDirection.ltr,
+            maxLines: 1,
+            ellipsis: '…',
+          )..layout(maxWidth: width));
+    final dx = switch (align) {
+      TextAlign.right => -tp.width,
+      TextAlign.center => -tp.width / 2,
+      _ => 0.0,
+    };
+    c.save();
+    c.translate(at.dx, at.dy);
+    if (vertical) c.rotate(-math.pi / 2);
+    final r = Rect.fromLTWH(dx, -tp.height / 2, tp.width, tp.height);
+    if (box != null) {
+      final b = r.inflate(3);
+      c.drawRect(b, Paint()..color = box);
+      if (boxBorder != null) {
+        c.drawRect(b, Paint()
+          ..color = boxBorder
+          ..style = PaintingStyle.stroke);
+      }
     }
+    tp.paint(c, r.topLeft);
+    c.restore();
+    if (cache == null) tp.dispose();
   }
-  tp.paint(c, r.topLeft);
-  c.restore();
-  tp.dispose();
 }
 
-double _textWidth(String s, {double size = 11}) {
+/// The unconstrained width of [s] (the cache measures the 11 pt labels
+/// every caller asks for; null: per call).
+double _textWidthWith(ChartLabelCache? cache, String s, {double size = 11}) {
+  if (cache != null && size == 11) return cache.measure(s).width;
   final tp = TextPainter(
     text: TextSpan(text: s, style: TextStyle(fontSize: size)),
     textDirection: TextDirection.ltr,
@@ -241,6 +278,20 @@ class _GfwChartViewState extends State<GfwChartView> {
   /// start, in days.
   double _pan = 0;
 
+  /// The laid-out texts of the chart, kept across paints: a pan frame of
+  /// the time axis, a rebuild with the same model, draws them and lays
+  /// none out again (audit 2026-10-23 P-8).
+  final _labels = ChartLabelCache();
+
+  /// How many text layouts the chart made (tests read it).
+  int get labelLayouts => _labels.layouts;
+
+  @override
+  void dispose() {
+    _labels.clear();
+    super.dispose();
+  }
+
   @override
   void didUpdateWidget(GfwChartView old) {
     super.didUpdateWidget(old);
@@ -298,8 +349,8 @@ class _GfwChartViewState extends State<GfwChartView> {
               ],
               text: text,
             ),
-            GfwKind.histogram => GfwHistogramPainter(m, scheme),
-            GfwKind.milestone => GfwMtaPainter(m, scheme),
+            GfwKind.histogram => GfwHistogramPainter(m, scheme, labels: _labels),
+            GfwKind.milestone => GfwMtaPainter(m, scheme, labels: _labels),
             GfwKind.xy => XyChartPainter(
               series: _xySeries[m] ??= [
                 for (final (i, s) in m.series.indexed)
@@ -313,7 +364,7 @@ class _GfwChartViewState extends State<GfwChartView> {
               grid: scheme.outlineVariant.withValues(alpha: 0.5),
             ),
             _ => GfwCategoryPainter(m, scheme,
-                horizontal: kind == GfwKind.bars),
+                horizontal: kind == GfwKind.bars, labels: _labels),
           },
         ),
       ),
@@ -381,7 +432,7 @@ class _GfwChartViewState extends State<GfwChartView> {
       final geo = GfwTimeAxisPainter.geometry(m, cons.biggest);
       final maxPan = math.max(0.0, geo.spanDays - geo.visibleDays);
       final pan = _pan.clamp(0.0, maxPan);
-      final painter = GfwTimeAxisPainter(m, scheme, pan: pan);
+      final painter = GfwTimeAxisPainter(m, scheme, pan: pan, labels: _labels);
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -468,8 +519,12 @@ class _LineSample extends CustomPainter {
 /// Columns (bars: [horizontal]) or lines over the categories, with the
 /// sent y range and scales, the value-range band and its titles, point
 /// overrides and labels, the data sheet under the axis.
-class GfwCategoryPainter extends CustomPainter {
-  GfwCategoryPainter(this.m, this.scheme, {this.horizontal = false});
+class GfwCategoryPainter extends CustomPainter with _GfwText {
+  GfwCategoryPainter(this.m, this.scheme,
+      {this.horizontal = false, this.labels});
+
+  @override
+  final ChartLabelCache? labels;
 
   final SapChartModel m;
   final ColorScheme scheme;
@@ -723,8 +778,11 @@ double Function(double x)? gfwDensity(SapChartModel m) {
   return (x) => k * math.exp(-math.pow(x - mu, 2) / (2 * sigma * sigma));
 }
 
-class GfwHistogramPainter extends CustomPainter {
-  GfwHistogramPainter(this.m, this.scheme);
+class GfwHistogramPainter extends CustomPainter with _GfwText {
+  GfwHistogramPainter(this.m, this.scheme, {this.labels});
+
+  @override
+  final ChartLabelCache? labels;
   final SapChartModel m;
   final ColorScheme scheme;
 
@@ -832,6 +890,7 @@ void gfwPaintBand(
   required Color text,
   bool rotate = false,
   (double, double)? visible,
+  ChartLabelCache? labels,
 }) {
   final b = Paint()
     ..color = border
@@ -840,8 +899,8 @@ void gfwPaintBand(
   final f = Paint()..color = fill;
   final widest = _widestShort[cells] ??= cells.fold<double>(
     0,
-    (w, cell) =>
-        math.max(w, _textWidth(cell.short.isEmpty ? cell.label : cell.short)),
+    (w, cell) => math.max(
+        w, _textWidthWith(labels, cell.short.isEmpty ? cell.label : cell.short)),
   );
   double along(CalCell cell) => (pos(cell.to) - pos(cell.from)).abs();
   final typical = cells.isEmpty ? 0.0 : cells.map(along).reduce(math.max);
@@ -861,13 +920,13 @@ void gfwPaintBand(
     c.drawRect(r, b);
     final room = vertical && !rotate ? r.width : (vertical ? r.height : r.width);
     var label = cell.label;
-    if (_textWidth(label) + 4 > room) label = cell.short;
-    if (label.isEmpty || _textWidth(label) + 4 > room) {
+    if (_textWidthWith(labels, label) + 4 > room) label = cell.short;
+    if (label.isEmpty || _textWidthWith(labels, label) + 4 > room) {
       if (every > 1 && i % every != 0) continue;
       label = cell.short.isEmpty ? cell.label : cell.short;
-      if (_textWidth(label) > room * every) continue;
+      if (_textWidthWith(labels, label) > room * every) continue;
     }
-    _txt(c, label, r.center, text,
+    _txtWith(labels, c, label, r.center, text,
         align: TextAlign.center, vertical: vertical && rotate, maxWidth: 200);
   }
 }
@@ -879,8 +938,11 @@ final _widestShort = Expando<double>();
 // The milestone trend analysis
 // ---------------------------------------------------------------------------
 
-class GfwMtaPainter extends CustomPainter {
-  GfwMtaPainter(this.m, this.scheme);
+class GfwMtaPainter extends CustomPainter with _GfwText {
+  GfwMtaPainter(this.m, this.scheme, {this.labels});
+
+  @override
+  final ChartLabelCache? labels;
   final SapChartModel m;
   final ColorScheme scheme;
 
@@ -914,15 +976,22 @@ class GfwMtaPainter extends CustomPainter {
     final months = monthCells(a, z, lang), weeks = weekCells(a, z);
     // x headers above the plot: months over the reporting intervals
     gfwPaintBand(c, Rect.fromLTRB(plot.left, 0, plot.right, monthBand), months, px,
-        vertical: false, fill: fill, border: border, text: text);
+        vertical: false, fill: fill, border: border, text: text, labels: labels);
     gfwPaintBand(c, Rect.fromLTRB(plot.left, monthBand, plot.right, monthBand + riBand),
-        weeks, px, vertical: false, fill: fill, border: border, text: text);
+        weeks, px,
+        vertical: false, fill: fill, border: border, text: text, labels: labels);
     // y headers on the left: months as tall vertical bands, the
     // reporting intervals in rows
     gfwPaintBand(c, Rect.fromLTRB(0, plot.top, monthBand, plot.bottom), months, py,
-        vertical: true, rotate: true, fill: fill, border: border, text: text);
+        vertical: true,
+        rotate: true,
+        fill: fill,
+        border: border,
+        text: text,
+        labels: labels);
     gfwPaintBand(c, Rect.fromLTRB(monthBand, plot.top, monthBand + riCol, plot.bottom),
-        weeks, py, vertical: true, fill: fill, border: border, text: text);
+        weeks, py,
+        vertical: true, fill: fill, border: border, text: text, labels: labels);
     // the triangle: grid lines only above the diagonal (forecast >= report)
     final grid = Paint()
       ..color = scheme.outlineVariant.withValues(alpha: 0.55)
@@ -991,8 +1060,11 @@ class GfwTimeGeometry {
   double get visibleDays => plot.width / pxPerDay;
 }
 
-class GfwTimeAxisPainter extends CustomPainter {
-  GfwTimeAxisPainter(this.m, this.scheme, {this.pan = 0});
+class GfwTimeAxisPainter extends CustomPainter with _GfwText {
+  GfwTimeAxisPainter(this.m, this.scheme, {this.pan = 0, this.labels});
+
+  @override
+  final ChartLabelCache? labels;
   final SapChartModel m;
   final ColorScheme scheme;
   final double pan;
@@ -1087,7 +1159,7 @@ class GfwTimeAxisPainter extends CustomPainter {
             plot.bottom + dayRow + riRow + 2),
         _weeks[m] ??= weekCells(g.start, g.end), px,
         vertical: false, fill: fill, border: scheme.outline, text: text,
-        visible: (v0 - 1, v1 + 1));
+        visible: (v0 - 1, v1 + 1), labels: labels);
     // the series: thin dashed lines (style 34), square markers; a point
     // whose bundle switches its line off breaks the line into it
     c.clipRect(plot.inflate(5));

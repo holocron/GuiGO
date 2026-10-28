@@ -34,6 +34,8 @@ import 'dp_cache.dart' show DpCache, dpColumnCells;
 import '../framing/envelope.dart' show containsBytes;
 import '../lzh/lzh.dart';
 import '../screen/screen_layout.dart' show CellRect, ScreenRegion;
+import 'reply_container.dart'
+    show rfcTagBytes, rfcTagTableCell, rfcTagTableClose;
 
 /// One document an HTML viewer control shows.
 class SapHtmlDocument {
@@ -583,9 +585,18 @@ List<HtmlPush> htmlPushesOf(Uint8List rfc) {
   ];
 }
 
-const List<int> _cell0 = [0x03, 0x05, 0x00, 0xfa];
-const List<int> _delim = [0x03, 0x05, 0x03, 0x05, 0x00, 0xfa];
-const List<int> _colEnd = [0x03, 0x05, 0x03, 0x06];
+// the DATABIN column's cell grammar (rfcTag*): the first 250-B segment, a
+// reframe before each next one, the cell's close
+final List<int> _cell0 = [...rfcTagBytes(rfcTagTableCell), 0x00, 0xfa];
+final List<int> _delim = [
+  ...rfcTagBytes(rfcTagTableCell),
+  ...rfcTagBytes(rfcTagTableCell),
+  0x00, 0xfa,
+];
+final List<int> _colEnd = [
+  ...rfcTagBytes(rfcTagTableCell),
+  ...rfcTagBytes(rfcTagTableClose),
+];
 
 /// reference client diag_showdata.assemble_databin_html: the DATABIN chunks joined,
 /// the admin headers removed, one LZH decode bounded by its own header.

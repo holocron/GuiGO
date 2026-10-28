@@ -36,7 +36,11 @@ List<Cell0305> find0305Cells(Uint8List b) {
   final cells = <Cell0305>[];
   final n = b.length;
   final bd = b.buffer.asByteData(b.offsetInBytes, b.lengthInBytes);
-  Uint8List? broken; // segment-header offsets of chains that broke
+  // segment-header offsets of chains that broke: a set that grows with the
+  // breaks, not an n-byte shadow of the value allocated at the first break
+  // (an MB-scale copy per parse of a multi-MB VARS value whose only break
+  // is a stray `03 05` in the data; audit 2026-10-23 P-5)
+  Set<int>? broken;
   final heads = <int>[];
   var i = 0;
   while (i < n - 1) {
@@ -47,7 +51,7 @@ List<Cell0305> find0305Cells(Uint8List b) {
     var ok = true;
     heads.clear();
     while (true) {
-      if (j + 2 > n || (broken != null && broken[j] != 0)) {
+      if (j + 2 > n || (broken != null && broken.contains(j))) {
         ok = false;
         break;
       }
@@ -74,10 +78,7 @@ List<Cell0305> find0305Cells(Uint8List b) {
       cells.add(Cell0305(i, j, segs.takeBytes()));
       i = j;
     } else {
-      broken ??= Uint8List(n);
-      for (final h in heads) {
-        broken[h] = 1;
-      }
+      (broken ??= {}).addAll(heads);
       i += 1;
     }
   }

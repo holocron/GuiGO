@@ -24,6 +24,8 @@ class ModalDynproWindow extends StatelessWidget {
     this.radioSelection,
     this.onRadioTap,
     this.onCheckbox,
+    this.onTableColumnWidths,
+    this.onTablePage,
     this.extraActions = const [],
     this.content,
     this.contentWidth,
@@ -58,6 +60,14 @@ class ModalDynproWindow extends StatelessWidget {
 
   /// A checkbox ticked / unticked ([DynproView.onCheckbox]).
   final void Function(ScreenField f, bool on)? onCheckbox;
+
+  /// A table-control column edge let go
+  /// ([DynproView.onTableColumnWidths]).
+  final void Function(TableControlInfo tc, List<int> widths)?
+  onTableColumnWidths;
+
+  /// Page a table control ([DynproView.onTablePage]).
+  final void Function(TableControlInfo tc, int vkey)? onTablePage;
   final List<Widget> extraActions;
 
   /// The popup's composed body (its dynpro plus the grids / trees hosted
@@ -199,6 +209,8 @@ class ModalDynproWindow extends StatelessWidget {
                   radioSelection: radioSelection,
                   onRadioTap: onRadioTap,
                   onCheckbox: onCheckbox,
+                  onTableColumnWidths: onTableColumnWidths,
+                  onTablePage: onTablePage,
                 ),
               if (actions.isNotEmpty)
                 Padding(

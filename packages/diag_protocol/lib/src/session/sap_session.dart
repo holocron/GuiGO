@@ -291,6 +291,7 @@ class SapSession {
   Duration? _pingSample; // the previous idle ping's gap (sap_session_liveness)
   Timer? _watchdog;
   int _parkedDropped = 0;
+  int _windowsRetired = 0; // audit 2026-10-23 R-2 (sap_session_liveness)
 
   /// Time the logon spent waiting on the user (the multi-logon wall): not
   /// counted against connect's logon deadline.
@@ -588,13 +589,14 @@ class SapSession {
   }
 
   Future<void> _openRoute(List<RouteHop> hops, Duration timeout) async {
-    _sock!.add(niFrame(buildRouteRequest(hops)));
-    await _sock!.flush();
+    final route = niFrame(buildRouteRequest(hops));
+    _sock!.add(route);
+    await _flushWithin(_sock!, route.length);
     final replies = await _recvRaw(timeout);
     checkRouteReply(replies.first);
     // whatever came with the route's NI_PONG is the target's: read next
     for (final r in replies.skip(1).toList().reversed) {
-      _inbox.addFirst(r);
+      _inboxRequeue(r);
     }
   }
 
@@ -611,8 +613,9 @@ class SapSession {
       token: token,
       data: Uint8List(0),
     ).serialize();
-    _sock!.add(niFrame(initReq));
-    await _sock!.flush();
+    final initFrame = niFrame(initReq);
+    _sock!.add(initFrame);
+    await _flushWithin(_sock!, initFrame.length);
     // read the server's reply frames until the context completes
     final deadline = DateTime.now().add(const Duration(seconds: 10));
     while (ctx.state != SncState.established &&
@@ -625,13 +628,14 @@ class SapSession {
         if (f.frameType == sncInit || f.frameType == sncAccept) {
           final next = ctx.accept(f.token);
           if (next.isNotEmpty) {
-            _sock!.add(niFrame(SncFrame(
+            final ack = niFrame(SncFrame(
               frameType: f.frameType == sncInit ? sncInitAck : sncAcceptAck,
               mechId: snc!.mechId,
               token: next,
               data: Uint8List(0),
-            ).serialize()));
-            await _sock!.flush();
+            ).serialize());
+            _sock!.add(ack);
+            await _flushWithin(_sock!, ack.length);
           }
         } else if (f.frameType == sncAcceptFailed || f.frameType == sncRejected) {
           throw StateError('SNC rejected: ${ctx.error ?? 'frame ${f.frameType}'}');
@@ -668,6 +672,15 @@ class SapSession {
   /// Test hook: run the session over an established SNC context [ctx]
   /// (built with [SncContext.sncForTest]) without a KDC handshake.
   void sncForTest(SncContext ctx) => _sncCtx = ctx;
+
+  /// Test hook: run the transport over [s] (a loopback or fake socket)
+  /// without a connect — the writer's deadline ([TransportLimits.
+  /// writeDeadline], audit 2026-10-23 R-1) is exercised through it. The
+  /// socket is not listened to: nothing is read from it.
+  void socketForTest(Socket s) {
+    _sock = s;
+    _lastWire = DateTime.now();
+  }
 
   void _wakeReader() {
     final w = _wake;
@@ -808,8 +821,11 @@ class SapSession {
     if (_sncCtx != null) {
       payload = _sncCtx!.wrapFrame(payload);
     }
-    s.add(niFrame(payload));
-    await s.flush();
+    final wire = niFrame(payload);
+    s.add(wire);
+    // bounded: a peer that stops reading is dropped, never waited on
+    // forever (audit 2026-10-23 R-1)
+    await _flushWithin(s, wire.length);
     _lastWire = DateTime.now();
     _roundSent();
   }
@@ -1339,7 +1355,10 @@ class SapSession {
             // fixture viewport, not this WSIZE: live the test system 2026-10-18)
             window: _w.ctx.windowSized ? (screenRows, screenCols) : null)
         : windowsConnectFrame(fixture[0], language: system.language));
-    await recvTurn();
+    // the kernel's 0020 paint: where it places the credential fields
+    // (login.dart loginPlanes — the recorded planes unless this paint
+    // differs; audit 2026-10-23 §5.2)
+    final connectReply = await recvTurn();
     _trace('connect reply');
     // GUI[1]: credential submit
     final password = _password;
@@ -1358,7 +1377,8 @@ class SapSession {
           screenRows: screenRows,
           screenCols: screenCols,
           window: ctx,
-          profile: guiProfile);
+          profile: guiProfile,
+          paint: connectReply);
     } else {
       var patched = patchLoginFrame(fixture[1],
           client: system.client,
@@ -1409,9 +1429,16 @@ class SapSession {
     // (wrong password, locked user, bad client…) — say so instead of
     // replaying the Easy Access answers into a silent server
     // (an expired password can paint the change-password dialog WITH a
-    // warning / error message: that is the dialog, not a refusal)
+    // warning / error message: that is the dialog, not a refusal). Keyed on
+    // the logon PROGRAM as well as the S000 tcode: the header tcode is
+    // folded on every screen, and the kernel reports S000 for application
+    // screens reached outside a dialog transaction too (SAPLRHWS/1000 in
+    // a recorded session, /IWBEP/SUTIL_LOG in a recorded session
+    // connect_su53) — a start transaction with a W/E message there is no
+    // refused logon.
     final m = screen;
     if (m != null &&
+        m.isKernelLogon &&
         m.isKernelLogonTcode &&
         m.messageSeverity >= 3 &&
         !m.asksNewPassword) {
@@ -1551,6 +1578,13 @@ class SapSession {
       _ea.dpCache.ingestFrame(f);
       recordControlFactsFromFrame(_ea, f);
       final folded = foldAutomationFrame(f, _autoStream, step);
+      // a chunked call the stream gave up on (past its byte cap) is an
+      // answer the kernel waits for and never gets: counted and named
+      // like any other failed answer (audit 2026-10-23 R-6)
+      final gaveUp = _autoStream.takeAbandoned();
+      if (gaveUp != null) {
+        _noteAnswerFailure('automation stream', StateError(gaveUp));
+      }
       for (final chunkStep in folded.receiptSteps) {
         // the empty sid-4 receipt paces the next chunk (prd gui_002/003)
         await _send(clientFrame(
@@ -1768,13 +1802,16 @@ class SapSession {
     // and never answers (live the test system 2026-10-15: `%_SEARCH_OKCODE dwdm` and
     // `dwdm` both went out at step …77 after the server's …78/…79)
     final builtOn = ctx.step;
-    return _exclusive(
-        'action',
-        () => _actLocked(
-            ctx.step == builtOn ? items : _restamped(items, ctx.step),
-            controlEvent: controlEvent,
-            dialectReady: dialectReady,
-            consumesStaged: consumesStaged));
+    return _exclusive('action', () async {
+      // a user round leaves the in-place Office document the user entered:
+      // its OnCloseDocument round goes first (sap_session_office.dart)
+      if (_officeLeaveOwed) await _leaveOfficeDocuments();
+      return _actLocked(
+          ctx.step == builtOn ? items : _restamped(items, ctx.step),
+          controlEvent: controlEvent,
+          dialectReady: dialectReady,
+          consumesStaged: consumesStaged);
+    });
   }
 
   /// [items] with their step item (16/4/38) set to [step].
@@ -1813,8 +1850,15 @@ class SapSession {
     _modes
       ..pendingCommand = null
       ..close = null; // a close read outside an action owes nothing now
+    // the staged values this round carries (built from them already): off
+    // the stage now, back on it if the send fails — a socket error on the
+    // send must not destroy typed input the server never saw (audit
+    // 2026-10-23 R-7)
+    List<StagedField>? consumed;
+    (String?, String?, int)? consumedScreen;
     if (consumesStaged) {
-      // the staged values ride these items (built from them already)
+      consumed = List.of(_staged);
+      consumedScreen = _stagedScreen;
       _staged.clear();
       _stagedScreen = null;
     } else if (_staged.isNotEmpty) {
@@ -1889,7 +1933,18 @@ class SapSession {
       _modes
         ..awaitingReply = true
         ..handedBack = false;
-      await _send(frame);
+      try {
+        await _send(frame);
+      } catch (_) {
+        // the typed values never reached the server: staged again, on the
+        // screen they were typed on, unless the user typed meanwhile
+        // (audit 2026-10-23 R-7)
+        if (consumed != null && _staged.isEmpty) {
+          _staged.addAll(consumed);
+          _stagedScreen = consumedScreen;
+        }
+        rethrow;
+      }
       if (staged != null) _gridStateFlushed();
       final all = <Uint8List>[];
       // the first reply may be slow (a cold SE80's Workbench load): the
@@ -1998,11 +2053,16 @@ class SapSession {
       return all;
     } finally {
       // in-flight state never outlives its action, failed or not: a stale
-      // command misattributes the next server-born window
+      // command misattributes the next server-born window; a close's
+      // "follow the next step-bearing frame" ends with the closing turn —
+      // left set (a client close answered by no frame), it hijacked the
+      // conversation to whichever window the server pushed to minutes
+      // later (audit 2026-10-23 R-4)
       _modes
         ..actionCommand = null
         ..awaitingReply = false
-        ..handedBack = false;
+        ..handedBack = false
+        ..followNext = false;
     }
   }
 
@@ -2072,6 +2132,17 @@ class SapSession {
   /// staged round, the bootstrap's turns) runs as part of it.
   Future<T> _exclusive<T>(String what, Future<T> Function() body) {
     if (identical(Zone.current[_lockKey], this)) return body();
+    // the queue behind the running action is bounded (audit 2026-10-23
+    // R-5): a call past the depth is refused now, with the reason, instead
+    // of replaying as a stale round minutes later; the running one and
+    // the queued ones are untouched
+    final depth = limits.actionQueueDepth;
+    if (_actionsQueued > depth) {
+      return Future<T>.error(ActionQueueFullError(
+          '$what refused: ${_actionsQueued - 1} call(s) already wait behind '
+          'the running action (ceiling $depth) — the server has not answered '
+          'the running one yet'));
+    }
     final before = _actionTail;
     final done = Completer<void>();
     _actionTail = done.future;
@@ -3165,6 +3236,36 @@ class SapSession {
     );
   }
 
+  /// The USER resized ([widths], characters by column id) or reordered
+  /// ([order], column ids 1..n by position) the columns of the classic
+  /// table control [tc] of the active window. Nothing is sent now: the SAP
+  /// GUI for WINDOWS reports the layout in its NEXT round's 16/9/14, the
+  /// full painted header with the user's arrays instead of the 60-byte
+  /// short form, and the server mirrors it in its next 18/9/14
+  /// (a recorded session g[27] / g[28] / g[30], s[37] / s[40];
+  /// [tcWindowsHeaderEcho]). A layout the server has mirrored is dropped
+  /// ([_dropMirroredLayouts]). Null arguments keep the painted array.
+  /// Returns false when the paint carries no header to report it in.
+  bool noteTableColumnLayout(
+    TableControlInfo tc, {
+    List<int>? widths,
+    List<int>? order,
+  }) {
+    final h = tc.headerRaw;
+    final key = h == null ? null : tcHeaderKey(h);
+    if (h == null || key == null) return false;
+    final prev = ctx.tcLayouts[key];
+    final layout = TcColumnLayout(
+      widths: widths ?? prev?.widths,
+      order: order ?? prev?.order,
+    );
+    if (tcLayoutHeader(h, layout) == null) return false;
+    ctx.tcLayouts[key] = layout;
+    _trace('table control $key layout: widths ${layout.widths} '
+        'order ${layout.order}');
+    return true;
+  }
+
   TcCellWrite _cellWrite(TableControlInfo tc, ScreenField f, String value) {
     final line = f.tcLine, col = f.tcColumn;
     if (line == null || col == null) {
@@ -3213,6 +3314,32 @@ bool cursorOnPushbutton(ScreenModel? screen, List<int>? cursor) {
   final row = cursor[1] << 8 | cursor[2], col = cursor[3] << 8 | cursor[4];
   return screen.fields.any((f) =>
       f.kind == FieldKind.pushbutton && f.wireRow == row && f.wireCol == col);
+}
+
+/// Drop the column layouts ([ActionContext.tcLayouts]) a paint's 18/9/14
+/// headers ([items]) already carry: the server adopted them, its header is
+/// the layout from now on (a recorded session g[29] / g[31]:
+/// the short form again).
+void _dropMirroredLayouts(ActionContext ctx, Iterable<DiagItem> items) {
+  final layouts = ctx.tcLayouts;
+  if (layouts.isEmpty) return;
+  for (final it in items) {
+    if (it.type != itemAppl4 || it.id != 9 || it.sid != 14) continue;
+    final h = Uint8List.fromList(it.value);
+    final key = tcHeaderKey(h);
+    final layout = key == null ? null : layouts[key];
+    if (layout == null) continue;
+    final mine = tcLayoutHeader(h, layout);
+    if (mine == null || _bytesEqual(mine, h)) layouts.remove(key);
+  }
+}
+
+bool _bytesEqual(Uint8List a, Uint8List b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
 }
 
 /// Mirror a server turn's paint geometry into the action context — the
@@ -3333,6 +3460,8 @@ void mirrorPaintGeometry(ActionContext ctx, Iterable<Uint8List> frames,
       }
       _parkOrRestoreFocus(ctx, level, screen);
       ctx.paintedModalLevel = windows.length - 1;
+      // a column layout this paint mirrors is the server's now
+      _dropMirroredLayouts(ctx, all.skip(top));
       // the Windows container echo of the top window (frontend_profile)
       final echo = windowsPaintEcho(all.skip(top).toList());
       ctx.paintedTableEcho = echo.tables;

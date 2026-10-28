@@ -87,7 +87,9 @@ import '../framing/envelope.dart' show containsBytes;
 import 'client_table_pull.dart' show clientTablePullTableWidth;
 import 'dp_cache.dart';
 import 'flush_call.dart';
-import 'reply_container.dart' show buildDpAnswer, rfcToken, tableColumn;
+import 'reply_container.dart'
+    show buildDpAnswer, rfcToken, tableColumn, tableInlineMax;
+import 'tree_header_names.dart' show collapseInlineRow;
 
 /// One editor control as the server last loaded it.
 class SapTextEditor {
@@ -169,6 +171,17 @@ class SapTextEditor {
   /// The first line the editor shows (the server's `FirstVisibleLine(=n)`
   /// put), null when it set none.
   int? firstVisibleLine;
+
+  /// A TextEdit's word wrap as the server configured it: `WordWrapMode`
+  /// (0 none, 1 at the window border, 2 at a fixed position),
+  /// `WordWrapPosition` (the column of mode 2), `ConvertWordWrapToLineBreak`
+  /// (1: a read-back returns the wrapped lines as lines) — PPOSE's long
+  /// text: 2 / 72 / 1 (a recorded session s[18]
+  /// verbs 589..591). Null until the server set it. [textEditReadBackLines]
+  /// applies it.
+  int? wordWrapMode;
+  int? wordWrapPosition;
+  bool wordWrapToLineBreak = false;
 
   /// How many `FirstVisibleLine(=n)` puts the server sent: each one
   /// scrolls the control (a navigation), even one repeating the last
@@ -354,6 +367,55 @@ const Map<String, String> ab4InitialCachedProps = {
   'Version': '0',
 };
 
+/// A fresh SAP GUI for Windows TextEdit's (`SAPGUI.TextEditCtrl.1`) cached
+/// props as its creation answer reports them: the caret on 1/1, the view
+/// from line 1, no selection index, unmodified — not the numeric default
+/// 0 (a recorded session g[10], a recorded session
+/// longtext_nonempty g[16], a recorded session g[13]
+/// TextEdit 178: SelPosStartCol 1, FirstVisibleLine 1,
+/// SelPosEndLine 1, TextModified 0, SelPosStartLine 1, SelIndexEnd 0,
+/// SelPosEndCol 1, SelIndexStart 0).
+const Map<String, String> textEditInitialCachedProps = {
+  'SelPosStartCol': '1',
+  'FirstVisibleLine': '1',
+  'SelPosEndLine': '1',
+  'TextModified': '0',
+  'SelPosStartLine': '1',
+  'SelIndexEnd': '0',
+  'SelPosEndCol': '1',
+  'SelIndexStart': '0',
+};
+
+/// The TextEdit's cached props in the order textedit.dll flushes them —
+/// its creation answer (a recorded session g[10]) and
+/// every later report a subsequence of it (the save rounds of
+/// a recorded session g[19] / g[32]: SelPosStartCol,
+/// TextModified, SelIndexEnd, SelPosEndCol, SelIndexStart).
+const List<String> textEditFlushOrder = [
+  'SelPosStartCol',
+  'FirstVisibleLine',
+  'SelPosEndLine',
+  'TextModified',
+  'SelPosStartLine',
+  'SelIndexEnd',
+  'SelPosEndCol',
+  'SelIndexStart',
+];
+
+/// A TextEdit's SelIndex of the 1-based position ([line], [col]) in
+/// [lines]: the 0-based character offset in the control's text (the caret
+/// after ten typed characters on line 1 is SelIndex 10, SelPosStartCol 11:
+/// a recorded session g[19]; the emptied box 0 / 1:
+/// g[32]). A line break counts one character — no recorded round has the
+/// caret past one, so that count is unproven.
+int textEditSelIndex(List<String> lines, int line, int col) {
+  var off = 0;
+  for (var i = 0; i < line - 1 && i < lines.length; i++) {
+    off += lines[i].length + 1;
+  }
+  return off + (col < 1 ? 0 : col - 1);
+}
+
 /// The ABAP editor's cached props in the order sapab4edit.ocx flushes them
 /// (its property map's own order, not the registration order) — every
 /// Windows creation answer of the corpus (a recorded session
@@ -400,6 +462,10 @@ const double ab4KernelLinePx = 18.55;
 
 /// The editor verbs whose on-object is the editor itself.
 const Set<String> _editorVerbs = {
+  // the TextEdit's word wrap (SapTextEditor.wordWrapMode)
+  'WordWrapMode',
+  'WordWrapPosition',
+  'ConvertWordWrapToLineBreak',
   ..._ab4Verbs,
   'ReadOnly',
   'ReadOnlyMode',
@@ -569,7 +635,14 @@ class SapTextEditorTracker {
         _order.remove(shell);
         _editors.remove(shell);
         if (kind != null) {
-          _editors[shell] = SapTextEditor(shell: shell, kind: kind);
+          final e = _editors[shell] = SapTextEditor(shell: shell, kind: kind);
+          // what the creation answer reports a TextEdit holds (the
+          // responder's registration report: [textEditInitialCachedProps])
+          if (kind == 'textedit') {
+            e.serverProps
+              ..clear()
+              ..addAll(textEditInitialCachedProps);
+          }
           _order.add(shell);
         }
         continue;
@@ -762,6 +835,15 @@ class SapTextEditorTracker {
           } else {
             e.breakpoints.clear();
           }
+        case 'WordWrapMode':
+          e.wordWrapMode = int.tryParse(arg('#1').trim());
+          text = false;
+        case 'WordWrapPosition':
+          e.wordWrapPosition = int.tryParse(arg('#1').trim());
+          text = false;
+        case 'ConvertWordWrapToLineBreak':
+          e.wordWrapToLineBreak = _truthy(arg('#1'));
+          text = false;
         case 'TextStream' || 'Text':
           e.lines = splitEditorLines(arg('#1'));
       }
@@ -895,6 +977,24 @@ List<String>? r3TableText(Uint8List seg, {bool stream = false}) {
   // known" wireframe although the TextEdit is up. A column absent, or rows
   // declared but not (yet) delivered, stays "no body".
   if (cells.isEmpty) return n == 0 ? <String>[] : null;
+  // inline `03 04` records, each with its trailing blanks cut to one (the
+  // Windows OCX's one-record read-back, a recorded session
+  // nonempty g[23]; the kernel's inline pushes alike): a row per cell, not
+  // the cells joined and sliced by the width they ran together
+  if (!stream &&
+      w > 0 &&
+      n > 1 &&
+      cells.length == n &&
+      cells.every((c) => c.length <= w) &&
+      cells.fold(0, (a, c) => a + c.length) < w * n) {
+    final rows = [
+      for (final c in cells) utf8.decode(c, allowMalformed: true).trimRight(),
+    ];
+    while (rows.isNotEmpty && rows.last.trim().isEmpty) {
+      rows.removeLast();
+    }
+    return rows;
+  }
   final b = BytesBuilder(copy: false);
   for (final c in cells) {
     b.add(c);
@@ -1031,22 +1131,11 @@ const int r3AbapRecordWidth = 765;
 /// in one LZH cell, a FORMAT record of the bean's own (blank name, offset
 /// 1, length = the width, type `X`), an empty PROPS, NO 06 67 trailer
 /// (a recorded session gui[22]: 8 x 765 = 6 120 B). The SAP GUI
-/// for Windows TextEdit OCX's answer is unrecorded.
+/// for Windows TextEdit OCX's object: [r3AbapWindowsPullAnswer].
 Uint8List r3AbapPullAnswer(Uint8List request, List<String> lines) {
   final declared = clientTablePullTableWidth(request);
   final w = declared > 0 ? declared : r3AbapRecordWidth;
-  final rows = <Uint8List>[];
-  for (final line in lines) {
-    final b = utf8.encode(line);
-    final r = Uint8List(w)..fillRange(0, w, 0x20);
-    // cut on a character boundary: a split UTF-8 sequence is no text
-    var n = b.length < w ? b.length : w;
-    while (n < b.length && n > 0 && (b[n] & 0xc0) == 0x80) {
-      n--;
-    }
-    r.setRange(0, n, b);
-    rows.add(r);
-  }
+  final rows = [for (final line in lines) _r3AbapRecord(line, w)];
   final format = Uint8List(79)
     ..setRange(60, 76, [
       ..._le64(1),
@@ -1074,6 +1163,126 @@ Uint8List r3AbapPullAnswer(Uint8List request, List<String> lines) {
     tableRegion: table.takeBytes(),
     trailer: false,
   );
+}
+
+/// The SAP GUI for Windows' answer to the server's read-back of a TextEdit
+/// (`SAPGUI.TextEditCtrl.1`, textedit.dll) holding [lines]: the OCX's
+/// X-R3ABAP object — `AssignProperty2(<editor>, TextAsR3Table, <obj>,
+/// r3TableAutoObj)` + `SaveDataToUrl(APPLICATION, X-R3ABAP, <sink>)`, then
+/// the untyped DP_GET of the sink ([request] its RFC value). The empty
+/// text's answer is a recorded session g[19] (and g[24] …
+/// g[45], all seven pulls of PPOSE's long text): TYPE APPLICATION, SUBTYPE
+/// X-R3ABAP, DATE `00000000` / TIME `000000`, blank DESCRIPTION and
+/// PLATTFORM, TOTALSIZE 0, the DATAASC table at the width the request
+/// declares (243 there) with no row, FORMAT and PROPS 80 x 0, the 06 67
+/// trailer — no SEND_DATA_AS_STRING scalar (the Java bean's object has one
+/// and no trailer: [r3AbapPullAnswer]).
+///
+/// A text is answered as the Java bean's records ([r3AbapPullAnswer], the
+/// only recorded non-empty X-R3ABAP read-back: a recorded session
+/// saved gui[22]): one DATAASC record per line, its UTF-8 blank-padded to
+/// the declared width, TOTALSIZE = the records' bytes, the request's own
+/// FORMAT records echoed. A non-empty Windows answer is UNRECORDED — its
+/// record encoding, TOTALSIZE and FORMAT are this reading, never an empty
+/// table for a control that holds text.
+Uint8List r3AbapWindowsPullAnswer(Uint8List request, List<String> lines) {
+  final declared = clientTablePullTableWidth(request);
+  final w = declared > 0 ? declared : r3AbapRecordWidth;
+  final rows = [for (final line in lines) _r3AbapRecord(line, w)];
+  // inline `03 04` records go with their trailing blanks cut to one (the
+  // one-record text of a recorded session g[23]: a
+  // 243-wide record sent as its text + one blank); the switch to the LZH
+  // cell is by the full records' bytes (243 inline, 5 x 243 = 1215 one
+  // cell: g[28] / g[32]) — the rows in the cell keep their padding
+  final inline = rows.fold(0, (a, r) => a + r.length) <= tableInlineMax;
+  final (_, (fw, fn), fcells) = dpColumnCells(request, 'FORMAT');
+  final f = BytesBuilder(copy: false);
+  for (final c in fcells) {
+    f.add(c);
+  }
+  final fb = f.takeBytes();
+  final frw = fw > 0 ? fw : 80;
+  final formats = [
+    for (var i = 0; (i + 1) * frw <= fb.length && (fn <= 0 || i < fn); i++)
+      Uint8List.sublistView(fb, i * frw, (i + 1) * frw),
+  ];
+  final table = BytesBuilder(copy: false)
+    ..add(_tableHead('DATAASC', w, rows.length))
+    ..add(
+      tableColumn(
+        inline ? [for (final r in rows) collapseInlineRow(r)] : rows,
+        width: w,
+      ),
+    )
+    ..add(_tableHead('FORMAT', frw, formats.length))
+    ..add(tableColumn(formats, width: frw))
+    ..add(_tableHead('PROPS', 80, 0));
+  return buildDpAnswer(
+    scalars: {
+      'TYPE': 'APPLICATION',
+      'SUBTYPE': 'X-R3ABAP',
+      'DATE': '00000000',
+      'TIME': '000000',
+      'DESCRIPTION': '',
+      'TOTALSIZE': _le32(w * rows.length),
+      'PLATTFORM': '',
+    },
+    tableRegion: table.takeBytes(),
+  );
+}
+
+/// The lines a TextEdit's read-back returns for its text [e]: with the
+/// server's fixed-position word wrap converted to line breaks
+/// (`WordWrapMode` 2, `WordWrapPosition` p, `ConvertWordWrapToLineBreak`
+/// 1 — CL_GUI_TEXTEDIT's wordwrap_to_linebreak_mode) each line wrapped at
+/// p ([wrapTextEditLine]); otherwise the lines as held. Every recorded
+/// read-back returns the pushed lines unchanged: PPOSE pushes its long text
+/// already cut at 72 (a recorded session s[18]: 8
+/// lines of at most 72 characters, read back as the same 8 records, g[18])
+/// — a pushed line past the position is unrecorded, its wrap is the
+/// control's documented mode, not a wire-proven one. Mode 1 (the window
+/// border) depends on the control's width and is not applied.
+List<String> textEditReadBackLines(SapTextEditor e) {
+  final p = e.wordWrapPosition;
+  if (e.wordWrapMode != 2 || !e.wordWrapToLineBreak || p == null || p < 1) {
+    return e.lines;
+  }
+  return [for (final l in e.lines) ...wrapTextEditLine(l, p)];
+}
+
+/// [line] wrapped at column [position]: each piece at most [position]
+/// characters, broken after the last blank that fits — the blank itself
+/// not kept (the 71-character records of a recorded session
+/// accent_long end without their separator); a word longer than
+/// [position] is cut hard at it. A line that fits is returned as it is.
+List<String> wrapTextEditLine(String line, int position) {
+  final out = <String>[];
+  var rest = line;
+  while (rest.length > position) {
+    final cut = rest.lastIndexOf(' ', position);
+    if (cut <= 0) {
+      out.add(rest.substring(0, position));
+      rest = rest.substring(position);
+    } else {
+      out.add(rest.substring(0, cut));
+      rest = rest.substring(cut + 1);
+    }
+  }
+  out.add(rest);
+  return out;
+}
+
+/// One X-R3ABAP record: [line]'s UTF-8 blank-padded to [w] bytes, a longer
+/// line cut on a character boundary (a split UTF-8 sequence is no text).
+Uint8List _r3AbapRecord(String line, int w) {
+  final b = utf8.encode(line);
+  final r = Uint8List(w)..fillRange(0, w, 0x20);
+  var n = b.length < w ? b.length : w;
+  while (n < b.length && n > 0 && (b[n] & 0xc0) == 0x80) {
+    n--;
+  }
+  r.setRange(0, n, b);
+  return r;
 }
 
 /// A reply table's name and dims: `03 01 <name> 03 01`, `03 02 <width u32>

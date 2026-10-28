@@ -31,7 +31,24 @@ class DpTable {
 /// `I` (73) 4-byte LE integer, `s` (115) 2-byte LE integer, `N` (78)
 /// numeric text; anything else is read as text. Null when the push carries
 /// no named FORMAT or no DATAASC rows.
-DpTable? decodeNamedDpTable(Uint8List seg) {
+///
+/// Memoized per [seg] object (audit 2026-10-23 P-5): a cached push is
+/// stable until evicted and a dozen side models decode the same segment
+/// per paint ([dpColumnCells] already memoizes the cells; this memoizes
+/// the row maps built from them). The result is SHARED — read it, never
+/// mutate its lists or maps.
+DpTable? decodeNamedDpTable(Uint8List seg) =>
+    (_namedTableMemo[seg] ??= _NamedTableMemo(_decodeNamedDpTable(seg))).table;
+
+final Expando<_NamedTableMemo> _namedTableMemo = Expando('DP named table');
+
+/// A [decodeNamedDpTable] result, null included (an Expando holds no null).
+class _NamedTableMemo {
+  const _NamedTableMemo(this.table);
+  final DpTable? table;
+}
+
+DpTable? _decodeNamedDpTable(Uint8List seg) {
   final (_, (fw, fn), fcells) = dpColumnCells(seg, 'FORMAT');
   final fmt = _join(fcells);
   if (fw != _fmtRecord || fn <= 0 || fmt.length < fw * fn) return null;
@@ -62,13 +79,13 @@ DpTable? decodeNamedDpTable(Uint8List seg) {
   if (data.length < dw * dn &&
       dcells.length == dn &&
       dcells.every((c) => c.length <= dw)) {
-    final b = BytesBuilder(copy: false);
-    for (final c in dcells) {
-      b
-        ..add(c)
-        ..add(Uint8List(dw - c.length)..fillRange(0, dw - c.length, 0x20));
+    // one `dw * dn` buffer blank-filled once, each row copied in at its
+    // record offset — not a pad buffer per row plus the join (audit
+    // 2026-10-23 P-5); the same bytes
+    data = Uint8List(dw * dn)..fillRange(0, dw * dn, 0x20);
+    for (var r = 0; r < dn; r++) {
+      data.setRange(r * dw, r * dw + dcells[r].length, dcells[r]);
     }
-    data = b.toBytes();
   }
   final rows = <Map<String, String>>[];
   for (var r = 0; r < dn && (r + 1) * dw <= data.length; r++) {

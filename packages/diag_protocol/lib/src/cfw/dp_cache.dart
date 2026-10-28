@@ -11,6 +11,14 @@ import '../framing/envelope.dart';
 import '../lzh/lzh.dart';
 import 'rfc_cells.dart';
 import 'svars.dart';
+import 'reply_container.dart'
+    show
+        rfcColumnNameToken,
+        rfcTagAt,
+        rfcTagBytes,
+        rfcTagColumnName,
+        rfcTagTableCell,
+        rfcTagTableEnd;
 
 const List<String> dpContentColumns = ['DATAASC', 'DATABIN'];
 
@@ -88,15 +96,31 @@ class DpCache {
   /// ([dpDecodedBytes] per segment). Counted with [bytes] against
   /// [maxBytes] at every sweep: the ceiling once held the compressed
   /// segments alone while the inflated cells, several times their size,
-  /// sat uncounted beside them (audit perf1 dp-cache-decoded). Computed on
-  /// read (two memo lookups per entry): no running counter to drift.
+  /// sat uncounted beside them (audit perf1 dp-cache-decoded).
+  ///
+  /// Recomputed only when it can have changed (audit 2026-10-23 P-4): the
+  /// per-segment memos are pinned by readers outside the cache, so no
+  /// running counter can see them land — but every pin bumps
+  /// [_dpDecodeGen], and the entry set changes only through [_put] /
+  /// [_drop]. A sweep after a push-heavy ingest no longer walks every
+  /// cached entry x column x cell when nothing was decoded since the
+  /// last one. The value is exactly the walk's.
   int get decodedBytes {
-    var n = 0;
-    for (final seg in byUrl.values) {
-      n += dpDecodedBytes(seg);
+    if (_decodedGen != _dpDecodeGen || _decodedEntries != byUrl.length) {
+      var n = 0;
+      for (final seg in byUrl.values) {
+        n += dpDecodedBytes(seg);
+      }
+      _decodedSum = n;
+      _decodedGen = _dpDecodeGen;
+      _decodedEntries = byUrl.length;
     }
-    return n;
+    return _decodedSum;
   }
+
+  int _decodedSum = 0;
+  int _decodedGen = -1;
+  int _decodedEntries = -1;
 
   /// Hold the caps now — what a round's readers decoded since the last
   /// ingest counts from here, not from the next push; the latest ingest's
@@ -189,6 +213,7 @@ class DpCache {
     }
     byUrl[url] = seg;
     _bytes += seg.length;
+    _decodedGen = -1; // the entry set changed: [decodedBytes] recounts
     _recency
       ..remove(url)
       ..add(url);
@@ -222,6 +247,7 @@ class DpCache {
 
   void _drop(Set<String> drop) {
     if (drop.isEmpty) return;
+    _decodedGen = -1; // the entry set changed: [decodedBytes] recounts
     order.removeWhere(drop.contains);
     for (final u in drop) {
       final seg = byUrl.remove(u);
@@ -415,8 +441,21 @@ class DpContent {
 /// ReadOnlyTemplate over ALL cached pushes, the frontend-file writes, the
 /// publish-url answer) and its bytes never change. The [DpContent] — and its
 /// [DpContent.content] — is shared: read it, copy before changing it.
-DpContent? dpPutContent(Uint8List seg) =>
-    (_contentMemo[seg] ??= _ContentMemo(_dpPutContent(seg))).content;
+DpContent? dpPutContent(Uint8List seg) {
+  var m = _contentMemo[seg];
+  if (m == null) {
+    _contentMemo[seg] = m = _ContentMemo(_dpPutContent(seg));
+    _dpDecodeGen++;
+  }
+  return m.content;
+}
+
+/// Bumped whenever a reader pins a new decoded memo on a segment
+/// ([dpPutContent], [dpColumnCells]) — the only events that change what
+/// [dpDecodedBytes] reports for a cached segment, so [DpCache.decodedBytes]
+/// recounts only when it moved (audit 2026-10-23 P-4). Isolate-local, as
+/// the memos are.
+int _dpDecodeGen = 0;
 
 final Expando<_ContentMemo> _contentMemo = Expando('DP push content');
 
@@ -477,12 +516,7 @@ DpContent? _dpPutContent(Uint8List seg) {
 /// bounded by the next column of the push: (name, dims, bytes), null when
 /// none decodes WHOLE (to the length its own header declares).
 (String, (int, int), Uint8List)? _columnObject(Uint8List seg, String name) {
-  final anchor = Uint8List.fromList([
-    0x03, 0x01,
-    (name.length >> 8) & 0xff, name.length & 0xff,
-    ...name.codeUnits,
-    0x03, 0x01,
-  ]);
+  final anchor = rfcColumnNameToken(name);
   final i = _indexOf(seg, anchor, 0);
   if (i < 0) return null;
   var ds = i + anchor.length;
@@ -503,7 +537,8 @@ DpContent? _dpPutContent(Uint8List seg) {
     if (next == name) continue;
     final k = _indexOf(
       seg,
-      Uint8List.fromList([0x03, 0x01, 0x00, next.length, ...next.codeUnits]),
+      Uint8List.fromList(
+          [...rfcTagBytes(rfcTagColumnName), 0x00, next.length, ...next.codeUnits]),
       ds,
     );
     if (k >= 0 && k < end) end = k;
@@ -525,14 +560,14 @@ DpContent? _dpPutContent(Uint8List seg) {
     if (j + 2 + sl > end) break;
     flat.add(Uint8List.sublistView(seg, j + 2, j + 2 + sl));
     var k = j + 2 + sl;
-    if (_startsWith(seg, k, const [0x03, 0x05, 0x03, 0x05])) {
+    if (_cellReframe(seg, k)) {
       j = k + 4;
       continue;
     }
-    if (_startsWith(seg, k, const [0x03, 0x05])) break;
+    if (rfcTagAt(seg, k) == rfcTagTableCell) break;
     const slot = 256; // 6-B `03 05 03 05 <u16>` header + 250-B segment
     if (k + slot + 4 > end ||
-        !_startsWith(seg, k + slot, const [0x03, 0x05, 0x03, 0x05])) {
+        !_cellReframe(seg, k + slot)) {
       break;
     }
     flat.add(Uint8List.sublistView(seg, k, k + slot));
@@ -644,20 +679,22 @@ String? _scalarText(Uint8List seg, String name) {
 /// until evicted and every side model re-reads its FORMAT / DATAASC
 /// columns (each re-inflating every `03 05` cell). The cell list is
 /// unmodifiable and the cells are shared: read them, copy before changing.
-(String, (int, int), List<Uint8List>) dpColumnCells(Uint8List seg, String name) =>
-    (_columnMemo[seg] ??= {})[name] ??= _dpColumnCells(seg, name);
+(String, (int, int), List<Uint8List>) dpColumnCells(Uint8List seg, String name) {
+  final memo = _columnMemo[seg] ??= {};
+  var cells = memo[name];
+  if (cells == null) {
+    memo[name] = cells = _dpColumnCells(seg, name);
+    _dpDecodeGen++;
+  }
+  return cells;
+}
 
 final Expando<Map<String, (String, (int, int), List<Uint8List>)>> _columnMemo =
     Expando('DP column cells');
 
 (String, (int, int), List<Uint8List>) _dpColumnCells(
     Uint8List seg, String name) {
-  final anchor = Uint8List.fromList([
-    0x03, 0x01,
-    (name.length >> 8) & 0xff, name.length & 0xff,
-    ...name.codeUnits,
-    0x03, 0x01,
-  ]);
+  final anchor = rfcColumnNameToken(name);
   var i = _indexOf(seg, anchor, 0);
   if (i < 0) return ('', (0, 0), const []);
   final ds = i + anchor.length;
@@ -680,8 +717,7 @@ final Expando<Map<String, (String, (int, int), List<Uint8List>)>> _columnMemo =
   // column before its cell and left the grid without rows).
   final cells = <Uint8List>[];
   while (j < seg.length) {
-    if (_startsWith(seg, j, const [0x03, 0x01, 0x00]) ||
-        _startsWith(seg, j, const [0x02, 0x13])) {
+    if (_columnStart(seg, j) || rfcTagAt(seg, j) == rfcTagTableEnd) {
       break;
     }
     if (seg[j] == 0x03 && j + 1 < seg.length && seg[j + 1] == 0x04) {
@@ -724,13 +760,16 @@ int _indexOf(Uint8List b, Uint8List needle, int from) {
   return -1;
 }
 
-bool _startsWith(Uint8List b, int at, List<int> needle) {
-  if (at + needle.length > b.length) return false;
-  for (var j = 0; j < needle.length; j++) {
-    if (b[at + j] != needle[j]) return false;
-  }
-  return true;
-}
+/// `03 05 03 05` at [at]: a cell segment's reframe (rfc_cells.dart).
+bool _cellReframe(Uint8List b, int at) =>
+    rfcTagAt(b, at) == rfcTagTableCell &&
+    rfcTagAt(b, at + 2) == rfcTagTableCell;
+
+/// `03 01 00` at [at]: the next column's name token (a name under 256 B).
+bool _columnStart(Uint8List b, int at) =>
+    rfcTagAt(b, at) == rfcTagColumnName &&
+    at + 3 <= b.length &&
+    b[at + 2] == 0;
 
 // ---------------------------------------------------------------------------
 // FORMAT (CAT80) descriptor + rows

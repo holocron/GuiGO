@@ -26,6 +26,15 @@ const int etypePushButton1 = 113;
 const int etypeFname = 114;
 const int etypePushButton2 = 115;
 const int etypeTabstripButton = 116;
+
+/// The 18/9/16 record-flags bit (atom byte [2], [DyntAtom.dlgFlag1]) that
+/// marks the tab whose page the paint shows — the reference client's
+/// TABPAGES_ACTIVE_FLAG . Exactly one tab per strip
+/// paint carries it (a recorded session frame 676: only Méthodes
+/// =TAB_MTD of SE24's eight; a recorded session, a recorded session,
+/// a recorded session). The page-id byte [15] is NOT the active
+/// flag: the kernel sends 2 there on every tab.
+const int tabstripActiveFlag = 0x40;
 const int etypeCombobox = 117;
 const int etypeCheckButton1 = 118;
 const int etypeRadioButton1 = 119;
@@ -109,13 +118,18 @@ class DyntAtom {
   String? pushbuttonFunctionCode;
   int tabstripVLength = 0; // 116
   int tabstripVHeight = 0;
-  int tabstripPageId = 0;
+  int tabstripPageId = 0; // byte [15]: 2 on every recorded tab
   int tabstripFunctionCodeOffset = 0;
   int tabstripTextOffset = 0;
   int tabstripIdOffset = 0;
   String? tabstripText;
   String? tabstripFunctionCode;
   String? tabstripId;
+
+  /// Whether this etype-116 tab is the strip's ACTIVE one: bit
+  /// [tabstripActiveFlag] of [dlgFlag1] (byte [2]).
+  bool get isActiveTab =>
+      etype == etypeTabstripButton && (dlgFlag1 & tabstripActiveFlag) != 0;
   String? xmlpropText; // 120
   int fieldFlag1 = 0; // 121/122/123 and 130/131/132
   int fieldDlen = 0;

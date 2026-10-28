@@ -3,7 +3,7 @@ import 'dart:math' as math;
 import 'package:diag_protocol/diag_protocol.dart';
 import 'package:flutter/gestures.dart'
     show kDoubleTapSlop, kDoubleTapTimeout, kTouchSlop;
-import 'package:flutter/foundation.dart' show ValueListenable;
+import 'package:flutter/foundation.dart' show ValueListenable, listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'
     show
@@ -14,10 +14,12 @@ import 'package:flutter/services.dart'
         TextInputFormatter;
 
 import '../../core/sap_icons.dart';
+import 'column_edge_grip.dart';
 import 'dynpro_grid.dart';
 import 'dynpro_listbox_view.dart';
 import 'sap_list_pager.dart';
 import 'sap_list_view.dart';
+import 'screen_composer.dart' show ScreenComposer;
 import 'session_busy.dart';
 import 'type_ahead.dart';
 
@@ -26,6 +28,51 @@ import 'type_ahead.dart';
 const double _minCellW = 7.0;
 
 const double _maxCellW = 12.0;
+
+/// The point size a composed window's dynpro pane's cell WIDTH never holds
+/// its text under ([dynproLegibleCell]; the row height, the server's
+/// layout, still bounds it at 0.78 x row): the 12 points of GuiGo's own ALV grid cells and
+/// headings (sap_grid_view.dart) — Apple's caption size, below which the
+/// iPad's text stops reading at arm's length. The composer's window cell
+/// alone gave SE80's class builder 9.8 points (117 columns in an 820-point
+/// portrait window, a 7-point cell: font = 1.4 x cell) beside the
+/// repository tree's 13.
+const double dynproMinFont = 12.0;
+
+/// The share of a dynpro pushbutton's face height its icon fills (SAP
+/// GUI's 16-pixel icon in its ~20-pixel button).
+const double dynproButtonGlyphShare = 0.8;
+
+/// The least em a dynpro pushbutton's icon is drawn at, in points: the
+/// bundled icon font draws its icons in ~77 % of the em (ICON_SEARCH 75 x 77
+/// of 100), so 20 points draw a 15-point icon — the size the iPad needs to
+/// tell SAP's icons apart (SE80's docked class builder drew them at 9).
+const double dynproButtonIconEm = 20;
+
+/// The stroke a dynpro pushbutton's icon glyph is thickened by, as a share
+/// of its em: the icon font's hairlines plus 0.05 em (1 point at 20) on
+/// each side — SAP GUI's bitmaps are 1-pixel lines on a 16-pixel icon, a
+/// 1/16 line weight the font draws at a third of that.
+const double dynproGlyphStroke = 0.05;
+
+/// A disabled dynpro element's foreground: the on-surface colour at 70 %
+/// over the surface — greyed like SAP GUI's inactive icons and labels, yet
+/// at least 4.5 : 1 against the surface in both themes (Material's 38 %
+/// left the class builder's icons unreadable on dark grey).
+Color dynproDisabledForeground(ColorScheme scheme) =>
+    Color.alphaBlend(scheme.onSurface.withValues(alpha: 0.7), scheme.surface);
+
+/// The composer's window [cell] (DynproView.cell) widened so a composed
+/// pane's text (DynproView's grid: min(1.4 x width, 0.78 x height)) is not
+/// held under [dynproMinFont] by the cell's WIDTH. Only the width: the
+/// rows are the window rows GuiGo reported to the server, which laid the
+/// dynpro out for exactly them (SAPLSEOD/2000's methods table ends on the
+/// window's last row) — taller rows ran the tab strip and the table's
+/// header off the pane's top. SE80's class builder at 7 x 15.2 points is
+/// drawn at 8.57 x 15.2: 11.9-point text (the row's bound) instead of 9.8,
+/// its columns scrolling sideways in the pane.
+Size dynproLegibleCell(Size cell) =>
+    Size(math.max(cell.width, dynproMinFont / 1.4), cell.height);
 
 /// The widest painted grid (columns) seen per program, for one logon: the
 /// cell size of a transaction stays put while its screens change. The
@@ -36,19 +83,38 @@ class DynproZoomScope extends InheritedWidget {
   const DynproZoomScope({
     super.key,
     required this.widest,
+    this.columnWidths,
     required super.child,
   });
 
   /// program -> the widest grid (columns) painted for it.
   final Map<String, int> widest;
 
+  /// The session's table-control column widths the user dragged
+  /// ([tcColumnKey] -> column index -> width in cells): kept for the
+  /// session, per control, as SAP GUI keeps them while the logon lives.
+  /// Client-only — no wire item carries a classic table control's resized
+  /// column (no recording holds one; the Windows 16/9/14 echo is the
+  /// painted header's 60-byte prefix alone, a recorded session
+  /// gui[7]). Null: the view keeps its own.
+  final Map<String, Map<int, double>>? columnWidths;
+
   static Map<String, int>? maybeOf(BuildContext context) =>
       context.getInheritedWidgetOfExactType<DynproZoomScope>()?.widest;
 
+  static Map<String, Map<int, double>>? columnWidthsOf(BuildContext context) =>
+      context.getInheritedWidgetOfExactType<DynproZoomScope>()?.columnWidths;
+
   @override
   bool updateShouldNotify(DynproZoomScope old) =>
-      !identical(old.widest, widest);
+      !identical(old.widest, widest) ||
+      !identical(old.columnWidths, columnWidths);
 }
+
+/// The key a table control's dragged column widths are kept under
+/// ([DynproZoomScope.columnWidths]): its program, dynpro and name.
+String tcColumnKey(ScreenModel m, TableControlInfo tc) =>
+    '${m.program}:${m.dynpro}:${tc.name}';
 
 /// A paint's derived layouts, computed once per model: every server turn
 /// rebuilds the session screen, and an unchanged paint (the same model) must
@@ -167,6 +233,8 @@ class DynproView extends StatefulWidget {
     this.controls = const {},
     this.overlays = const [],
     this.cell,
+    this.maxCols,
+    this.windowCells,
     this.onEdit,
     this.onValueHelp,
     this.onListPick,
@@ -179,6 +247,8 @@ class DynproView extends StatefulWidget {
     this.listboxValueSet,
     this.onListboxPick,
     this.onCheckbox,
+    this.onTableColumnWidths,
+    this.onTablePage,
   });
 
   final ScreenModel model;
@@ -213,6 +283,17 @@ class DynproView extends StatefulWidget {
   /// the panes around it; null = fit the grid to the width.
   final Size? cell;
 
+  /// The pane's width in cells when the dynpro is one pane of a composed
+  /// window ([cell] set): a table control is boxed to it, its columns past
+  /// the pane scroll inside the box (SE80 sideways: a 98-column frame in
+  /// an 84-column pane ran off the screen). Null: unbounded.
+  final int? maxCols;
+
+  /// The session's current SAP window (rows, cols) — the cells the kernel
+  /// lays a window-following screen out for ([followsWindow]); null falls
+  /// back to the paint's own SES dimensions.
+  final (int, int)? windowCells;
+
   /// A field's text changed (not yet submitted): the session stages it,
   /// and it rides the next action — any key, button or okcode — the way
   /// SAP GUI sends every changed field with the PAI.
@@ -228,6 +309,22 @@ class DynproView extends StatefulWidget {
   /// value, and it rides the next PAI the way SAP GUI sends a changed box
   /// (the box shows the tick at once). Null: a tap sends a bare Enter.
   final void Function(ScreenField f, bool on)? onCheckbox;
+
+  /// The user let go of a table-control column edge: the control's column
+  /// widths in characters (by column id), the dragged one rounded. The
+  /// session reports them in the next round's 16/9/14 and the server
+  /// mirrors them in its next paint (a recorded session g[27]
+  /// -> s[37]: SapSession.noteTableColumnLayout). Null: the resize stays
+  /// the view's own.
+  final void Function(TableControlInfo tc, List<int> widths)?
+  onTableColumnWidths;
+
+  /// Page a table control: [vkey] 82 (Page Down) or 81 (Page Up) with the
+  /// cursor in it — the SERVER pages and repaints the control's lines
+  /// (a recorded session g[28] -> s[38];
+  /// SapSession.pageTableControl). Its scroll bar's track and a vertical
+  /// swipe over its lines fire it. Null: no paging.
+  final void Function(TableControlInfo tc, int vkey)? onTablePage;
 
   /// An input took the keyboard focus: the field F1 asks help for.
   final void Function(ScreenField f)? onFocusField;
@@ -711,6 +808,10 @@ class _DynproViewState extends State<DynproView> {
   /// The zoom memory when no [DynproZoomScope] provides the session's.
   final Map<String, int> _ownWidest = {};
 
+  /// The dragged column widths when no [DynproZoomScope] provides the
+  /// session's.
+  final Map<String, Map<int, double>> _ownTcWidths = {};
+
   /// The dynpro checkboxes ticked since the paint, by field (identity) —
   /// the paint's own value until the server repaints the box (the
   /// [_listTicks] pattern); [_boxTick] bumps so the box alone redraws.
@@ -986,6 +1087,91 @@ class _DynproViewState extends State<DynproView> {
     // whenever the pane's constraints change); no width clamps a hosted
     // control there (the composed path hosts none)
     final fixed = widget.cell;
+    final rows = _listRows(widget.model);
+    // controls whose container the paint does not place
+    final below = [
+      for (final e in widget.controls.entries)
+        if (!widget.model.containers.containsKey(e.key))
+          Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: SizedBox(height: 380, child: e.value),
+          ),
+    ];
+    // a screen whose layout follows the window: at the window's own cell
+    // (a fixed-size dynpro keeps the tree it always had — no LayoutBuilder
+    // above its list view)
+    final windowRows = (widget.windowCells?.$1 ?? 0) > 0
+        ? widget.windowCells!.$1
+        : m.windowRows;
+    if (fixed == null &&
+        !widget.compact &&
+        rows.isEmpty &&
+        below.isEmpty &&
+        followsWindow(m, windowRows)) {
+      return LayoutBuilder(
+        builder: (context, cons) {
+          final window = _windowOf(m, cons.maxWidth);
+          if (window != null &&
+              cons.maxHeight.isFinite &&
+              followsWindow(m, window.$1)) {
+            return _windowBody(grid, layout, radioGroups, icons, window, cons);
+          }
+          return _listBody(
+            context,
+            m,
+            grid,
+            layout,
+            radioGroups,
+            icons,
+            panelText,
+            widestCols,
+            rows,
+            below,
+          );
+        },
+      );
+    }
+    return _listBody(
+      context,
+      m,
+      grid,
+      layout,
+      radioGroups,
+      icons,
+      panelText,
+      widestCols,
+      rows,
+      below,
+    );
+  }
+
+  Widget _listBody(
+    BuildContext context,
+    ScreenModel m,
+    DynproGrid grid,
+    DynproLayout layout,
+    Map<String, List<ScreenField>> radioGroups,
+    SapIconAtlas? icons,
+    String panelText,
+    Map<String, int> widestCols,
+    List<ListLine?> rows,
+    List<Widget> below,
+  ) {
+    final fixed = widget.cell;
+    // a composed window's pane: its cell, raised to the legible floor
+    // ([dynproLegibleCell]) — the pane then holds fewer columns (a table control
+    // is boxed to them and scrolls its columns sideways inside), and a
+    // dynpro wider than the pane scrolls sideways in it
+    // (a pane carrying CFW regions on its cells — the Easy Access tree and
+    // picture, an ALV tree's toolbar — keeps the window cell: those
+    // controls draw their own legible text, and their regions must stay
+    // where the window's layout put them)
+    final cell = fixed == null
+        ? null
+        : (widget.overlays.isEmpty ? dynproLegibleCell(fixed) : fixed);
+    final paneCols = widget.maxCols == null || cell == null
+        ? null
+        : math.max(1, (widget.maxCols! * fixed!.width / cell.width).floor());
     final body = fixed != null
         ? _absorbing(
             _buildGrid(
@@ -994,9 +1180,10 @@ class _DynproViewState extends State<DynproView> {
               layout,
               radioGroups,
               icons,
-              fixed.width,
+              cell!.width,
               double.infinity,
-              rowHeight: fixed.height,
+              rowHeight: cell.height,
+              maxCols: paneCols,
             ),
           )
         : _fittedBody(
@@ -1011,10 +1198,21 @@ class _DynproViewState extends State<DynproView> {
 
     // the paint's classic list (an F4 hit list, a report list — thousands
     // of lines): its lines built as they scroll into view
-    final rows = _listRows(widget.model);
     if (widget.cell != null) {
-      // a pane of a composed window: the grid starts at the pane's origin
-      if (rows.isEmpty) return SingleChildScrollView(child: body);
+      // a pane of a composed window: the grid starts at the pane's origin;
+      // raised to the legible cell it may run past the pane: sideways
+      if (rows.isEmpty) {
+        final raised = cell!.width > fixed!.width + 0.01;
+        return SingleChildScrollView(
+          child: raised
+              ? SingleChildScrollView(
+                  key: const ValueKey('dynpro-pane-sideways'),
+                  scrollDirection: Axis.horizontal,
+                  child: body,
+                )
+              : body,
+        );
+      }
       final paged = _pagedList(rows, body, const [], EdgeInsets.zero);
       if (paged != null) return paged;
       return _withList(context, rows, 0, (line, width, _) {
@@ -1028,15 +1226,6 @@ class _DynproViewState extends State<DynproView> {
         );
       });
     }
-    // controls whose container the paint does not place
-    final below = [
-      for (final e in widget.controls.entries)
-        if (!widget.model.containers.containsKey(e.key))
-          Padding(
-            padding: const EdgeInsets.only(top: 12),
-            child: SizedBox(height: 380, child: e.value),
-          ),
-    ];
     final hPad = widget.compact ? 8.0 : 12.0;
     Widget listView(Widget Function(int i)? line, int count) =>
         ListView.builder(
@@ -1072,6 +1261,80 @@ class _DynproViewState extends State<DynproView> {
       2 * hPad,
       (line, width, _) => listView(line, rows.length),
     );
+  }
+
+  /// The SAP window (rows, cols) a main-window paint was laid out for: the
+  /// session's current one (the paint's SES dimensions can lag one screen
+  /// behind a resize), else the paint's own — only when that window fits
+  /// [width] at the legible cell, i.e. could be this view's (a window the
+  /// session never sized is another client's: ME21N recorded at 45 x 255
+  /// keeps the free-standing grid); null when neither holds.
+  (int, int)? _windowOf(ScreenModel m, double width) {
+    final w = widget.windowCells;
+    if (w != null && w.$1 > 0 && w.$2 > 0) return w;
+    if (m.windowRows > 0 &&
+        m.windowCols > 0 &&
+        m.windowCols * _minCellW <= width) {
+      return (m.windowRows, m.windowCols);
+    }
+    return null;
+  }
+
+  /// A screen whose layout follows the window ([followsWindow]) drawn at
+  /// the window's own cell, the one the session sized the window from
+  /// ([sapWindowCells]: rows at the composer's 2:1 cell, 18 points at the
+  /// least): SE24's methods table at 18 x 124 in an 874 x 258 body is cw
+  /// 7.05 x ch 14.33, the table ending at 243.7 — at the free-standing
+  /// grid's 22-point rows it ran 220 points past the body. Measured OUTSIDE the scroll view (an
+  /// item of the ListView has no height bound), with no paddings and no
+  /// scroll tail (the composer has none either); the program's zoom
+  /// memory is neither read nor widened: the window's columns are the
+  /// cell. Below the legible cell the grid keeps 7 points (rows at least
+  /// 14) and scrolls.
+  Widget _windowBody(
+    DynproGrid grid,
+    DynproLayout layout,
+    Map<String, List<ScreenField>> radioGroups,
+    SapIconAtlas? icons,
+    (int, int) window,
+    BoxConstraints cons,
+  ) {
+    final m = widget.model;
+    final (windowRows, windowCols) = window;
+    // the painted extent (hosted controls' containers count, as in
+    // [_fittedBody]) and the window's columns: the cell is the window's
+    var painted = grid.cols;
+    for (final name in widget.controls.keys) {
+      final c = m.containers[name];
+      if (c != null) painted = math.max(painted, c.col + c.width);
+    }
+    final cols = math.max(painted, windowCols);
+    final cw = (cons.maxWidth / cols).clamp(_minCellW, _maxCellW);
+    final ch = (cons.maxHeight / windowRows).clamp(
+      cw * ScreenComposer.cellAspect,
+      cw * ScreenComposer.cellAspect * ScreenComposer.maxFillStretch,
+    );
+    Widget body = _absorbing(
+      _buildGrid(
+        context,
+        grid,
+        layout,
+        radioGroups,
+        icons,
+        cw,
+        cols * cw,
+        windowRow: ch,
+      ),
+    );
+    // the legible cell's floor wider than the body (upright, 80 columns
+    // at 7 points in 402): the window scrolls sideways
+    if (painted * cw > cons.maxWidth + 0.5) {
+      body = SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: body,
+      );
+    }
+    return SingleChildScrollView(controller: _scroll, child: body);
   }
 
   /// The body fitted to the window: SAP GUI geometry whenever the painted
@@ -1402,18 +1665,31 @@ class _DynproViewState extends State<DynproView> {
     double cw,
     double maxWidth, {
     double? rowHeight,
+    double? windowRow,
+    int? maxCols,
   }) {
     final scheme = Theme.of(context).colorScheme;
-    final ch = rowHeight ?? (cw * 2.6).clamp(22.0, 30.0);
+    // [windowRow]: a window-following screen at the window's own row
+    // ([_windowBody]); [rowHeight]: a composed window's pane
+    final ch = rowHeight ?? windowRow ?? (cw * 2.6).clamp(22.0, 30.0);
+    final windowCell = rowHeight != null || windowRow != null;
     // a fixed (composed-window) cell scales the text with it, like the
-    // reference client's picture; a fitted grid keeps a readable minimum
+    // reference client's picture; a fitted grid keeps a readable minimum (a window
+    // row keeps it too, as far as the row holds it)
     final font = rowHeight != null
         ? math.min(cw * 1.4, rowHeight * 0.78)
+        : windowRow != null
+        ? math.min((cw * 1.35).clamp(11.0, 15.0), windowRow * 0.78)
         : (cw * 1.35).clamp(11.0, 15.0);
-    // a composed window's pane starts at the dynpro's row 0 — the window
-    // cell its neighbours and its overlays are placed by; a free-standing
-    // grid skips the blank rows above its first painted one
-    final top = rowHeight != null ? 0 : grid.firstRow;
+    // a composed window's pane and a window-following screen start at the
+    // dynpro's row 0 — the window cell its neighbours and its overlays are
+    // placed by; a free-standing grid skips the blank rows above its first
+    // painted one
+    final top = windowCell ? 0 : grid.firstRow;
+    // a table control's right edge: the box visible inside its subscreen
+    // ([TableControlInfo.boxWidth]), bounded by the pane
+    int right(TableControlInfo tc) =>
+        math.min(tc.col + tc.boxWidth, maxCols ?? (1 << 30));
     double y(int row) => (row - top) * ch;
 
     final children = <Widget>[];
@@ -1434,12 +1710,20 @@ class _DynproViewState extends State<DynproView> {
     // columns past the fixed ones scroll sideways inside the box, as in
     // SAP GUI (TC_1211 paints 35 columns, 292 cells wide, into 157)
     final scrolling = <String, _TcScroll>{};
+    // each control's columns at the widths the user dragged (the server's
+    // until a header edge is dragged)
+    final store =
+        DynproZoomScope.columnWidthsOf(context) ?? _ownTcWidths;
+    final tcCols = {
+      for (final tc in widget.model.tableControls)
+        tc.name: _TcCols(tc, store[tcColumnKey(widget.model, tc)]),
+    };
     for (final tc in widget.model.tableControls) {
       children.add(
         Positioned(
           left: tc.col * cw,
           top: y(tc.row),
-          width: tc.width * cw,
+          width: (right(tc) - tc.col) * cw,
           height: tc.height * ch,
           child: DecoratedBox(
             decoration: BoxDecoration(
@@ -1449,14 +1733,36 @@ class _DynproViewState extends State<DynproView> {
           ),
         ),
       );
-      final sc = _TcScroll.of(tc);
+      final sc = _TcScroll.of(tcCols[tc.name]!, right(tc));
       if (sc != null) scrolling[tc.name] = sc;
+      // the cells of the fixed (or only) columns: field boxes on the
+      // control's ground, the gaps between them its grid
+      children.add(
+        Positioned(
+          key: ValueKey('tc-grid-${tc.name}'),
+          left: 0,
+          top: y(tc.row),
+          width: right(tc) * cw,
+          height: tc.height * ch,
+          child: CustomPaint(
+            painter: _TcGridPainter(
+              tc,
+              tcCols[tc.name]!,
+              sc,
+              cw,
+              ch,
+              scheme.surfaceContainerHigh,
+              moving: false,
+            ),
+          ),
+        ),
+      );
       if (tc.title.isNotEmpty && tc.headerRows >= 1) {
         children.add(
           Positioned(
             left: (tc.col + 1) * cw,
             top: y(tc.row),
-            width: (tc.width - 2) * cw,
+            width: math.max(0, right(tc) - tc.col - 2) * cw,
             height: ch,
             child: Align(
               alignment: Alignment.centerLeft,
@@ -1497,58 +1803,120 @@ class _DynproViewState extends State<DynproView> {
     // cells relative to its scroll origin
     final moving = <String, List<_TcCell>>{};
     bool moves(TableControlInfo tc, int column) =>
-        scrolling[tc.name] != null && column >= scrolling[tc.name]!.fixed;
+        scrolling[tc.name] != null &&
+        tcCols[tc.name]!.position(column) >= scrolling[tc.name]!.fixed;
     for (final tc in widget.model.tableControls) {
       if (tc.headerRows < 1 || tc.title.isNotEmpty && tc.headerRows < 2) {
         continue; // a lone chrome row is the title bar
       }
       final sc = scrolling[tc.name];
+      final cols = tcCols[tc.name]!;
+      final key = tcColumnKey(widget.model, tc);
+      final grips = <void Function()>[];
       for (var i = 0; i < tc.columns.length; i++) {
-        if (i >= tc.columnOffsets.length || i >= tc.widths.length) continue;
+        if (i >= cols.count) continue;
         // the heading the control paints ("Pos", "UA"), else the column's
         // DDIC title; the long title is the heading's tooltip
         final heading = i < tc.headings.length
             ? tc.headings[i]
             : (i < tc.titles.length ? tc.titles[i].trim() : '');
-        if (heading.isEmpty) continue;
         final tip = i < tc.headingTips.length && tc.headingTips[i].isNotEmpty
             ? tc.headingTips[i]
             : (i < tc.titles.length ? tc.titles[i].trim() : '');
         final move = moves(tc, i);
-        final left = (tc.columnOffsets[i] - (move ? sc!.left : 0)) * cw;
+        final left = (cols.left(i) - (move ? sc!.left : 0)) * cw;
         final top = move
             ? (tc.headerRows - 1) * ch
             : y(tc.row + tc.headerRows - 1);
-        final w = Positioned(
-          left: left,
-          top: top,
-          // clipped to the column, as the real control clips it
-          width: tc.widths[i] * cw,
-          height: ch,
-          child: Tooltip(
-            message: tip == heading ? '' : tip,
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: _iconText(
-                heading,
-                icons,
-                style: TextStyle(
-                  fontSize: font,
-                  fontWeight: FontWeight.w600,
-                  color: scheme.onSurfaceVariant,
+        final width = cols.width(i) * cw;
+        void place(Widget w, double from, double to) => move
+            ? moving.putIfAbsent(tc.name, () => []).add(_TcCell(from, to, w))
+            : children.add(w);
+        // the column's header BUTTON — a grey box with a gap to its
+        // neighbour, its heading cut inside it with an ellipsis ("T…" of
+        // SAPLSEOD/2000's 3-cell method-type column, a recorded session
+        // column_resize methods_tab_screenshot.png): a heading never runs
+        // into the next ("Met" against "Description" read
+        // "MetDescription")
+        place(
+          Positioned(
+            key: heading.isEmpty ? null : ValueKey('tc-heading-${tc.name}-$i'),
+            left: left,
+            top: top,
+            width: width,
+            height: ch,
+            child: Padding(
+              padding: const EdgeInsets.only(right: _tcGap, bottom: _tcGap),
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerHighest,
                 ),
-                clip: true,
+                child: heading.isEmpty
+                    ? const SizedBox.expand()
+                    : Tooltip(
+                        message: tip == heading ? '' : tip,
+                        child: ClipRect(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 2),
+                            child: Align(
+                              alignment: Alignment.centerLeft,
+                              child: _iconText(
+                                heading,
+                                icons,
+                                style: TextStyle(
+                                  fontSize: font,
+                                  fontWeight: FontWeight.w600,
+                                  color: scheme.onSurfaceVariant,
+                                ),
+                                clip: true,
+                                ellipsis: true,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
               ),
             ),
           ),
+          left,
+          left + width,
         );
-        if (move) {
-          moving
-              .putIfAbsent(tc.name, () => [])
-              .add(_TcCell(left, left + tc.widths[i] * cw, w));
-        } else {
-          children.add(w);
-        }
+        // the column's right edge in the header row: the real control's
+        // header separator, and its grip — a drag resizes the column (the
+        // columns to its right follow; the control scrolls sideways once
+        // they run past its box); the layout rides the next round
+        // ([DynproView.onTableColumnWidths]). Placed after every header
+        // button, so no neighbour's button covers its right half
+        final edge = left + width;
+        grips.add(() => place(
+          Positioned(
+            key: ValueKey('tc-edge-${tc.name}-$i'),
+            left: edge - ColumnEdgeGrip.width / 2,
+            top: top,
+            width: ColumnEdgeGrip.width,
+            height: ch,
+            child: ColumnEdgeGrip(
+              color: scheme.outlineVariant,
+              // from the stored width: several drag steps may land
+              // before the rebuild this one schedules
+              onDrag: (dx) => setState(() {
+                final now = store[key]?[i] ?? tc.widths[i].toDouble();
+                (store[key] ??= {})[i] = (now + dx / cw).clamp(
+                  _tcMinCells,
+                  _tcMaxCells,
+                );
+              }),
+              // let go: whole characters (a SAP column width is one), and
+              // the layout to the session for the next round
+              onDragEnd: () => _tcDragEnded(tc, store, key),
+            ),
+          ),
+          edge - ColumnEdgeGrip.width / 2,
+          edge + ColumnEdgeGrip.width / 2,
+        ));
+      }
+      for (final g in grips) {
+        g();
       }
     }
     final tcByName = {for (final tc in widget.model.tableControls) tc.name: tc};
@@ -1562,7 +1930,23 @@ class _DynproViewState extends State<DynproView> {
     final rowRight = <int, double>{};
     for (final c in grid.cells) {
       final f = c.field;
-      final w = c.width * cw;
+      // a table cell keeps to its column, from the column's (moved) left
+      // edge: a text cell never runs on over an empty neighbour column (a
+      // method name across SAPLSEOD/2000's 3-cell type column into the
+      // Level text); in a column the user resized a text cell fills it, an
+      // input keeps its own length within it
+      final tcc = f.tableControl == null ? null : tcCols[f.tableControl];
+      final ci = (f.tcColumn ?? 1) - 1;
+      final inCatalog = tcc != null && ci >= 0 && ci < tcc.count;
+      var cells = c.width.toDouble();
+      if (inCatalog) {
+        final room = math.max(
+          1.0,
+          tcc.width(ci) - (c.col - tcc.tc.columnOffsets[ci]),
+        );
+        cells = _isText(f) && tcc.resized(ci) ? room : math.min(cells, room);
+      }
+      final w = cells * cw;
       Widget child;
       switch (f.kind) {
         case FieldKind.label:
@@ -1581,13 +1965,20 @@ class _DynproViewState extends State<DynproView> {
                   height: 1.1,
                 ),
                 maxLines: 1,
-                // proportional text can run wider than its painted cells:
-                // shrink it to fit, as SAP GUI's cell font always fits
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  alignment: Alignment.centerLeft,
-                  child: _iconText(f.text.trimRight(), icons),
-                ),
+                // a table control's cell: the control's one font, cut at
+                // the column's edge as SAP GUI cuts it (never shrunk to fit:
+                // SAPLSEOD/2000's method names drew at a different size row
+                // by row); elsewhere proportional text can run wider than
+                // its painted cells: shrink it to fit
+                child: f.tableControl != null
+                    ? _tcText(f, icons, w, clamped: c.clamped || cells < c.own)
+                    : c.clamped
+                    ? _clampedText(f, icons, w)
+                    : FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerLeft,
+                        child: _iconText(f.text.trimRight(), icons),
+                      ),
               ),
             ),
           );
@@ -1610,7 +2001,7 @@ class _DynproViewState extends State<DynproView> {
         case FieldKind.combobox:
           child = _doubleTappable(f, _listbox(f, font, monospace: true));
         case FieldKind.pushbutton:
-          child = _gridButton(f, icons, font);
+          child = _gridButton(f, icons, font, cw);
         case FieldKind.tabstrip:
           child = _leaf(
             (busy) => _GridTab(
@@ -1664,7 +2055,7 @@ class _DynproViewState extends State<DynproView> {
       }
       // a composed window's small fixed cell: every field fills its row
       // (a 4-point inset would clip the glyphs of a 12-point row)
-      final h = f.kind == FieldKind.tabstrip || rowHeight != null ? ch : ch - 4;
+      final h = f.kind == FieldKind.tabstrip || windowCell ? ch : ch - 4;
       final tc = tcByName[f.tableControl];
       final move = tc != null && moves(tc, (f.tcColumn ?? 1) - 1);
       // a table cell keeps to its column; a free checkbox keeps a target
@@ -1674,7 +2065,9 @@ class _DynproViewState extends State<DynproView> {
       for (var n = 1; !keys.add(k); n++) {
         k = 'field-$cellKey#$n'; // two fields painted at one cell
       }
-      final left = (c.col - (move ? scrolling[tc.name]!.left : 0)) * cw;
+      final shift = inCatalog ? tcc.shift(ci) : 0.0;
+      final left =
+          (c.col + shift - (move ? scrolling[tc.name]!.left : 0)) * cw;
       final width = choice && tc == null ? math.max(w, ch + 8) : w;
       final placed = Positioned(
         key: ValueKey(k),
@@ -1710,6 +2103,36 @@ class _DynproViewState extends State<DynproView> {
     for (final tc in widget.model.tableControls) {
       final sc = scrolling[tc.name];
       if (sc == null) continue;
+      // the moving columns' cell boxes, under their fields, scrolled with
+      // them
+      final extent = (sc.content - sc.left) * cw;
+      moving
+          .putIfAbsent(tc.name, () => [])
+          .insert(
+            0,
+            _TcCell(
+              0,
+              extent,
+              Positioned(
+                key: ValueKey('tc-grid-moving-${tc.name}'),
+                left: 0,
+                top: 0,
+                width: extent,
+                height: tc.height * ch,
+                child: CustomPaint(
+                  painter: _TcGridPainter(
+                    tc,
+                    tcCols[tc.name]!,
+                    sc,
+                    cw,
+                    ch,
+                    scheme.surfaceContainerHigh,
+                    moving: true,
+                  ),
+                ),
+              ),
+            ),
+          );
       final ctl = _tcScroll.putIfAbsent(tc.name, ScrollController.new);
       children.add(
         Positioned(
@@ -1741,6 +2164,56 @@ class _DynproViewState extends State<DynproView> {
         ),
       );
     }
+    // each table control's vertical scroll bar — the server's model rows,
+    // first row and page (18/9/14 bytes 36..41) — and its paging: a tap on
+    // the track above / below the thumb, or a swipe over the lines, is the
+    // real GUI's Page Up / Page Down with the cursor in the control; the
+    // server repaints the lines (the dynpro pane itself never scrolls for
+    // it: the tab strip and the headings stay put)
+    final page = widget.onTablePage;
+    for (final tc in widget.model.tableControls) {
+      final total = tc.totalRows, first = tc.firstRow, rows = tc.pageRows;
+      if (page == null || total == null || first == null || rows == null) {
+        continue;
+      }
+      if (total <= rows && first == 0) continue; // one page: nothing to page
+      final up = first > 0, down = first + rows < total;
+      final top = y(tc.lineRow(1));
+      final height = tc.visibleRows * ch;
+      if (height <= 0) continue;
+      void fire(int vkey) {
+        if (_busyNow) return;
+        if (vkey == _vkeyPageDown && !down) return;
+        if (vkey == _vkeyPageUp && !up) return;
+        page(tc, vkey);
+      }
+
+      children.add(
+        Positioned(
+          key: ValueKey('tc-swipe-${tc.name}'),
+          left: tc.col * cw,
+          top: top,
+          width: (right(tc) - tc.col) * cw - _TcPageBar.width,
+          height: height,
+          child: _TcSwipe(onPage: fire),
+        ),
+      );
+      children.add(
+        Positioned(
+          key: ValueKey('tc-vscroll-${tc.name}'),
+          left: right(tc) * cw - _TcPageBar.width - 1,
+          top: top,
+          width: _TcPageBar.width,
+          height: height,
+          child: _TcPageBar(
+            total: total,
+            first: first,
+            rows: rows,
+            onPage: fire,
+          ),
+        ),
+      );
+    }
     // hosted controls at their container's cells (never wider than the
     // window, never too short to read)
     var canvasW = grid.cols * cw, canvasH = (grid.rows - top) * ch;
@@ -1749,7 +2222,11 @@ class _DynproViewState extends State<DynproView> {
       if (c == null) continue;
       final left = c.col * cw;
       final w = math.min(c.width * cw, maxWidth - left);
-      final h = math.max(c.height * ch, 260.0);
+      // (a window-following screen's control is its cells: the window
+      // fits the body exactly)
+      final h = windowRow != null
+          ? c.height * ch
+          : math.max(c.height * ch, 260.0);
       children.add(
         Positioned(
           left: left,
@@ -1810,6 +2287,113 @@ class _DynproViewState extends State<DynproView> {
     );
     return Align(alignment: Alignment.topLeft, child: canvas);
   }
+
+  /// A table-control column edge let go ([DynproView.onTableColumnWidths]).
+  void _tcDragEnded(
+    TableControlInfo tc,
+    Map<String, Map<int, double>> store,
+    String key,
+  ) {
+    final over = store[key];
+    if (over == null) return;
+    setState(() {
+      for (final e in over.entries) {
+        over[e.key] = e.value.roundToDouble();
+      }
+    });
+    final n = math.min(tc.widths.length, tc.columnOffsets.length);
+    final widths = [
+      for (var i = 0; i < n; i++) (over[i] ?? tc.widths[i]).round(),
+    ];
+    var changed = false;
+    for (var i = 0; i < n; i++) {
+      if (widths[i] != tc.widths[i]) changed = true;
+    }
+    if (changed) widget.onTableColumnWidths?.call(tc, widths);
+  }
+
+  /// A table control's text cell: one fixed font for every cell of the
+  /// control, cut at the column's edge — SAP GUI clips a cell's text to its
+  /// column and never scales it (SAPLSEOD/2000's methods table: a 55-
+  /// character method name in its 35-cell column and a short one beside it
+  /// draw at the same size). 2 points on either side keep a cell's glyphs
+  /// off its neighbours' (the Level text touched the Method column). A cut
+  /// cell ([clamped]) has its full text as its tooltip (on hover).
+  Widget _tcText(
+    ScreenField f,
+    SapIconAtlas? icons,
+    double w, {
+    required bool clamped,
+  }) {
+    final text = f.text.trimRight();
+    // the cell's DIAG attribute (18/9/17, the record its 18/9/5 line head
+    // names): fixed-pitch unless PROPFONT, link-blue when INTENSIFY — the
+    // real GUI's methods table draws Méthode / Type / Visibilité in the
+    // fixed font, Description (attr 0x61) proportional, and the method
+    // names of the intensified lines (0x45) blue, the others (0x41) plain
+    // (a recorded session s[35], methods_tab_screenshot.png)
+    final scheme = Theme.of(context).colorScheme;
+    final style = TextStyle(
+      fontFamily: f.attr & attrPropfont != 0 ? null : 'Menlo',
+      fontFamilyFallback: f.attr & attrPropfont != 0
+          ? null
+          : const ['Courier New', 'monospace'],
+      color: f.attr & attrIntensify != 0 ? scheme.primary : null,
+    );
+    final cell = ClipRect(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: _tcCellInset),
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: _iconText(text, icons, clip: true, style: style),
+        ),
+      ),
+    );
+    if (!clamped) return cell;
+    return Tooltip(
+      message: icons?.stripTokens(text).trim() ?? text,
+      // a pointer's hover: a long press stays the screen's context menu
+      triggerMode: TooltipTriggerMode.manual,
+      child: cell,
+    );
+  }
+
+  /// The points a table control's text cell keeps clear on either side.
+  static const double _tcCellInset = 2;
+
+  /// A free text cell its row clamped below its own width
+  /// ([GridCell.clamped]; a table control's cell is [_tcText]) — text
+  /// past the cells it may use, which SAP GUI clips. It still shrinks to
+  /// fit down to [_minCellTextScale] of its font (a proportional overrun),
+  /// past that it ends in an ellipsis instead of shrinking on (to 6 points
+  /// a row, the font jumping line to line); the full text is its tooltip
+  /// (on hover).
+  /// A table cell keeps 2 points before the next column, so its last
+  /// glyph never touches it.
+  Widget _clampedText(ScreenField f, SapIconAtlas? icons, double w) {
+    final text = f.text.trimRight();
+    final inset = f.tableControl != null ? 2.0 : 0.0;
+    final room = math.max(0.0, w - inset);
+    return Tooltip(
+      message: icons?.stripTokens(text).trim() ?? text,
+      // a pointer's hover: a long press stays the screen's context menu
+      triggerMode: TooltipTriggerMode.manual,
+      child: Padding(
+        padding: EdgeInsets.only(right: inset),
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerLeft,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: room / _minCellTextScale),
+            child: _iconText(text, icons, clip: true, ellipsis: true),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The smallest a clamped text cell is shrunk to ([_clampedText]).
+  static const double _minCellTextScale = 0.8;
 
   /// What an input field keeps beside its text besides its padding, in
   /// points: the caret's margin (cursor width + gap, 3) and a point to
@@ -2045,20 +2629,32 @@ class _DynproViewState extends State<DynproView> {
     );
   }
 
-  Widget _gridButton(ScreenField f, SapIconAtlas? icons, double font) =>
-      _leaf((busy) => _gridButtonOf(f, icons, font, busy));
+  Widget _gridButton(
+    ScreenField f,
+    SapIconAtlas? icons,
+    double font, [
+    double? cell,
+  ]) => _leaf((busy) => _gridButtonOf(f, icons, font, busy, cell));
 
   Widget _gridButtonOf(
     ScreenField f,
     SapIconAtlas? icons,
     double font,
-    bool busy,
-  ) {
+    bool busy, [
+    double? cell,
+  ]) {
     final enabled = !busy && (f.fcode ?? '').isNotEmpty;
-    final tip = iconQuickInfo(f.text);
     final plain = (icons?.stripTokens(f.text) ?? f.text).trim();
     final token = SapIconAtlas.tokenRx.firstMatch(f.text);
     final cp = token != null ? icons?.codepoint(token.group(1)!) : null;
+    // the quick info, else (an icon-only button without one) the icon's
+    // name: a long press shows it — on a touch screen the only way to learn
+    // what an icon means, as SAP GUI's hover tooltip
+    final tip =
+        iconQuickInfo(f.text) ??
+        (plain.isEmpty && token != null
+            ? _iconTitle(icons?.iconName(token.group(1)!))
+            : null);
     if (token == null && plain.isEmpty) {
       // a button painted without text or icon (TC_1211's status column
       // until the item has messages): an empty face, no invented bullet;
@@ -2099,44 +2695,201 @@ class _DynproViewState extends State<DynproView> {
         child: const SizedBox.shrink(),
       );
     }
-    final glyph = cp != null
-        ? Text(
-            String.fromCharCode(cp),
-            style: TextStyle(fontFamily: 'SapIcons', fontSize: font + 2),
-          )
-        : (token != null ? Icon(Icons.more_horiz, size: font + 2) : null);
-    return Tooltip(
-      message: tip ?? '',
-      child: OutlinedButton(
-        onPressed: enabled ? () => widget.onOkcode(f.fcode!) : null,
-        style: OutlinedButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 2),
-          minimumSize: Size.zero,
-          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          textStyle: TextStyle(fontSize: font),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
-        ),
-        child: FittedBox(
-          fit: BoxFit.scaleDown,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ?glyph,
-              if (glyph != null && plain.isNotEmpty) const SizedBox(width: 4),
-              if (plain.isNotEmpty)
-                Flexible(
-                  child: Text(
-                    plain,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+    // the face at full contrast in both themes — the label and the icon in
+    // the on-surface colour, as SAP GUI draws them black on its grey
+    // button (a recorded session methods_tab_screenshot.png),
+    // not the theme's primary; a disabled one greyed but still legible
+    // ([dynproDisabledForeground]), not Material's 38 % on dark grey
+    final scheme = Theme.of(context).colorScheme;
+    // a tonal face with no outline: the 0.8-point outline rectangle around
+    // a thin line-art glyph read as one more line of the glyph on the
+    // iPad's dark grey (SE24's method toolbar, live 2026-10-21) — the
+    // filled face sets the button off from the dynpro instead, as the
+    // app's own key bar does, and the glyph stands alone on it
+    final style = OutlinedButton.styleFrom(
+      // an icon-only button gives its icon the whole face
+      padding: EdgeInsets.symmetric(horizontal: plain.isEmpty ? 0 : 2),
+      minimumSize: Size.zero,
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      textStyle: TextStyle(fontSize: font),
+      foregroundColor: scheme.onSurface,
+      disabledForegroundColor: dynproDisabledForeground(scheme),
+      backgroundColor: scheme.surfaceContainerHighest,
+      disabledBackgroundColor: scheme.surfaceContainerHigh,
+      side: BorderSide.none,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+    );
+    final onPressed = enabled ? () => widget.onOkcode(f.fcode!) : null;
+    return LayoutBuilder(
+      builder: (context, box) {
+        // the icon sized from the BUTTON, not from the label's font: SAP
+        // GUI's 16-pixel icon fills most of its ~20-pixel button face
+        // (methods_tab_screenshot.png's Paramètre / Exceptions / Code
+        // srce and the icon-only row) — [dynproButtonGlyphShare] of the
+        // face's height, within the two cells the icon takes of the
+        // button's painted length ([cell] points each), never under the
+        // label's own size
+        // — and never under [dynproButtonIconEm]: the font's icons fill
+        // ~77 % of their em, so a 15-point drawing needs a 20-point em, more
+        // than a composed window's 15-point row (SE80's docked class
+        // builder) — the icon then overflows the face into the row's
+        // margin instead of shrinking with it. An icon-only button lends
+        // its icon its whole width (no padding), never more: it never
+        // overlaps the next field
+        final iconOnly = plain.isEmpty;
+        var size = box.maxHeight.isFinite
+            ? box.maxHeight * dynproButtonGlyphShare
+            : font + 2;
+        size = math.max(size, dynproButtonIconEm);
+        if (iconOnly && box.maxWidth.isFinite) {
+          size = math.min(size, box.maxWidth);
+        }
+        size = math.max(size, font);
+        final faceHeight = box.maxHeight.isFinite ? box.maxHeight : size;
+        final glyphColor = enabled
+            ? scheme.onSurface
+            : dynproDisabledForeground(scheme);
+        Widget? glyph = cp != null
+            ? _boldGlyph(
+                String.fromCharCode(cp),
+                ValueKey('button-glyph-${token!.group(1)}'),
+                size,
+                glyphColor,
+              )
+            : (token != null
+                  ? Icon(Icons.more_horiz, size: size, color: glyphColor)
+                  : null);
+        if (glyph != null && size > faceHeight) {
+          // taller than the face: laid out at the face's height (the
+          // label's FittedBox must not shrink it back), painted at its own
+          glyph = SizedBox(
+            width: size,
+            height: faceHeight,
+            child: OverflowBox(
+              maxWidth: size,
+              maxHeight: size,
+              child: glyph,
+            ),
+          );
+        }
+        // the room inside the frame (2 points of padding a side)
+        final inner = box.maxWidth.isFinite ? box.maxWidth - 4 : null;
+        final glyphPart = glyph != null ? size + _glyphGap : 0.0;
+        if (inner != null && glyph != null && plain.isNotEmpty) {
+          final text = TextPainter(
+            text: TextSpan(
+              text: plain,
+              style: DefaultTextStyle.of(context).style
+                  .merge(TextStyle(fontSize: font)),
+            ),
+            maxLines: 1,
+            textDirection: TextDirection.ltr,
+            textScaler: MediaQuery.textScalerOf(context),
+          )..layout();
+          final natural = text.width;
+          text.dispose();
+          if (inner < glyphPart + natural * _minButtonTextScale) {
+            // a button shorter than its text (GO_DETAIL clamped to 3 cells
+            // by the next button, `@3R\QPasser aux propriétés@ Propriétés`):
+            // SAP GUI clips the text at the button's edge, icon first, so
+            // the icon alone, at full size — not the whole face shrunk to
+            // a 3-point glyph and a 2.6-point label; the text stays its
+            // tooltip and its accessible name
+            return Tooltip(
+              message: tip ?? plain,
+              child: Semantics(
+                label: plain,
+                child: OutlinedButton(
+                  onPressed: onPressed,
+                  style: style,
+                  child: ExcludeSemantics(
+                    child: FittedBox(fit: BoxFit.scaleDown, child: glyph),
                   ),
                 ),
-            ],
+              ),
+            );
+          }
+        }
+        // the label bounded so it never shrinks below
+        // [_minButtonTextScale] of its font: past that it ends in an
+        // ellipsis (under the FittedBox alone a Flexible gets no bound)
+        final maxText = inner != null
+            ? ((inner - (glyph != null ? glyphPart : 0)) / _minButtonTextScale)
+                  .clamp(0.0, double.infinity)
+            : double.infinity;
+        return Tooltip(
+          message: tip ?? '',
+          child: OutlinedButton(
+            onPressed: onPressed,
+            style: style,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ?glyph,
+                  if (glyph != null && plain.isNotEmpty)
+                    const SizedBox(width: _glyphGap),
+                  if (plain.isNotEmpty)
+                    ConstrainedBox(
+                      constraints: BoxConstraints(maxWidth: maxText),
+                      child: Text(
+                        plain,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                ],
+              ),
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
+
+  /// A pushbutton's icon-font glyph drawn heavier than the font's hairline
+  /// strokes: the fill (the keyed text, its own colour — nothing dims it)
+  /// over the same glyph stroked [dynproGlyphStroke] of its em, so the
+  /// 14-point icon on a dark face reads as SAP GUI's 16-pixel bitmap does,
+  /// not as a pencil sketch (SE24's method toolbar, live 2026-10-21).
+  static Widget _boldGlyph(String ch, Key key, double size, Color color) {
+    final base = TextStyle(fontFamily: 'SapIcons', fontSize: size, height: 1);
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        Text(
+          ch,
+          semanticsLabel: '',
+          style: base.copyWith(
+            foreground: Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = size * dynproGlyphStroke
+              ..strokeJoin = StrokeJoin.round
+              ..color = color,
+          ),
+        ),
+        Text(ch, key: key, style: base.copyWith(color: color)),
+      ],
+    );
+  }
+
+  /// `ICON_SEARCH_NEXT` as "Search next"; null for none.
+  static String? _iconTitle(String? name) {
+    if (name == null || name.isEmpty) return null;
+    final words = name.replaceFirst(RegExp('^ICON_'), '').toLowerCase();
+    final t = words.replaceAll('_', ' ').trim();
+    return t.isEmpty ? null : t[0].toUpperCase() + t.substring(1);
+  }
+
+  /// The gap between a pushbutton's icon and its label, in points (SAP
+  /// GUI's 2–3 pixels).
+  static const double _glyphGap = 3;
+
+  /// The smallest a pushbutton's label is shrunk to fit its button (of its
+  /// font size): past it the label ends in an ellipsis, or a button with an
+  /// icon shows the icon alone.
+  static const double _minButtonTextScale = 0.8;
 
   /// [child] answering a double tap on [f] with [DynproView.onDoubleClick]
   /// (a [Listener]: the child keeps every gesture of its own — an input's
@@ -2871,8 +3624,11 @@ Widget _iconText(
   SapIconAtlas? icons, {
   TextStyle? style,
   bool clip = false,
+  bool ellipsis = false,
 }) {
-  final overflow = clip ? TextOverflow.clip : null;
+  final overflow = clip
+      ? (ellipsis ? TextOverflow.ellipsis : TextOverflow.clip)
+      : null;
   final maxLines = clip ? 1 : null;
   final softWrap = clip ? false : null;
   if (!SapIconAtlas.tokenRx.hasMatch(text)) {
@@ -3142,30 +3898,304 @@ String _choiceText(ScreenField f) {
   return f.name ?? '';
 }
 
+/// A table control's column geometry in cells: the server's widths
+/// (18/9/14) and offsets, with the widths the user dragged ([over], column
+/// index -> cells) in their place — every column after a resized one moves
+/// by as much, as SAP GUI's header drag pushes the columns to its right.
+/// The columns stand in the control's DISPLAY order
+/// ([TableControlInfo.order]: a column the user moved, mirrored by the
+/// server — a recorded session s[40]).
+class _TcCols {
+  _TcCols(this.tc, Map<int, double>? over) : over = over ?? const {} {
+    final n = count;
+    final o = tc.order;
+    final valid = o.length == n && o.every((i) => i >= 0 && i < n);
+    for (var p = 0; p < n; p++) {
+      _byPos.add(valid ? o[p] : p);
+    }
+    _shift.addAll(List.filled(n, 0.0));
+    _pos.addAll(List.filled(n, 0));
+    var shift = 0.0;
+    for (var p = 0; p < n; p++) {
+      final i = _byPos[p];
+      _shift[i] = shift;
+      _pos[i] = p;
+      final w = this.over[i];
+      if (w != null) shift += w - tc.widths[i];
+    }
+  }
+
+  final TableControlInfo tc;
+  final Map<int, double> over;
+  final List<double> _shift = [];
+  final List<int> _byPos = [];
+  final List<int> _pos = [];
+
+  int get count => math.min(tc.columnOffsets.length, tc.widths.length);
+
+  /// The column drawn at display position [p].
+  int at(int p) => _byPos[p];
+
+  /// Column [i]'s display position (its index past the catalog).
+  int position(int i) => i >= 0 && i < _pos.length ? _pos[i] : i;
+
+  /// Column [i]'s width: the dragged one, else the server's.
+  double width(int i) => over[i] ?? tc.widths[i].toDouble();
+
+  /// Column [i]'s left cell after the resized columns before it.
+  double left(int i) => tc.columnOffsets[i] + _shift[i];
+
+  /// How far column [i]'s cells move (0 for a column past the catalog).
+  double shift(int i) => i >= 0 && i < _shift.length ? _shift[i] : 0;
+
+  /// Whether the user resized column [i].
+  bool resized(int i) => over.containsKey(i);
+}
+
+/// The gap between a table control's cell boxes and header buttons, in
+/// points: the control's grid (the real GUI's white seams between its
+/// filled cells — a recorded session
+/// methods_tab_screenshot.png).
+const double _tcGap = 1;
+
+/// The cell boxes of [tc]'s data lines — every column × visible line, in
+/// the coordinates of the control's fixed layer (from the window's left
+/// edge and the control's top row) or, [moving], of its scrolled content
+/// (from the scroll origin [sc]). A vertical gap separates the columns when
+/// the control declares vertical grid lines, a horizontal one the lines
+/// when it declares horizontal ones ([TableControlInfo.verticalLines] /
+/// [TableControlInfo.horizontalLines], 18/9/14 byte 35 — both on
+/// SAPLSEOD/MC); without them the boxes join.
+List<Rect> _tcCellRects(
+  TableControlInfo tc,
+  _TcCols cols,
+  _TcScroll? sc,
+  double cw,
+  double ch, {
+  required bool moving,
+}) {
+  final out = <Rect>[];
+  final vGap = tc.verticalLines ? _tcGap : 0.0;
+  final hGap = tc.horizontalLines ? _tcGap : 0.0;
+  for (var i = 0; i < cols.count; i++) {
+    final moves = sc != null && cols.position(i) >= sc.fixed;
+    if (moves != moving) continue;
+    final x = (cols.left(i) - (moving ? sc!.left : 0)) * cw;
+    final w = cols.width(i) * cw - vGap;
+    if (w <= 0) continue;
+    for (var line = 1; line <= tc.visibleRows; line++) {
+      final top = (tc.lineRow(line) - tc.row) * ch;
+      out.add(Rect.fromLTWH(x, top, w, ch - hGap));
+    }
+  }
+  return out;
+}
+
+/// Paints a table control's cell boxes ([_tcCellRects]) in [fill].
+///
+/// The boxes are derived when painted, not when the painter is made, and
+/// [shouldRepaint] compares what they derive from — the cell size, the
+/// control's rows and grid lines, the scroll origin and each column's
+/// place and width, O(columns) — not the columns x lines rectangles,
+/// which every turn built twice (the new list, and the old one to compare
+/// against) for a control that had not changed (audit 2026-10-23 P-10).
+class _TcGridPainter extends CustomPainter {
+  _TcGridPainter(
+    this.tc,
+    this.cols,
+    this.sc,
+    this.cw,
+    this.ch,
+    this.fill, {
+    required this.moving,
+  });
+  final TableControlInfo tc;
+  final _TcCols cols;
+  final _TcScroll? sc;
+  final double cw, ch;
+  final Color fill;
+  final bool moving;
+
+  /// The boxes, derived once when first painted.
+  late final List<Rect> cells = _tcCellRects(
+    tc,
+    cols,
+    sc,
+    cw,
+    ch,
+    moving: moving,
+  );
+
+  /// What [cells] derives from, as one list of numbers.
+  late final List<double> _derivedFrom = [
+    cw,
+    ch,
+    moving ? 1 : 0,
+    tc.visibleRows.toDouble(),
+    tc.headerRows.toDouble(),
+    tc.verticalLines ? 1 : 0,
+    tc.horizontalLines ? 1 : 0,
+    sc?.left ?? -1,
+    (sc?.fixed ?? -1).toDouble(),
+    for (var i = 0; i < cols.count; i++) ...[
+      cols.left(i),
+      cols.width(i),
+      cols.position(i).toDouble(),
+    ],
+  ];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final p = Paint()..color = fill;
+    canvas.save();
+    canvas.clipRect(Offset.zero & size);
+    for (final r in cells) {
+      canvas.drawRect(r, p);
+    }
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(_TcGridPainter old) =>
+      old.fill != fill || !listEquals(old._derivedFrom, _derivedFrom);
+}
+
+/// The real GUI's paging keys in a table control (a recorded session
+/// resize g[28]: SES `50 52`).
+const int _vkeyPageUp = 81, _vkeyPageDown = 82;
+
+/// A table control's vertical scroll bar: the thumb at the server's first
+/// row of its model rows, as long as a page; a tap above it pages up, below
+/// it down ([onPage] with the vkey). The thumb itself does not drag: the
+/// Windows GUI's scroll to an arbitrary row is unrecorded.
+class _TcPageBar extends StatelessWidget {
+  const _TcPageBar({
+    required this.total,
+    required this.first,
+    required this.rows,
+    required this.onPage,
+  });
+
+  final int total, first, rows;
+  final void Function(int vkey) onPage;
+
+  /// The bar's width in points (a finger's tap on the track).
+  static const double width = 14;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return LayoutBuilder(
+      builder: (context, cons) {
+        final h = cons.maxHeight;
+        final n = math.max(total, 1);
+        final len = (h * rows / n).clamp(math.min(24.0, h), h).toDouble();
+        final at = ((h - len) * first / math.max(1, n - rows))
+            .clamp(0.0, h - len)
+            .toDouble();
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapUp: (d) {
+            final dy = d.localPosition.dy;
+            if (dy < at) onPage(_vkeyPageUp);
+            if (dy > at + len) onPage(_vkeyPageDown);
+          },
+          child: Semantics(
+            label: 'Table rows',
+            value: '${first + 1} to ${math.min(first + rows, total)} '
+                'of $total',
+            increasedValue: 'next page',
+            decreasedValue: 'previous page',
+            onIncrease: () => onPage(_vkeyPageDown),
+            onDecrease: () => onPage(_vkeyPageUp),
+            child: DecoratedBox(
+              decoration: BoxDecoration(color: scheme.surfaceContainerHighest),
+              child: Stack(
+                children: [
+                  Positioned(
+                    key: const ValueKey('tc-vscroll-thumb'),
+                    left: 3,
+                    right: 3,
+                    top: at,
+                    height: len,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: scheme.outline,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// A vertical swipe over a table control's lines: up pages down, down pages
+/// up ([onPage] with the vkey) — translucent, so the cells under it keep
+/// their taps.
+class _TcSwipe extends StatefulWidget {
+  const _TcSwipe({required this.onPage});
+  final void Function(int vkey) onPage;
+
+  @override
+  State<_TcSwipe> createState() => _TcSwipeState();
+}
+
+class _TcSwipeState extends State<_TcSwipe> {
+  double _dy = 0;
+
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+    behavior: HitTestBehavior.translucent,
+    onVerticalDragStart: (_) => _dy = 0,
+    onVerticalDragUpdate: (d) => _dy += d.delta.dy,
+    onVerticalDragEnd: (d) {
+      final v = d.velocity.pixelsPerSecond.dy;
+      final dy = _dy.abs() >= 24 ? _dy : (v.abs() >= 300 ? v : 0.0);
+      if (dy < 0) widget.onPage(_vkeyPageDown);
+      if (dy > 0) widget.onPage(_vkeyPageUp);
+    },
+  );
+}
+
+/// The narrowest and widest a dragged table-control column gets, in cells
+/// (a heading letter's room; the longest painted value).
+const double _tcMinCells = 1;
+const double _tcMaxCells = 255;
+
 /// The horizontal scroll of a table control whose columns run past its
 /// box: the columns from [fixed] on move, from cell [left] to the box's
 /// right edge [right]; [content] is where the last column ends.
 class _TcScroll {
   _TcScroll(this.fixed, this.left, this.right, this.content);
   final int fixed;
-  final int left;
+  final double left;
   final int right;
-  final int content;
+  final double content;
 
   /// Null when every column fits the box (nothing scrolls).
-  static _TcScroll? of(TableControlInfo tc) {
-    final n = math.min(tc.columnOffsets.length, tc.widths.length);
+  /// [right]: the box's right edge in cells (the visible box, bounded by
+  /// the pane). A column dragged wider can make a control scroll that the
+  /// server laid out to fit ([_TcCols]).
+  static _TcScroll? of(_TcCols cols, int right) {
+    final tc = cols.tc;
+    final n = cols.count;
     if (n == 0) return null;
-    final right = tc.col + tc.width;
-    var content = 0;
+    var content = 0.0;
     for (var i = 0; i < n; i++) {
-      content = math.max(content, tc.columnOffsets[i] + tc.widths[i]);
+      content = math.max(content, cols.left(i) + cols.width(i));
     }
     if (content <= right) return null;
-    // TC_FIXCOL columns stay put — unless they leave no room to scroll
+    // TC_FIXCOL columns (the first ones DISPLAYED) stay put — unless they
+    // leave no room to scroll
     var fixed = math.min(tc.fixedCols, n);
-    if (fixed == n || tc.columnOffsets[fixed] >= right - 4) fixed = 0;
-    return _TcScroll(fixed, tc.columnOffsets[fixed], right, content);
+    if (fixed == n || cols.left(cols.at(fixed)) >= right - 4) fixed = 0;
+    return _TcScroll(fixed, cols.left(cols.at(fixed)), right, content);
   }
 }
 

@@ -8,6 +8,7 @@ import 'dart:typed_data';
 import '../codepages.dart';
 import '../framing/diag_frame.dart';
 import '../framing/envelope.dart';
+import '../framing/decode_worker.dart' show dyntAtomsOf;
 import '../items/dynt_atom.dart';
 import 'frames.dart';
 import 'frontend_profile.dart' show winCodepageValue, windowsWindowRect;
@@ -25,7 +26,19 @@ class LoginPlane {
   final bool invisible;
 }
 
-/// The SAPMSYST/0020 logon paint (block=1 col=20; LANGU is at ROW 5, not 4).
+/// The SAPMSYST/0020 logon paint (block=1 col=20; LANGU is at ROW 5, not 4):
+/// the RECORDED planes of the kernel logon dynpro's four input fields, the
+/// first-round default of the credential submit (audit 2026-10-23 §5.2).
+/// Provenance: the reference client fixture's 0020 paint; the same cells on every
+/// kernel of the corpus (a recorded session srv[0] paints
+/// RSYST-MANDT / BNAME / LANGU at rows 0 / 2 / 5, col 20, mlen 3 / 12 / 2).
+/// One layout snapshot all the same: a kernel repaint of 0020 (a longer
+/// user name field, a moved client) breaks the seed. Direction:
+/// [loginPlanes] reads the first paint's atoms and submits at the live
+/// coordinates when they differ from these — taken only then, this table
+/// stays the default while the paint agrees with it (or sends no atoms,
+/// as the password field is never painted as an input: a prefilled 0020
+/// paints its label alone).
 const Map<String, LoginPlane> loginPlanes0020 = {
   'RSYST-MANDT': LoginPlane(0, 20, 3, 3, 0, 0, false),
   'RSYST-BNAME': LoginPlane(2, 20, 12, 12, 0, 1, false),
@@ -33,10 +46,79 @@ const Map<String, LoginPlane> loginPlanes0020 = {
   'RSYST-LANGU': LoginPlane(5, 20, 2, 2, 0, 0, false),
 };
 
+/// The logon fields' planes as the kernel's 0020 PAINT places them: for
+/// every RSYST-* field whose FNAME atom (etype 114, the field's own — a
+/// paint names the label at col 1 and the field at col 20) shares its row
+/// and col with a value atom ([etypeInput]) of the same 9/2 item, that
+/// atom's plane (row, col, maxnrchars, mlen, the dialog flags, INVISIBLE).
+/// Fields the paint shows no value atom for (the password, a prefilled
+/// logon's) are absent. Empty when [frames] paint no logon.
+Map<String, LoginPlane> loginPlanesFromPaint(List<Uint8List> frames) {
+  final out = <String, LoginPlane>{};
+  for (final f in frames) {
+    final dec = decompressFrame(f);
+    if (dec == null) continue;
+    for (final it in dec.walk.items) {
+      if (!it.isAppl || it.id != 9 || (it.sid != 2 && it.sid != 16)) continue;
+      final atoms = dyntAtomsOf(it).atoms;
+      final inputs = <(int, int), DyntAtom>{
+        for (final a in atoms)
+          if (etypeInput.contains(a.etype)) (a.row, a.col): a,
+      };
+      for (final a in atoms) {
+        if (a.etype != etypeFname) continue;
+        final name = a.nameText ?? '';
+        if (!loginPlanes0020.containsKey(name) || out.containsKey(name)) {
+          continue;
+        }
+        final v = inputs[(a.row, a.col)];
+        if (v == null) continue;
+        out[name] = LoginPlane(v.row, v.col, v.fieldMaxnrchars, v.fieldMlen,
+            v.dlgFlag1, v.dlgFlag2, v.isInvisible);
+      }
+    }
+  }
+  return out;
+}
+
+bool _samePlane(LoginPlane a, LoginPlane b) =>
+    a.row == b.row &&
+    a.col == b.col &&
+    a.maxlen == b.maxlen &&
+    a.mlen == b.mlen &&
+    a.dlg1 == b.dlg1 &&
+    a.dlg2 == b.dlg2 &&
+    a.invisible == b.invisible;
+
+/// The planes the credential submit writes at: [loginPlanes0020] — the
+/// recorded table, the first-round default — with a field's plane
+/// replaced by the live one where the 0020 [paint] (the connect reply's
+/// frames) places that field ELSEWHERE; null / no logon paint / a paint
+/// agreeing with the table leaves the table (audit 2026-10-23 §5.2).
+Map<String, LoginPlane> loginPlanes(List<Uint8List>? paint) {
+  if (paint == null) return loginPlanes0020;
+  final live = loginPlanesFromPaint(paint);
+  if (live.isEmpty) return loginPlanes0020;
+  var changed = false;
+  final out = <String, LoginPlane>{};
+  for (final MapEntry(key: name, value: recorded) in loginPlanes0020.entries) {
+    final l = live[name];
+    if (l == null || _samePlane(l, recorded)) {
+      out[name] = recorded;
+    } else {
+      out[name] = l;
+      changed = true;
+    }
+  }
+  return changed ? out : loginPlanes0020;
+}
+
 /// The login DyntAtom items (client / user / password / optional language) —
-/// etype-130 value atoms, YES3D attr, BCODE additionally INVISIBLE.
+/// etype-130 value atoms, YES3D attr, BCODE additionally INVISIBLE — at
+/// [planes] ([loginPlanes0020] when null; [loginPlanes] for a paint's).
 List<Uint8List> loginAtoms(String? client, String user, String pw,
-    [String language = '']) {
+    [String language = '', Map<String, LoginPlane>? planes]) {
+  final at = planes ?? loginPlanes0020;
   Uint8List atom(LoginPlane p, String text, {bool invisible = false}) {
     final body = wireText(text);
     // the atom's dlen is one byte: a longer value must not wrap silently
@@ -66,12 +148,12 @@ List<Uint8List> loginAtoms(String? client, String user, String pw,
 
   final atoms = <Uint8List>[];
   if (client != null && client.isNotEmpty) {
-    atoms.add(atom(loginPlanes0020['RSYST-MANDT']!, client));
+    atoms.add(atom(at['RSYST-MANDT']!, client));
   }
-  atoms.add(atom(loginPlanes0020['RSYST-BNAME']!, user));
-  atoms.add(atom(loginPlanes0020['RSYST-BCODE']!, pw, invisible: true));
+  atoms.add(atom(at['RSYST-BNAME']!, user));
+  atoms.add(atom(at['RSYST-BCODE']!, pw, invisible: true));
   if (language.isNotEmpty) {
-    atoms.add(atom(loginPlanes0020['RSYST-LANGU']!, language));
+    atoms.add(atom(at['RSYST-LANGU']!, language));
   }
   return atoms;
 }
@@ -182,27 +264,70 @@ void _patchMetric(Uint8List b, String s, String attr, String val) {
 // ---------------------------------------------------------------------------
 
 class WallInfo {
-  WallInfo(this.nameToRow, this.rowToOption);
+  WallInfo(this.nameToRow, this.rowToOption,
+      {this.popupGeometry, this.popupXy});
   final Map<String, int> nameToRow;
 
   /// row -> (label, currentlyOn)
   final Map<int, (String, bool)> rowToOption;
 
+  /// The wall POPUP's painted 16/12/6 (the 33-byte SCROLL_INFOS2 value:
+  /// scroll pair, area, (0, 0), visible rows x cols, flag) — the first
+  /// 16/12/6 after the popup's 16/12/7 window item in the frame carrying
+  /// the MULTI_LOGON atoms; null when the paint declares none
+  /// ([readWall]). What the real GUI's answer echoes verbatim and sizes its
+  /// SES dims from ([windowsWallItems]).
+  final Uint8List? popupGeometry;
+
+  /// The wall paint's SES `x` / `y` (value bytes 8 / 9: the popup's
+  /// position the kernel sent, pysap SAPDiagSES) — echoed by the answer;
+  /// null when the paint carries no SES before the atoms.
+  final (int, int)? popupXy;
+
   bool get isWall => nameToRow.isNotEmpty;
+
+  /// The popup's visible rows x cols from [popupGeometry] (u32 at 24 / 28);
+  /// null without one.
+  (int, int)? get popupCells {
+    final g = popupGeometry;
+    if (g == null || g.length < 32) return null;
+    final bd = ByteData.sublistView(g);
+    return (bd.getUint32(24), bd.getUint32(28));
+  }
 }
 
 /// Parse the wall's atoms from server frames: radio rows + MULTI_LOGON_OPT
-/// FNAME atoms.
+/// FNAME atoms, and the popup's own paint around them ([WallInfo
+/// .popupGeometry] / [WallInfo.popupXy]: the last SES and 16/12/7 before
+/// the atoms' item, the first 16/12/6 after that window item).
 WallInfo readWall(List<Uint8List> frames) {
   final nameToRow = <String, int>{};
   final rowToOption = <int, (String, bool)>{};
+  Uint8List? popupGeometry;
+  (int, int)? popupXy;
   for (final f in frames) {
     final dec = decompressFrame(f);
     if (dec == null) continue;
     final walk = dec.walk;
+    Uint8List? ses, geometry;
+    var windowSeen = false;
     for (final it in walk.items) {
+      if (it.type == itemSes && it.value.length >= 16) {
+        ses = it.value;
+        continue;
+      }
+      if (it.isAppl && it.id == 12 && it.sid == 7) {
+        windowSeen = true;
+        geometry = null;
+        continue;
+      }
+      if (it.isAppl && it.id == 12 && it.sid == 6) {
+        if (windowSeen && geometry == null) geometry = it.value;
+        continue;
+      }
       if (!it.isAppl || it.id != 9 || (it.sid != 2 && it.sid != 16)) continue;
-      for (final a in parseDyntAtoms(it.value).atoms) {
+      var wallAtoms = false;
+      for (final a in dyntAtomsOf(it).atoms) {
         if (a.etype == etypeRadioButton3) {
           final on = a.radiobuttonButton == 1 ||
               a.radiobuttonButton == 0x58 ||
@@ -212,19 +337,81 @@ WallInfo readWall(List<Uint8List> frames) {
           final nm = a.nameText ?? '';
           if (nm.contains('MULTI_LOGON_OPT')) {
             nameToRow[nm] = a.row;
+            wallAtoms = true;
           }
         }
       }
+      if (wallAtoms) {
+        popupGeometry ??= geometry == null ? null : Uint8List.fromList(geometry);
+        popupXy ??= ses == null ? null : (ses[8], ses[9]);
+      }
     }
   }
-  return WallInfo(nameToRow, rowToOption);
+  return WallInfo(nameToRow, rowToOption,
+      popupGeometry: popupGeometry, popupXy: popupXy);
 }
 
+/// The radio value atoms' label width of the wall answer (the reference
+/// answer's 0x4e, a recorded session gui raw[2]).
 const int _winWallOptionWidth = 0x4e;
 
 /// The multi-logon wall's default pick when no live selection is known:
-/// row 0x0b on, row 0x10 cleared (the reference answer's).
+/// row 0x0b on, row 0x10 cleared — the reference answer's rows (OPT2 at
+/// 11, OPT3 at 16 in a recorded session raw[2] and the the test system
+/// paint, a recorded session srv[0]); a live wall's rows come
+/// from its MULTI_LOGON_OPT atoms ([readWall]), this pair rides only an
+/// answer built without a paint (audit 2026-10-23 §6.2).
 const int _wallDefaultOnRow = 0x0b, _wallDefaultOffRow = 0x10;
+
+/// The wall popup of the reference wall paint: 18 visible rows x 82 cols
+/// (its 16/12/7 `0012 0052`, a recorded session srv[0]) —
+/// what the recorded answer's SES dims and SCROLL_INFOS2 below are the
+/// echo of (audit 2026-10-23 §6.2).
+const (int, int) recordedWallPopupCells = (18, 82);
+
+/// The recorded wall answer's SES dims (value bytes 14 / 15: the popup's
+/// pixel pair, low bytes — a recorded session gui raw[2] `93 3e`)
+/// = [wallSesDims] of [recordedWallPopupCells] at the reference kernel
+/// cell: 18 x 22 + 7 = 403 → 0x93, 82 x 7 = 574 → 0x3e. Sent as long as the
+/// live popup paints 18 x 82; another popup takes the derived pair.
+const (int, int) recordedWallSesDims = (0x93, 0x3e);
+
+/// The recorded wall answer's SES x / y (value bytes 8 / 9, `0a 0a`): the
+/// popup position the wall paint's own SES carries (srv[0] above `… 11 01
+/// 0a 0a …`), echoed. Sent as long as the live paint carries the same
+/// pair (or none); another pair is echoed instead.
+const (int, int) recordedWallPopupXy = (0x0a, 0x0a);
+
+/// The recorded wall answer's SCROLL_INFOS2 (16/12/6: scroll pair, area,
+/// (0, 0), visible part — `17 80 17 80 0 0 18 82`, flag 1) = the popup's
+/// painted 16/12/6 echoed verbatim (srv[0] above). Sent as long as the
+/// live popup paints [recordedWallPopupCells]; another popup's 16/12/6 is
+/// echoed instead ([WallInfo.popupGeometry]).
+const List<int> recordedWallScrollInfos = [17, 80, 17, 80, 0, 0, 18, 82];
+
+/// The 16/4/15 value of the wall answer (109 = 0x6d; the per-round
+/// identity block's is [winFrameCounterValue] 0x5d): the reference GUI's
+/// connection-side flush counter, which varies per frame in the oracle
+/// (0x5d, 0x6d, 0x5bd, 0x158 — reference client raw_services._GOS_415) and the
+/// kernel ignores. Replayed as recorded; direction: one per-session
+/// counter for both once an A/B run pins that the kernel ignores it
+/// (audit 2026-10-23 §6.5).
+const int wallFrameCounterValue = 109;
+
+/// The kernel cell the wall answer's SES dims are sized with when the
+/// caller passes none: the reference FONTMETRIC's 22 x 7 px
+/// ([ActionContext.kernelCell]'s default).
+const ({int height, int width}) wallKernelCell = (height: 22, width: 7);
+
+/// The SES dims a Windows round sent from inside a popup of [rows] x
+/// [cols] carries: the low bytes of the popup's pixel size, rows x cell
+/// height + 7 and cols x cell width (frontend_profile.dart
+/// windowsModalSesDims — 272 of the corpus' 300 Windows popup rounds).
+(int, int) wallSesDims((int, int) cells, {({int height, int width})? cell}) {
+  final c = cell ?? wallKernelCell;
+  final (rows, cols) = cells;
+  return ((rows * c.height + 7) & 0xff, (cols * c.width) & 0xff);
+}
 
 Uint8List _u32be(List<int> vals) {
   final bd = ByteData(vals.length * 4);
@@ -236,15 +423,25 @@ Uint8List _u32be(List<int> vals) {
 
 /// The Windows multi-logon answer (diag_login_wall _OPT2_WIN_ENVELOPE
 /// spelled as fields): the live Step; the SES of a function-key Enter in
-/// the wall popup (eventarray 0x50, modal_no 1, the popup's dims); the
-/// okcode-extra 16/4/36 ([windowRect], else [windowsWindowRect]'s
-/// reference value); the Windows codepage and
-/// identity atoms (16/4/15 = 109 on this round); OK event mode 0x05; the
-/// popup's SCROLL_INFOS2 (17 x 80 area, 18 x 82 visible); a zero 16/10/1;
-/// the radio group rebuilt from the live selection (chosen on,
-/// previously-on siblings cleared) and the cursor on the chosen row.
+/// the wall popup (eventarray 0x50, modal_no 1, the popup's x / y and
+/// dims); the okcode-extra 16/4/36 ([windowRect], else
+/// [windowsWindowRect]'s reference value); the Windows codepage and
+/// identity atoms (16/4/15 = [wallFrameCounterValue] on this round); OK
+/// event mode 0x05; the popup's SCROLL_INFOS2 (17 x 80 area, 18 x 82
+/// visible); a zero 16/10/1; the radio group rebuilt from the live
+/// selection (chosen on, previously-on siblings cleared) and the cursor
+/// on the chosen row.
+///
+/// The popup figures (audit 2026-10-23 §6.2): the recorded answer's
+/// ([recordedWallSesDims], [recordedWallPopupXy], [recordedWallScrollInfos])
+/// are the first-round default — the bytes a live kernel accepts today;
+/// the live paint's ([wall]'s popup geometry and SES, [readWall]) replace
+/// them only when the paint shows ANOTHER popup than the recorded 18 x 82
+/// at (10, 10): then the SES dims are [wallSesDims] of the painted cells
+/// at [cell] ([wallKernelCell] when null) and the 16/12/6 is the painted
+/// one echoed, as every other popup round derives them.
 List<Uint8List> windowsWallItems(int step, WallInfo wall, int chosenRow,
-    {Uint8List? windowRect}) {
+    {Uint8List? windowRect, ({int height, int width})? cell}) {
   final group = <Uint8List>[];
   if (chosenRow >= 0) {
     // ONLY the changed members ride the answer: the chosen row turned on
@@ -272,14 +469,25 @@ List<Uint8List> windowsWallItems(int step, WallInfo wall, int chosenRow,
       ..add(radioValueAtom(0, 1, 1, _wallDefaultOffRow, 0, false,
           labelWidth: _winWallOptionWidth));
   }
+  // the popup's figures: the recorded answer's unless the paint shows
+  // another popup (see above)
+  final cells = wall.popupCells;
+  final livePopup = cells != null && cells != recordedWallPopupCells;
+  final (dimRow, dimCol) =
+      livePopup ? wallSesDims(cells, cell: cell) : recordedWallSesDims;
+  final (x, y) = wall.popupXy ?? recordedWallPopupXy;
+  final scrollInfos = livePopup
+      ? wall.popupGeometry!
+      : Uint8List.fromList([..._u32be(recordedWallScrollInfos), 1]);
+  // the SES value rides at [1..16]: value byte k is item byte k + 1
   final ses = Uint8List(17)
     ..[0] = itemSes
     ..[1] = 0x50 // the Windows FKEY event, eventid1 0 (Enter)
     ..[8] = 1 // modal_no
-    ..[9] = 0x0a
-    ..[10] = 0x0a
-    ..[15] = 0x93 // dims: the popup window's pixel pair, low bytes
-    ..[16] = 0x3e;
+    ..[9] = x // the popup's position, the paint's SES x / y echoed
+    ..[10] = y
+    ..[15] = dimRow // dims: the popup window's pixel pair, low bytes
+    ..[16] = dimCol;
   final okEvent = Uint8List(22)..[1] = 0x05;
   // the cursor: depth 1, row u16 BE, col 0, offset 0, path = area 0
   final cursor = Uint8List(10)..[0] = 1;
@@ -293,12 +501,11 @@ List<Uint8List> windowsWallItems(int step, WallInfo wall, int chosenRow,
     buildApplItem(6, 35, winCodepageValue),
     buildApplItem(4, 9, Uint8List.fromList(emulatedGuiRelease.codeUnits)),
     buildApplItem(4, 29, Uint8List.fromList(emulatedGuiPatchLevel.codeUnits)),
-    buildApplItem(4, 15, _u32be([109])),
+    buildApplItem(4, 15, _u32be([wallFrameCounterValue])),
     buildApplItem(4, 25, Uint8List(2)),
     buildApplItem(5, 1, okEvent),
     // SCROLL_INFOS2: scroll pair, area, (0, 0), visible part, flag 1
-    buildApplItem(12, 6,
-        Uint8List.fromList([..._u32be([17, 80, 17, 80, 0, 0, 18, 82]), 1])),
+    buildApplItem(12, 6, scrollInfos),
     buildApplItem(10, 1, Uint8List(9)),
     buildApplItem(9, 2, _concatAtoms(group)),
     buildApplItem(9, 11, cursor),

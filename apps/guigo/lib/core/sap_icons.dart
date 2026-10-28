@@ -37,8 +37,10 @@ class SapIconAtlas {
     });
     // a code whose glyph in the bundled font draws another icon is drawn
     // with the font's glyph of the icon it names (the font itself is kept)
+    // (looked up in the font's own map: one override never feeds another)
+    final own = Map.of(codes);
     glyphOf.forEach((code, drawnAs) {
-      final cp = codes[drawnAs];
+      final cp = own[drawnAs];
       if (cp != null && codes.containsKey(code)) codes[code] = cp;
     });
     return SapIconAtlas._(codes, names);
@@ -51,7 +53,24 @@ class SapIconAtlas {
   /// srv[184], a recorded session srv[17]) — is drawn pointing RIGHT
   /// in the font, beside its `9T` ICON_ARROW_RIGHT: the pair read as two
   /// "forward" buttons. It takes `2M` ICON_SYSTEM_BACK's left arrow.
-  static const Map<String, String> glyphOf = {'9S': '2M'};
+  ///
+  /// The Class Builder's methods tab (SAPLSEOD/2000's pushbutton row,
+  /// a recorded session srv[35], drawn in methods_tab_
+  /// screenshot.png):
+  /// * `03` ICON_FAILURE — "Exceptions" — is SAP's lightning bolt; the font
+  /// draws a bare X (the cancel cross): it takes `9Y` ICON_ACTIVITY's
+  /// lightning;
+  /// * `9U` ICON_ABAP — "Code srce" — is drawn as a plus in a square (an
+  /// "insert"): it takes `9V` ICON_ABAP_LOCAL's `</>` code glyph;
+  /// * `17` ICON_INSERT_ROW — "Insérer méthode" — is drawn as an EMPTY
+  /// square (read as a blank button): it takes `XQ`'s plus in a square
+  /// (the font's glyph of that code is the "add" plus).
+  static const Map<String, String> glyphOf = {
+    '9S': '2M',
+    '03': '9Y',
+    '9U': '9V',
+    '17': 'XQ',
+  };
 
   /// The codepoint for a wire code (without the @ delimiters), or null.
   /// Folded to upper case only when the code is not found as given.

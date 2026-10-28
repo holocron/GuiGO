@@ -130,14 +130,20 @@ extension SapSessionEditor on SapSession {
       ..sort((a, b) => (int.tryParse(a) ?? 0).compareTo(int.tryParse(b) ?? 0));
     for (final sh in shells) {
       final e = t[sh];
-      if (e == null || e.kind != 'ab4' || !_isLiveEditor(sh)) continue;
+      if (e == null || !_isLiveEditor(sh)) continue;
+      if (e.kind != 'ab4' && !(e.kind == 'textedit' && editorEditable(e))) {
+        continue;
+      }
       _resolveCentering(e, realized: _editorRealized(e));
       final registered = reg.cachedProps[sh];
       // the view only once the control is realized — its container's size
       // reported (a load inside the creation wave answers its LineCount
       // alone, the view rides the first round: g[23] / g[24], debugger
       // g[25] / g[26])
-      final realized = _editorRealized(e);
+      // an editable TextEdit reports what moved whatever its container
+      // (the server's TextModified(=0) after the save's pull: a recorded session
+      // wingui_ppome_longtext_save s[29] -> g[22] `TextModified 0`)
+      final realized = e.kind == 'textedit' || _editorRealized(e);
       final props = [
         for (final (p, v) in _editorClientProps(e))
           if ((realized || _methodMovedProps.contains(p)) &&
@@ -518,8 +524,26 @@ extension SapSessionEditor on SapSession {
   /// round, a recorded session g[41]).
   List<(String, String)> _editorClientProps(SapTextEditor e) {
     final first = _editorFirstVisible(e);
-    final last = _editorLastVisible(e, first);
     final line = e.cursorLine ?? 1, col = e.cursorCol ?? 1;
+    if (e.kind == 'textedit') {
+      // the TextEdit's own set, in textedit.dll's order
+      // ([textEditFlushOrder]): no LineCount / LastVisibleLine / Version,
+      // the selection also as character offsets (SelIndex*:
+      // a recorded session g[19] SelPosStartCol 11,
+      // SelIndexStart / End 10 after ten typed characters)
+      final endLine = e.selEndLine ?? line, endCol = e.selEndCol ?? col;
+      return [
+        ('SelPosStartCol', '$col'),
+        ('FirstVisibleLine', '$first'),
+        ('SelPosEndLine', '$endLine'),
+        ('TextModified', e.textModified ? '1' : '0'),
+        ('SelPosStartLine', '$line'),
+        ('SelIndexEnd', '${textEditSelIndex(e.lines, endLine, endCol)}'),
+        ('SelPosEndCol', '$endCol'),
+        ('SelIndexStart', '${textEditSelIndex(e.lines, line, col)}'),
+      ];
+    }
+    final last = _editorLastVisible(e, first);
     return [
       ('SelPosStartCol', '$col'),
       ('FirstVisibleLine', '$first'),
@@ -533,15 +557,17 @@ extension SapSessionEditor on SapSession {
     ];
   }
 
-  /// Whether the user may edit [e] in GuiGo: an ABAP editor of the SAP GUI
-  /// for Windows dialect, live, its document loaded and not read-only (the
-  /// server's `SetCurrentDocReadOnly(0)`: change mode). The rest stays
-  /// display-only — a document the server set read-only, and the TextEdit
-  /// control, whose edited state (TextModified, SelIndex*) GuiGo does not
-  /// report: an edit the server never hears of is never pulled, never saved.
+  /// Whether the user may edit [e] in GuiGo: an ABAP editor or a TextEdit
+  /// of the SAP GUI for Windows dialect, live, its document loaded and not
+  /// read-only (the server's `SetCurrentDocReadOnly(0)` / `ReadOnly(=0)`:
+  /// change mode — PPOME's long text, a recorded session).
+  /// The rest stays display-only — a document the server set read-only,
+  /// and the SAP GUI for Java's controls, whose edited state GuiGo does not
+  /// report: an edit the server never hears of is never pulled, never
+  /// saved.
   bool editorEditable(SapTextEditor e) =>
       answerDialect == GuiDialect.windows &&
-      e.kind == 'ab4' &&
+      (e.kind == 'ab4' || e.kind == 'textedit') &&
       !e.readOnly &&
       _editorTracker[e.shell] == e &&
       _editorTracker.loaded.contains(e.shell) &&
@@ -634,14 +660,26 @@ extension SapSessionEditor on SapSession {
   }
 
   /// The answer to the server's read-back of a TextEdit's text through
-  /// [sink] (`AssignProperty2(<editor>, TextAsR3Table, <obj>, data)` +
-  /// `SaveDataToUrl`, a recorded session srv[31]) — the SAP GUI
-  /// for Java's X-R3ABAP records of the editor's lines ([r3AbapPullAnswer],
-  /// gui[22]); null for another property, an object that is no TextEdit,
-  /// or the Windows dialect, whose TextEdit OCX answer no capture shows
-  /// (the pull keeps the client table's default answer there).
+  /// [sink] — the text GuiGo holds for the control (the server's own last
+  /// TextAsR3Table / TextAsR3Stream push: GuiGo lets no TextEdit be
+  /// edited, so the server reads back what it put), never the client
+  /// table's empty default, which would blank a text the control holds:
+  /// * the SAP GUI for Java (`AssignProperty2(<editor>, TextAsR3Table,
+  /// <obj>, data)` + `SaveDataToUrl`, a recorded session
+  /// srv[31]): the bean's X-R3ABAP records ([r3AbapPullAnswer], gui[22]);
+  /// * the SAP GUI for Windows (`AssignProperty2(<editor>, TextAsR3Table,
+  /// <obj>, r3TableAutoObj)` + `SaveDataToUrl(APPLICATION, X-R3ABAP, …)`,
+  /// which PPOSE runs on every org-unit change, no user event on the
+  /// text: a recorded session s[24] / s[25] -> g[19]):
+  /// the OCX's X-R3ABAP object ([r3AbapWindowsPullAnswer]).
+  /// Null for another property or an object that is no TextEdit (the Java
+  /// dialect); the Windows read-back pattern always gets the OCX's object,
+  /// for the newest live TextEdit when its handle resolves to none.
   Uint8List? _textEditPullAnswer(PropertySink sink, Uint8List request) {
-    if (answerDialect != GuiDialect.java || sink.prop != 'TextAsR3Table') {
+    final windows = answerDialect == GuiDialect.windows;
+    if (!(windows
+        ? textEditTextProps.contains(sink.prop)
+        : answerDialect == GuiDialect.java && sink.prop == 'TextAsR3Table')) {
       return null;
     }
     final t = _editorTracker;
@@ -655,10 +693,25 @@ extension SapSessionEditor on SapSession {
       ];
       if (live.length == 1) sh = live.single;
     }
+    if (sh == null && windows) {
+      for (final e in t.all.reversed) {
+        if (e.kind == 'textedit' && _isLiveEditor(e.shell)) {
+          sh = e.shell;
+          break;
+        }
+      }
+    }
     final e = sh == null ? null : t[sh];
-    if (e == null || e.kind != 'textedit') return null;
+    if (e == null || e.kind != 'textedit') {
+      if (!windows) return null;
+      _trace('textedit read-back of ${sink.source}: no TextEdit held, the '
+          'empty text answered');
+      return r3AbapWindowsPullAnswer(request, const []);
+    }
     _trace('textedit ${e.shell} text read back (${e.lines.length} line(s))');
-    return r3AbapPullAnswer(request, e.lines);
+    return windows
+        ? r3AbapWindowsPullAnswer(request, textEditReadBackLines(e))
+        : r3AbapPullAnswer(request, e.lines);
   }
 
   /// The CONTROLS a round on [e] owes: per shell, ascending, the cached
@@ -763,7 +816,9 @@ extension SapSessionEditor on SapSession {
     if (answerDialect != GuiDialect.windows) return null;
     final eds = [
       for (final e in editors)
-        if (e.kind == 'ab4' && _isLiveEditor(e.shell)) e,
+        if ((e.kind == 'ab4' && _isLiveEditor(e.shell)) ||
+            (e.kind == 'textedit' && editorEditable(e)))
+          e,
     ];
     if (eds.isEmpty) return null;
     final named = <String>{};
@@ -818,7 +873,10 @@ extension SapSessionEditor on SapSession {
   /// the server holds them now ([SapTextEditor.serverProps]).
   void _noteEditorFlushed(SapTextEditor e, List<(String, String)> props) {
     for (final (p, v) in props) {
-      if (ab4InitialCachedProps.containsKey(p)) e.serverProps[p] = v;
+      if (ab4InitialCachedProps.containsKey(p) ||
+          textEditInitialCachedProps.containsKey(p)) {
+        e.serverProps[p] = v;
+      }
     }
   }
 

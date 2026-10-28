@@ -45,7 +45,49 @@ class TableControlInfo {
     this.tabstripRouting = const [],
     this.treeNames,
     this.tabPages,
-  });
+    int? boxWidth,
+    this.order = const [],
+    this.horizontalLines = false,
+    this.verticalLines = false,
+    this.rowSelectMode,
+  }) : boxWidth = boxWidth ?? width;
+
+  /// The columns in DISPLAY order: per position, the 0-based catalog index
+  /// of the column drawn there (the 18/9/14 column-order array, ids 1..n by
+  /// position). Empty = catalog order. The user's column MOVE reorders it
+  /// and the server mirrors it in its next 18/9/14
+  /// (a recorded session s[40]: `0001 0004 0002 0003 0005`);
+  /// [columnOffsets] already place every column at its displayed position.
+  final List<int> order;
+
+  /// The control draws horizontal / vertical grid lines between its cells
+  /// (18/9/14 byte 35 bits 0x01 / 0x02: the Java GUI's native header
+  /// reader AgiTableView::DiagITableHead sets its HGrid / VGrid flags from
+  /// them, fed to GuiTableControl.setShowHorizontalLines /
+  /// setShowVerticalLines — libJPlatin64, SAP GUI for Java 8.10).
+  final bool horizontalLines;
+  final bool verticalLines;
+
+  /// The control's model rows (18/9/14 bytes 36..37), the first one shown
+  /// (0-based, bytes 38..39) and the rows a page shows (bytes 40..41) —
+  /// what its vertical scroll bar shows: SAPLSEOD/MC `01af 0000 001f` (431
+  /// methods, line 0, 31 a page), `01af 001f 001f` after the real GUI's
+  /// Page Down (a recorded session s[38]; the reference client's
+  /// _tc_scroll_state, a recorded session). Null without a header.
+  int? get totalRows => _hdr16(36);
+  int? get firstRow => _hdr16(38);
+  int? get pageRows => _hdr16(40);
+
+  int? _hdr16(int at) {
+    final h = headerRaw;
+    if (h == null || h.length < at + 2) return null;
+    return h[at] << 8 | h[at + 1];
+  }
+
+  /// The line-selection mode (18/9/14 byte 19, TC_SEL_LNS one-hot: 0x01
+  /// single, 0x04 multiple, 0x10 none -> 1 / 2 / 0; the reference client's
+  /// _TH_LINE_SEL_BITS), null when the byte names none of them.
+  final int? rowSelectMode;
 
   /// The control's name (the 16/10/6 NAME before its items, e.g. `SINGLE`).
   final String name;
@@ -61,6 +103,15 @@ class TableControlInfo {
   final int width;
   final int height;
   int get cols => width;
+
+  /// The control's width VISIBLE inside its container path: [width]
+  /// bounded by the nearest enclosing right edge (min(left + width) over
+  /// the 16/10 levels above the TABLE that declare a width), so a control
+  /// the kernel declares wider than its subscreen (SE24's MC 255 inside
+  /// CSS 122) is boxed to the subscreen, as the GUI's viewport clips it.
+  /// Equal to [width] when nothing clips it. Drawing only: [width], [cols],
+  /// [headerRaw] and [routing] keep the wire values a cell write echoes.
+  final int boxWidth;
 
   /// Number of painted data lines (the 18/9/5 line heads of the paint; the
   /// header's own visible-row byte when the paint carries no line).
@@ -200,6 +251,10 @@ class TcHeader {
     this.title = '',
     this.headings = const [],
     this.headingTips = const [],
+    this.order = const [],
+    this.horizontalLines = false,
+    this.verticalLines = false,
+    this.rowSelectMode,
   });
   final int n;
   final int width; // bytes 6..7
@@ -212,6 +267,34 @@ class TcHeader {
   final String title; // the title bar text after the widths
   final List<String> headings; // then one heading per column
   final List<String> headingTips;
+
+  /// The column ids (1-based) by display position (the order array at the
+  /// offset in bytes 17..18); empty when undecodable.
+  final List<int> order;
+  final bool horizontalLines; // byte 35 bit 0x01 (HGrid)
+  final bool verticalLines; // byte 35 bit 0x02 (VGrid)
+  final int? rowSelectMode; // byte 19 & 0x15: 0x01 -> 1, 0x04 -> 2, 0x10 -> 0
+}
+
+/// The offsets inside an 18/9/14 TABLE_HEADER of its column-order array
+/// (bytes 17..18) and its widths array (bytes 29..30), with the column
+/// count n (byte 12) — when the prefix declares them consistently (both
+/// inside the item, the order array a permutation of 1..n). The real GUI's
+/// long 16/9/14 echo is the painted header with these two arrays carrying
+/// the user's layout (a recorded session g[27] / g[30]).
+({int n, int orderAt, int widthsAt})? tcHeaderArrays(Uint8List b) {
+  if (b.length < _thNameBlockEnd) return null;
+  final n = b[12];
+  if (n < 1) return null;
+  final idxOff = _u16(b, 17), wOff = _u16(b, 29);
+  if (_u16(b, 25) != n ||
+      idxOff < _thNameBlockEnd ||
+      wOff < idxOff + 2 * n ||
+      wOff + 2 * n > b.length ||
+      !_indexArrayAt(b, n, idxOff)) {
+    return null;
+  }
+  return (n: n, orderAt: idxOff, widthsAt: wOff);
 }
 
 const int _thNameBlockEnd = 130; // 60 prefix + 40 program + 30 control name
@@ -227,6 +310,7 @@ TcHeader? parseTableHeader(Uint8List b) {
   final hasSel =
       (b.length > 20 && b[20] == 1) || (b.length > 19 && b[19] & 0x04 != 0);
   final located = _headerWidths(b, n);
+  final arrays = tcHeaderArrays(b);
   final heads = located == null
       ? null
       : _headerHeadings(b, n, located.$2 + 2 * n);
@@ -242,13 +326,26 @@ TcHeader? parseTableHeader(Uint8List b) {
     title: heads?.$1 ?? '',
     headings: heads?.$2 ?? const [],
     headingTips: heads?.$3 ?? const [],
+    order: arrays == null
+        ? const []
+        : [for (var i = 0; i < n; i++) _u16(b, arrays.orderAt + 2 * i)],
+    horizontalLines: b[35] & 0x01 != 0,
+    verticalLines: b[35] & 0x02 != 0,
+    rowSelectMode: const {0x01: 1, 0x04: 2, 0x10: 0}[b[19] & 0x15],
   );
 }
 
+/// The column-order array at [off]: the ids 1..n, each once — in catalog
+/// order on a control nobody rearranged, permuted after the user's column
+/// MOVE (a recorded session s[40]: `0001 0004 0002 0003 0005`,
+/// the server mirroring the client's g[30]).
 bool _indexArrayAt(Uint8List b, int n, int off) {
   if (off + 2 * n > b.length) return false;
+  final seen = List.filled(n + 1, false);
   for (var i = 0; i < n; i++) {
-    if (_u16(b, off + 2 * i) != i + 1) return false;
+    final id = _u16(b, off + 2 * i);
+    if (id < 1 || id > n || seen[id]) return false;
+    seen[id] = true;
   }
   return true;
 }
@@ -505,6 +602,10 @@ class TcBuilder {
   final String name;
   String? container;
   int? absTop, absLeft, width, height; // from the TABLE path level
+
+  /// The ancestors' visible right edge (absolute, exclusive), when any
+  /// level above the TABLE declares a width.
+  int? clipRight;
   List<String> columns = [];
   List<String> titles = [];
   TcHeader? header;
@@ -556,10 +657,17 @@ class TcBuilder {
     lineAttrs[r.$1] = r.$3;
   }
 
-  /// The per-line record of [line], else the nearest earlier painted one,
-  /// else the first (reference client column_etype / column_protected).
+  /// The per-line record of [line]: the one its 18/9/5 line head names
+  /// (the head's second word is the RECORD's line, not a type:
+  /// a recorded session s[35] paints records for lines 1 and 7
+  /// of SAPLSEOD/MC and heads `000b 0001` IS_VALID -> record 1, intensified,
+  /// `000c 0007` FREE -> record 7, plain — the real GUI draws IS_VALID blue
+  /// and FREE black, methods_tab_screenshot.png), else the nearest earlier
+  /// painted one, else the first (reference client column_etype / column_protected).
   List<int>? recordFor(Map<int, List<int>> recs, int line) {
     if (recs.isEmpty) return null;
+    final named = recs[lineTypes[line]];
+    if (named != null) return named;
     // one pass, no sorted key copy per painted line (audit #10): the
     // greatest line <= [line], else the smallest
     int? below, first;
@@ -597,13 +705,26 @@ class TcBuilder {
     final widths = h?.widths ?? const <int>[];
     final sel = (h?.hasSelectionColumn ?? false) ? 1 : 0;
     final left = absLeft ?? 0;
-    final offsets = <int>[];
+    // the columns at their DISPLAYED positions: the order array's ids by
+    // position (catalog order unless the user moved a column)
+    final ids = h?.order ?? const <int>[];
+    final order = ids.length == columns.length
+        ? [for (final id in ids) id - 1]
+        : const <int>[];
+    final offsets = List<int>.filled(columns.length, left + sel);
     var acc = left + sel;
-    for (var i = 0; i < columns.length; i++) {
-      offsets.add(acc);
+    for (var p = 0; p < columns.length; p++) {
+      final i = order.isEmpty ? p : order[p];
+      offsets[i] = acc;
       acc += i < widths.length ? widths[i] : 0;
     }
+    final moved = [
+      for (var p = 0; p < order.length; p++)
+        if (order[p] != p) p,
+    ].isNotEmpty;
     final sortedLines = cellsByLine.keys.toList()..sort();
+    final clip = clipRight;
+    final box = clip == null || wd <= 0 ? wd : (clip - left).clamp(1, wd);
     return TableControlInfo(
       name: name,
       row: absTop ?? 0,
@@ -636,10 +757,18 @@ class TcBuilder {
       tabstripRouting: List.unmodifiable(tabstripRouting),
       treeNames: treeNames,
       tabPages: tabPages,
+      boxWidth: box,
+      order: moved ? List.unmodifiable(order) : const [],
+      horizontalLines: h?.horizontalLines ?? false,
+      verticalLines: h?.verticalLines ?? false,
+      rowSelectMode: h?.rowSelectMode,
     );
   }
 }
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
 // compiled per call (audit #7 / zcode P-12).
-final RegExp _parseTcTooltipsRx = RegExp(r'<DefaultTooltip>(.*?)</DefaultTooltip>', dotAll: true);
+final RegExp _parseTcTooltipsRx = RegExp(
+  r'<DefaultTooltip>(.*?)</DefaultTooltip>',
+  dotAll: true,
+);

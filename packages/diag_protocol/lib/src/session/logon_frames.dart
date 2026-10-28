@@ -31,7 +31,7 @@ import 'frontend_profile.dart'
         winIdentity,
         windowsFirstRoundAtoms;
 import 'gui_profile.dart';
-import 'login.dart' show loginAtoms;
+import 'login.dart' show LoginPlane, loginAtoms, loginPlanes, loginPlanes0020;
 import 'table_cell.dart' show windowsEventWindowPx;
 
 /// The terminal name a logon presents when the caller names none (the DP
@@ -222,7 +222,23 @@ Uint8List dpTailWords(int a, int b) {
   return out;
 }
 
+/// The two connection words of the DP head's tail ([dpTailWords]): the
+/// reference fixture's — one recording rig's process words (the Java GUI's
+/// own heap pointers, by their shape), replayed identically for every
+/// user and session (audit 2026-10-23 §6.1). Kept because they are the
+/// bytes the kernel accepts today: the Windows GUI's own head carries
+/// zeros there and is refused on a foreign connection, so "nothing" is
+/// not an option and no live oracle has yet graded a synthesized pair.
+/// Direction: words derived per session (a hash of the connection's
+/// host / terminal / clock in the same 0x118… range), promoted once a
+/// recording-based A/B run shows the kernel accepts a connect frame
+/// whose tail differs from the fixture's; until then [recordedDpTailWords]
+/// is the default and the only pair sent.
 const int _dpTailA = 0x0000011803103d00, _dpTailB = 0x0000011802f1b5d0;
+
+/// The recorded connection words ([_dpTailA], [_dpTailB]) as a pair
+/// (tests pin that the heads below carry exactly these).
+const (int, int) recordedDpTailWords = (_dpTailA, _dpTailB);
 
 /// The SAP GUI for Windows' DP head (a recorded session gui raw[0])
 /// with the reference client's connection words: rq_id 0 and the [dpTailWords] tail
@@ -595,18 +611,20 @@ class LogonGeometry {
   final int cellWidth, cellHeight;
 }
 
-/// The SAPMSYST 0020 logon dynpro: RSYST-BCODE's row / col (login.dart
-/// loginPlanes0020).
-const int _bcodeRow = 3, _bcodeCol = 20;
+/// The SAPMSYST 0020 logon dynpro: RSYST-BCODE's plane (login.dart
+/// loginPlanes0020, the live paint's when [logonItems] is handed one —
+/// audit 2026-10-23 §5.2), the cursor's and the OK event's field.
+LoginPlane _bcode(Map<String, LoginPlane> planes) =>
+    planes['RSYST-BCODE'] ?? loginPlanes0020['RSYST-BCODE']!;
 
 /// The 16/5/1 OK event of the logon submit (22 bytes, actions.dart
 /// _okEvent layout): mode 0x05 (field submit), the cursor, the area /
 /// visible rectangle (b7 = the constant modification flag 0x29), scroll.
-Uint8List _logonOkEvent(LogonGeometry g) {
+Uint8List _logonOkEvent(LogonGeometry g, LoginPlane bcode) {
   final ok = Uint8List(22);
   ok[1] = 0x05;
-  ok[4] = _bcodeRow;
-  ok[5] = (_bcodeCol + g.passwordCursorOffset) & 0xff;
+  ok[4] = bcode.row & 0xff;
+  ok[5] = (bcode.col + g.passwordCursorOffset) & 0xff;
   ok[6] = g.visibleRows & 0xff;
   ok[7] = 0x29;
   ok[8] = g.areaCols & 0xff;
@@ -654,6 +672,12 @@ Uint8List logonMetricsXml(
 /// an iPhone's 874 x 402, also 874 x 2560 and 1440 x 402 — 1440 x 2560 and
 /// the reference GUI's 1049 x 3841 passed; without the atom 874 x 402
 /// logs on), and the real Windows submit sends none.
+///
+/// [paint]: the connect reply's frames (the kernel's 0020 paint) — the
+/// credential atoms, the cursor and the OK event then address the fields
+/// where THAT paint places them when it differs from the recorded planes
+/// (login.dart [loginPlanes], audit 2026-10-23 §5.2); null, or a paint
+/// agreeing with the table, submits at the recorded planes.
 List<Uint8List> logonItems({
   String? client,
   required String user,
@@ -665,10 +689,13 @@ List<Uint8List> logonItems({
   LogonGeometry geometry = const LogonGeometry(),
   ActionContext? window,
   EmulatedGuiProfile? profile,
+  List<Uint8List>? paint,
 }) {
   final g = geometry;
   final identity = (profile ?? EmulatedGuiProfile.host()).logonIdentity;
   final w = window ?? ActionContext();
+  final planes = loginPlanes(paint);
+  final bcode = _bcode(planes);
   final ses = Uint8List(17)
     ..[0] = itemSes
     ..[1] =
@@ -678,11 +705,11 @@ List<Uint8List> logonItems({
   final cursor = Uint8List(10)
     ..[0] =
         1 // depth 1, area 0
-    ..buffer.asByteData().setUint16(1, _bcodeRow)
-    ..buffer.asByteData().setUint16(3, _bcodeCol)
+    ..buffer.asByteData().setUint16(1, bcode.row)
+    ..buffer.asByteData().setUint16(3, bcode.col)
     ..buffer.asByteData().setUint32(5, g.passwordCursorOffset);
   final atoms = BytesBuilder(copy: false);
-  for (final a in loginAtoms(client, user, password, language)) {
+  for (final a in loginAtoms(client, user, password, language, planes)) {
     atoms.add(a);
   }
   return [
@@ -694,7 +721,7 @@ List<Uint8List> logonItems({
     buildApplItem(6, 35, winCodepageValue),
     for (final (sid, value) in identity) buildApplItem(4, sid, value),
     for (final (sid, value) in winIdentity) buildApplItem(4, sid, value),
-    buildApplItem(5, 1, _logonOkEvent(g)),
+    buildApplItem(5, 1, _logonOkEvent(g, bcode)),
     buildApplItem(12, 8, windowsEventWindowPx(w)),
     // SCROLL_INFOS2: scroll pair, area, (0, 0), visible part, flag 1
     buildApplItem(
@@ -744,6 +771,7 @@ Uint8List buildLogonFrame({
   LogonGeometry geometry = const LogonGeometry(),
   ActionContext? window,
   EmulatedGuiProfile? profile,
+  List<Uint8List>? paint,
 }) => clientFrame(
   logonItems(
     client: client,
@@ -756,5 +784,6 @@ Uint8List buildLogonFrame({
     geometry: geometry,
     window: window,
     profile: profile,
+    paint: paint,
   ),
 );

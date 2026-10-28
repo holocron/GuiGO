@@ -137,6 +137,13 @@ extension SapSessionLayout on SapSession {
   /// popup's own generation created take part (minted at or after the
   /// action that opened it — the covered window's docks and grids stay in
   /// [regions]). Empty without a popup.
+  ///
+  /// A second [composeScreen] per generation beside [baseComposition]
+  /// (audit 2026-10-23 P-10 asked for one pass): kept apart on purpose —
+  /// the two compose a different screen model ([baseScreen] / [screen]),
+  /// window, area and shell set, so no facts, boxes or carve are shared
+  /// between them and one walk would do both pipelines in turn. A view
+  /// reads each once per generation (apps/guigo _SessionView).
   List<ScreenRegion> get modalRegions {
     final s = screen;
     if (s == null || s.modalLevel == 0 || s.program == null) return const [];

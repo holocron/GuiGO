@@ -631,6 +631,62 @@ extension SapSessionFields on SapSession {
     );
   }
 
+  /// Page the classic table control [tc] of the active window — the real
+  /// SAP GUI for WINDOWS' Page Down (vkey 82) / Page Up (81) with the
+  /// cursor in the control: the key in its TABLE plane (SES `50 52`, the
+  /// table-control 16/15/1 `0a 0007 0010 …`, the 16/9/11 on the control's
+  /// line), no 16/4/36 window rect — a recorded session g[28]
+  /// (step 56: SAPLSEOD/MC, cursor line 9 column 1); the SERVER pages: its
+  /// answer s[38] repaints lines 32..62 as lines 1..31 and its 18/9/14
+  /// says so (first row `001f`). The cursor stays where the paint put it
+  /// when that is in [tc], else it parks on line 1 of the first displayed
+  /// column. Cells typed into [tc] ride the key, as on any key.
+  Future<List<Uint8List>> pageTableControl(String tc, int vkey) async {
+    final info = screen?.tableControls.where((t) => t.name == tc).firstOrNull;
+    if (info == null) throw StateError('table control $tc is not painted');
+    if (answerDialect != GuiDialect.windows) {
+      // the Java GUI pages by moving the first row in its 16/9/7 (reference client
+      // raw_tabline.tc_scroll_items, a recorded session gui[34]): not
+      // built here — a bare key is refused by the kernel
+      throw UnsupportedError('table-control paging is Windows-dialect only');
+    }
+    _trace('page table control $tc vkey $vkey');
+    if (_stagedHasCells) {
+      final cells = _stagedCellRound(tc, vkey: vkey);
+      if (cells != null) {
+        return _act(cells, dialectReady: true, consumesStaged: true);
+      }
+      await _sendStagedCellsFirst();
+    }
+    var line = 1;
+    var column = info.order.isNotEmpty ? info.order.first + 1 : 1;
+    final pf = ctx.paintedFocus;
+    final path = info.focusPath;
+    if (pf != null && pf.length >= 9 + path.length && pf[0] == path.length) {
+      var same = true;
+      for (var i = 0; i < path.length; i++) {
+        if (pf[9 + i] != path[i]) same = false;
+      }
+      final l = pf[1] << 8 | pf[2], c = pf[3] << 8 | pf[4];
+      if (same && l >= 1 && c >= 1 && c <= info.columns.length) {
+        line = l;
+        column = c;
+      }
+    }
+    return _act(
+      tableCellItems(
+        ctx,
+        info,
+        const [],
+        cursorLine: line,
+        cursorColumn: column,
+        vkey: vkey,
+        windowRect: false,
+      ),
+      dialectReady: true,
+    );
+  }
+
   /// The table-plane round of a key [vkey] over the staged values when
   /// they are cells of one table control (the cursor on the last cell
   /// edited, or [cursor]); null otherwise.

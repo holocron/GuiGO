@@ -21,6 +21,7 @@
 /// GUI's (a recorded session gui[3]/[4]).
 library;
 
+import 'dart:convert' show latin1;
 import 'dart:typed_data';
 
 import '../codepages.dart';
@@ -136,6 +137,78 @@ Uint8List? tcWindowsTableHeader(Uint8List header) {
   return out;
 }
 
+/// The key a table control's [TcColumnLayout] is kept under: the program
+/// and control names its 18/9/14 header carries ([60:100] and [100:130],
+/// blank-padded), e.g. `SAPLSEOD/MC`. Null for a header too short.
+String? tcHeaderKey(Uint8List header) {
+  if (header.length < 130) return null;
+  final prog = latin1.decode(header.sublist(60, 100)).trim();
+  final name = latin1.decode(header.sublist(100, 130)).trim();
+  return '$prog/$name';
+}
+
+/// The painted 18/9/14 [header] with [layout]'s widths (u16 BE, by column
+/// id) and order written into its own arrays ([tcHeaderArrays]); null when
+/// the header declares no consistent arrays or the layout does not fit them
+/// (a wrong column count, an order that is no permutation of 1..n, a width
+/// outside 1..255).
+Uint8List? tcLayoutHeader(Uint8List header, TcColumnLayout layout) {
+  final a = tcHeaderArrays(header);
+  if (a == null) return null;
+  final out = Uint8List.fromList(header);
+  final bd = out.buffer.asByteData();
+  final w = layout.widths;
+  if (w != null) {
+    if (w.length != a.n || w.any((x) => x < 1 || x > 255)) return null;
+    for (var i = 0; i < a.n; i++) {
+      bd.setUint16(a.widthsAt + 2 * i, w[i]);
+    }
+  }
+  final o = layout.order;
+  if (o != null) {
+    if (o.length != a.n || ({...o}.length != a.n) ||
+        o.any((x) => x < 1 || x > a.n)) {
+      return null;
+    }
+    for (var i = 0; i < a.n; i++) {
+      bd.setUint16(a.orderAt + 2 * i, o[i]);
+    }
+  }
+  return out;
+}
+
+/// The SAP GUI for WINDOWS' 16/9/14 echo of a painted 18/9/14 [header]
+/// under the user's column [layouts] ([tcHeaderKey] -> layout): the FULL
+/// header — the painted bytes with the user's widths / order — while they
+/// differ from what the server last painted, else the 60-byte short form
+/// ([tcWindowsTableHeader]). a recorded session (SAPLSEOD/MC):
+/// g[26] short (nothing changed), g[27] 251 B with Méthode 35 -> 55 (byte
+/// 152 `0x37`), g[28] 251 B again with Description 60 -> 33 too (s[37] had
+/// mirrored only the first), g[29] short once s[38] mirrored both, g[30]
+/// 251 B with the order `0001 0004 0002 0003 0005` after a column move,
+/// g[31] short once s[40] mirrored it. Every long form equals the painted
+/// header byte for byte outside the two arrays. Null below 60 bytes.
+Uint8List? tcWindowsHeaderEcho(
+  Uint8List header,
+  Map<String, TcColumnLayout> layouts,
+) {
+  if (layouts.isNotEmpty) {
+    final key = tcHeaderKey(header);
+    final layout = key == null ? null : layouts[key];
+    final long = layout == null ? null : tcLayoutHeader(header, layout);
+    if (long != null && !_sameBytes(long, header)) return long;
+  }
+  return tcWindowsTableHeader(header);
+}
+
+bool _sameBytes(Uint8List a, Uint8List b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
+}
+
 /// The Windows client 16/9/15 echo of a painted tabstrip tree-names item:
 /// the 16-byte prefix verbatim, ten zero state bytes, the string offsets
 /// (0, the data start, the data start + the second string) and two
@@ -237,10 +310,11 @@ List<Uint8List> tableCellItems(
   int vkey = 0,
   bool keySource = true,
   String? okcode,
+  bool windowRect = true,
 }) {
   final header = tc.headerRaw == null
       ? null
-      : tcWindowsTableHeader(tc.headerRaw!);
+      : tcWindowsHeaderEcho(tc.headerRaw!, ctx.tcLayouts);
   final area = tc.controlArea;
   final legs = tc.routing;
   if (header == null || area == null || legs.isEmpty) {
@@ -274,7 +348,8 @@ List<Uint8List> tableCellItems(
   final out = <Uint8List>[
     stepItem(ctx.step),
     Uint8List.fromList([itemSes, ...ses]),
-    if (okcode == null) buildApplItem(4, 36, windowsWindowRect(ctx)),
+    if (okcode == null && windowRect)
+      buildApplItem(4, 36, windowsWindowRect(ctx)),
     buildApplItem(6, 35, winCodepageValue),
     if (okcode != null) ...[
       buildApplItem(12, 4, wireText(okcode)),

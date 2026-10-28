@@ -27,6 +27,7 @@ import 'frontend_registry.dart'
     show infoCtrlPathAnswer, registryReadAnswer, registryReadVerbs;
 import 'frontend_rfc.dart';
 import 'reply_container.dart';
+import 'text_editor.dart' show textEditInitialCachedProps;
 import 'stream_paint.dart';
 import 'svars.dart';
 
@@ -262,6 +263,23 @@ class EaSession {
 /// sid-0 item closes (the 740 kernel's logon full-build queue: ~30 kB head
 /// + 512 B continuation + sid-0 companion, a recorded session).
 class AutomationStream {
+  AutomationStream({this.maxPendingBytes = defaultMaxPendingBytes});
+
+  /// The bytes a pending stream may gather before it is abandoned (audit
+  /// 2026-10-23 R-6): sid-4 continuations accumulate until a sid-0/1
+  /// closer, and a kernel that streams chunks which each end their own
+  /// turn would grow the stream for the logon's life. The largest joined
+  /// call of the corpora is well under a megabyte; a flush over the cap is
+  /// no answerable call.
+  static const int defaultMaxPendingBytes = 32 << 20;
+  final int maxPendingBytes;
+
+  /// Streams abandoned past [maxPendingBytes], and the latest one's
+  /// account; [takeAbandoned] hands the account out once.
+  int abandoned = 0;
+  String? lastAbandoned;
+  bool _abandonedUnreported = false;
+
   /// The chunks of a multi-frame call received so far, no closer yet —
   /// gathered, not re-joined per continuation (a 100-chunk call copied
   /// the whole stream 100 times).
@@ -272,9 +290,38 @@ class AutomationStream {
 
   bool get hasPending => _pending != null;
 
-  void _start(Uint8List head) => _pending = BytesBuilder(copy: false)..add(head);
+  void _start(Uint8List head) {
+    _pending = BytesBuilder(copy: false)..add(head);
+    _capPending(1);
+  }
 
-  void _append(Uint8List chunk) => _pending!.add(chunk);
+  void _append(Uint8List chunk) {
+    _pending!.add(chunk);
+    _capPending(2);
+  }
+
+  /// The pending stream past [maxPendingBytes] is dropped and counted; the
+  /// chunks that follow are plain data until the next head, its closer a
+  /// front-end call or nothing. [part]: 1 = the head itself was over.
+  void _capPending(int part) {
+    final n = _pending!.length;
+    if (n <= maxPendingBytes) return;
+    _pending = null;
+    abandoned++;
+    _abandonedUnreported = true;
+    final where = part == 1 ? 'the head alone' : 'at a continuation';
+    lastAbandoned = 'a chunked automation call grew to $n B without its '
+        'closer (ceiling $maxPendingBytes B; $where): abandoned — the '
+        'kernel\'s flush goes unanswered';
+  }
+
+  /// The account of a stream abandoned since the last call, once (null:
+  /// none) — the session counts it as a failed answer.
+  String? takeAbandoned() {
+    if (!_abandonedUnreported) return null;
+    _abandonedUnreported = false;
+    return lastAbandoned;
+  }
 
   /// The pending stream with [closer] appended; the stream is reset.
   Uint8List _close(Uint8List closer) {
@@ -694,6 +741,7 @@ List<(String, List<(String, String)>)> registeredControlValues(
 ]) {
   final order = <String>[];
   final byShell = <String, List<(String, String)>>{};
+  final textEdits = _windowsTextEditsCreated(call);
   for (final (shell, prop) in cachedProps ?? call.cachedProps) {
     // a pair that names no cached prop of a shell — a blank / padded name,
     // a non-numeric shell, one already listed — is none the real GUI
@@ -704,12 +752,29 @@ List<(String, List<(String, String)>)> registeredControlValues(
       continue;
     }
     final echoed = call.setProps[(shell, prop)];
+    final initial =
+        textEdits.contains(shell) ? textEditInitialCachedProps[prop] : null;
     byShell.putIfAbsent(shell, () {
       order.add(shell);
       return <(String, String)>[];
-    }).add((prop, echoed ?? _propDefault(prop, call.dialect)));
+    }).add((prop, echoed ?? initial ?? _propDefault(prop, call.dialect)));
   }
   return [for (final sh in order) (sh, byShell[sh]!)];
+}
+
+/// The shells [call] creates as a Windows TextEdit (`CreateControl(<shell>,
+/// SAPGUI.TextEditCtrl.1, …)`), empty outside the Windows dialect.
+Set<String> _windowsTextEditsCreated(FlushCall call) {
+  if (call.dialect != GuiDialect.windows) return const {};
+  final out = <String>{};
+  for (var i = 1; i <= call.verbs.length; i++) {
+    if (!call.verbs[i - 1].startsWith('CreateControl')) continue;
+    final a = verbNamedArgs(call, i);
+    if ((a['#2'] ?? '').toUpperCase().contains('TEXTEDIT')) {
+      out.add((a['#1'] ?? '').trim());
+    }
+  }
+  return out;
 }
 
 bool _soundCachedProp(String shell, String prop) =>

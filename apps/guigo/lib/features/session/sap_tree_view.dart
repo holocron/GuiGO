@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:diag_protocol/diag_protocol.dart';
 import 'package:flutter/gestures.dart';
@@ -6,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart' show CustomSemanticsAction;
 
 import '../../core/sap_icons.dart';
+import 'column_edge_grip.dart';
 import 'sap_graph_view.dart';
 import 'session_busy.dart';
 
@@ -99,7 +101,17 @@ class SapTreeView extends StatefulWidget {
     this.onItemClick,
     this.onItemActivate,
     this.expandedKeys,
+    this.columnWidths,
   });
+
+  /// The column widths the user dragged on this column tree, in characters
+  /// ([charWidth] points each): the hierarchy area under
+  /// [SapTreeColumns.hierarchyItem], an item column under its name. A
+  /// mutable map the caller keeps for the session (per tree shell), so a
+  /// width outlives the view; null: the view keeps its own. Client-only:
+  /// the real GUI's column resize sends nothing (a recorded session
+  /// step 8, see [ColumnEdgeGrip]).
+  final Map<String, double>? columnWidths;
 
   /// The folders the session holds OPEN (SapSessionTree.treeExpandedKeys):
   /// the server's own expansion — its `ABAPExpandNodes` verbs, its
@@ -343,6 +355,10 @@ class _SapTreeViewState extends State<SapTreeView> {
 
   /// The node the user last selected (tapped or double-tapped).
   String? _selected;
+
+  /// The dragged column widths when the caller keeps none.
+  final Map<String, double> _ownWidths = {};
+  Map<String, double> get _widths => widget.columnWidths ?? _ownWidths;
 
   /// Which tree the expansion state belongs to: its roots (key and text).
   /// The same element can be handed another tree (the screen's tree
@@ -718,17 +734,44 @@ class _SapTreeViewState extends State<SapTreeView> {
         for (final (_, d) in rows) {
           if (d > depth) depth = d;
         }
-        final hierW =
-            columnWidth(cols.hierarchy, cw, hierarchy: true) +
-            SapTreeView.hierarchyChromeExtra(depth, cw);
-        final widths = [for (final c in items) columnWidth(c, cw)];
+        // a column the user dragged keeps its dragged characters
+        final store = _widths;
+        const hierKey = SapTreeColumns.hierarchyItem;
+        final hierW = store[hierKey] != null
+            ? store[hierKey]! * cw
+            : columnWidth(cols.hierarchy, cw, hierarchy: true) +
+                  SapTreeView.hierarchyChromeExtra(depth, cw);
+        final widths = [
+          for (final c in items)
+            store[c.name] != null
+                ? math.max(store[c.name]! * cw, _minColumn)
+                : columnWidth(c, cw),
+        ];
         final itemsW = widths.fold(0.0, (a, b) => a + b);
-        // the hierarchy area: its column's width, at most 60 % of the pane
-        // (the item area stays in view); the rest the item area's
+        // the hierarchy area: its column's own width — the server's
+        // (CL_GUI_COLUMN_TREE's hierarchy header width) or the user's —
+        // never squeezed below it while the pane holds it (SE80's object
+        // tree cut its names at 60 % of the dock: "ZCL_Z_BC_ARCI"); only a
+        // pane too narrow for it leaves the item area a strip of
+        // [_itemStrip] to drag the boundary back from
         final hierArea = itemsW <= 0
             ? paneW
-            : (hierW < paneW * 0.6 ? hierW : paneW * 0.6);
+            : math.max(
+                math.min(_minColumn, paneW),
+                math.min(hierW, paneW - 1 - math.min(itemsW, _itemStrip)),
+              );
         final rule = BorderSide(color: scheme.outlineVariant, width: 1);
+        // a header edge's drag: the column's width in characters, from
+        // the stored one (several steps may land before the rebuild)
+        void resize(String key, double drawn, double dx) => setState(() {
+          final now = store[key] ?? drawn / cw;
+          store[key] = (now + dx / cw).clamp(_minColumn / cw, _maxChars);
+        });
+        Widget grip(String key, double drawn) => ColumnEdgeGrip(
+          key: ValueKey('tree-edge-${_keyText(key)}'),
+          color: Colors.transparent,
+          onDrag: (dx) => resize(key, drawn, dx),
+        );
         Widget header(Widget child, double w, {String tip = ''}) {
           final cell = Container(
             width: w,
@@ -749,18 +792,42 @@ class _SapTreeViewState extends State<SapTreeView> {
           hierW,
           tip: cols.hierarchy.tooltip,
         );
-        final itemHeader = Row(
-          key: const ValueKey('tree-header-items'),
-          children: [
-            for (var i = 0; i < items.length; i++)
-              KeyedSubtree(
-                key: ValueKey('tree-header-${_keyText(items[i].name)}'),
-                child: header(
-                  _headerFace(context, items[i]),
-                  widths[i],
-                  tip: items[i].tooltip,
-                ),
+        // each item header's right edge drags its column (the last one's
+        // grip kept inside the area, where it can be hit)
+        final edges = <Widget>[];
+        var at = 0.0;
+        for (var i = 0; i < items.length; i++) {
+          at += widths[i];
+          edges.add(
+            Positioned(
+              left: math.min(
+                at - ColumnEdgeGrip.width / 2,
+                itemsW - ColumnEdgeGrip.width,
               ),
+              top: 0,
+              width: ColumnEdgeGrip.width,
+              height: headerHeight,
+              child: grip(items[i].name, widths[i]),
+            ),
+          );
+        }
+        final itemHeader = Stack(
+          children: [
+            Row(
+              key: const ValueKey('tree-header-items'),
+              children: [
+                for (var i = 0; i < items.length; i++)
+                  KeyedSubtree(
+                    key: ValueKey('tree-header-${_keyText(items[i].name)}'),
+                    child: header(
+                      _headerFace(context, items[i]),
+                      widths[i],
+                      tip: items[i].tooltip,
+                    ),
+                  ),
+              ],
+            ),
+            ...edges,
           ],
         );
         const pad = EdgeInsets.only(bottom: 24);
@@ -822,7 +889,7 @@ class _SapTreeViewState extends State<SapTreeView> {
             ),
           ),
         );
-        final body = Row(
+        final areas = Row(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             SizedBox(
@@ -854,6 +921,24 @@ class _SapTreeViewState extends State<SapTreeView> {
               ),
           ],
         );
+        // the hierarchy column's right edge — the boundary between the
+        // areas: its drag resizes the hierarchy column (in the header row;
+        // a tree without headings has it the whole height)
+        final body = itemsW <= 0
+            ? areas
+            : Stack(
+                children: [
+                  Positioned.fill(child: areas),
+                  Positioned(
+                    left: hierArea + 0.5 - ColumnEdgeGrip.width / 2,
+                    top: 0,
+                    width: ColumnEdgeGrip.width,
+                    height: cols.withHeader ? headerHeight : null,
+                    bottom: cols.withHeader ? null : 0,
+                    child: grip(hierKey, hierW),
+                  ),
+                ],
+              );
         if (widget.onTopNode == null) return body;
         return NotificationListener<ScrollEndNotification>(
           onNotification: (n) {
@@ -876,6 +961,13 @@ class _SapTreeViewState extends State<SapTreeView> {
       },
     );
   }
+
+  /// The least a column is drawn at, in points (a finger's), the most a
+  /// dragged one gets in characters, and the strip of the item area a pane
+  /// too narrow for the hierarchy column still shows.
+  static const double _minColumn = 28;
+  static const double _maxChars = 255;
+  static const double _itemStrip = 24;
 
   /// A column's drawn width: its declared characters x [cw] (the
   /// hierarchy column 30 characters when it declares none, an item column
@@ -942,16 +1034,15 @@ class _SapTreeViewState extends State<SapTreeView> {
     BorderSide rule,
     bool busy,
   ) {
-    final scheme = Theme.of(context).colorScheme;
-    final selected = _selected == n.key;
-    return ColoredBox(
-      color: selected ? scheme.secondaryContainer : Colors.transparent,
-      child: Row(
-        children: [
-          for (var i = 0; i < items.length; i++)
-            _itemCell(context, n, items[i], widths[i], rule, busy),
-        ],
-      ),
+    // a selected node is painted in the hierarchy column alone — its
+    // icon and text, as the real GUI's column tree paints it ([_row]): the
+    // item cells beside it stay unpainted
+    return Row(
+      key: ValueKey('tree-item-row-${_keyText(n.key)}'),
+      children: [
+        for (var i = 0; i < items.length; i++)
+          _itemCell(context, n, items[i], widths[i], rule, busy),
+      ],
     );
   }
 
@@ -1252,8 +1343,34 @@ class _SapTreeViewState extends State<SapTreeView> {
           : null,
     );
     // the node: its icon and text — a tap selects, a double tap is the
-    // double-click
-    final face = Ink(
+    // double-click. In a column tree the selection is painted round the
+    // icon and text alone, cut at the hierarchy column's edge (the real
+    // GUI's selected node: never a band across the row into the item
+    // columns); a simple tree's row keeps its full-width face
+    final labelText = Text(
+      label,
+      key: link ? ValueKey('tree-link-${n.key}') : null,
+      // a long label wraps to two lines at natural height (a dense row's
+      // extent is fixed: one line, cut); a column tree's label is one line
+      // cut at its column, as the OCX cuts it
+      maxLines: extent == null && !columnMode ? 2 : 1,
+      softWrap: !columnMode,
+      overflow: columnMode ? TextOverflow.clip : TextOverflow.ellipsis,
+      style: TextStyle(
+        fontSize: fontSize,
+        height: extent == null ? null : 1.1,
+        fontWeight: depth == 0 ? FontWeight.w600 : FontWeight.normal,
+        color: n.disabled
+            ? scheme.outline
+            : link
+            ? linkColor
+            : (selected ? scheme.onSecondaryContainer : null),
+        decoration: link ? TextDecoration.underline : null,
+        decorationColor: link ? linkColor : null,
+      ),
+    );
+    final faceBox = Ink(
+      key: columnMode ? ValueKey('tree-face-${_keyText(n.key)}') : null,
       decoration: BoxDecoration(
         color: selected ? scheme.secondaryContainer : null,
         borderRadius: BorderRadius.circular(6),
@@ -1264,6 +1381,7 @@ class _SapTreeViewState extends State<SapTreeView> {
           vertical: extent == null ? 6 : 0,
         ),
         child: Row(
+          mainAxisSize: columnMode ? MainAxisSize.min : MainAxisSize.max,
           children: [
             nodeImage ??
                 Icon(
@@ -1276,34 +1394,19 @@ class _SapTreeViewState extends State<SapTreeView> {
                             : scheme.onSurfaceVariant),
                 ),
             SizedBox(width: extent == null ? 10 : 6),
-            Expanded(
-              child: Text(
-                label,
-                key: link ? ValueKey('tree-link-${n.key}') : null,
-                // a long label wraps to two lines at natural height (a
-                // dense row's extent is fixed: one line, cut)
-                maxLines: extent == null ? 2 : 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: fontSize,
-                  height: extent == null ? null : 1.1,
-                  fontWeight: depth == 0
-                      ? FontWeight.w600
-                      : FontWeight.normal,
-                  color: n.disabled
-                      ? scheme.outline
-                      : link
-                      ? linkColor
-                      : (selected ? scheme.onSecondaryContainer : null),
-                  decoration: link ? TextDecoration.underline : null,
-                  decorationColor: link ? linkColor : null,
-                ),
-              ),
-            ),
+            if (columnMode)
+              Flexible(child: labelText)
+            else
+              Expanded(child: labelText),
           ],
         ),
       ),
     );
+    // (the row's hit area stays the whole column: the tap detectors are
+    // opaque, only the paint hugs the label)
+    final face = columnMode
+        ? Align(alignment: Alignment.centerLeft, child: faceBox)
+        : faceBox;
     // the node: its icon and text — a tap selects, a double tap is the
     // double-click (serial taps: the click shows without the double-tap
     // wait). A LINK leaf's tap is its click at once, as a column tree's

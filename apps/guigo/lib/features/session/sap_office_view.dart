@@ -35,13 +35,11 @@ class SapOfficeView extends StatefulWidget {
 
   /// The user's first TAP in the document (once per document) — a
   /// pointer up within [kTouchSlop] of its down; a scroll or a drag is
-  /// not one, nor is a tap on the pane's own header: the session raises
-  /// the container's activation event
-  /// ([SapSessionOffice.officeDocumentActivated]), as SAP GUI does when
-  /// the user starts working in the in-place Word / Excel window. The
-  /// first finger-down of a scroll through a long text used to cost that
-  /// round (and a busy spell with the toolbar greyed) before the user
-  /// had done anything to the document.
+  /// not one, nor is a tap on the pane's own header: the user entered the
+  /// in-place document ([SapSessionOffice.officeDocumentEntered]). Nothing
+  /// goes on the wire for it — a click into SAP GUI's in-place Word sends
+  /// nothing; the container's OnCloseDocument goes out when the user's
+  /// next round leaves the document, as the real GUI's did.
   final VoidCallback? onActivate;
 
   /// The clock export file names are dated with (tests pin it).

@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:office_doc/office_doc.dart';
 
+import 'sap_netplan_view.dart' show StyledLabelCache;
+
 /// An Adobe form template (SFP's Layout tab, `PDFXMLDesigner.Document`)
 /// shown READ-ONLY, all of it:
 ///
@@ -38,6 +40,14 @@ class _SapFormViewState extends State<SapFormView>
   // the logo decoded but the page never repainted
   Map<String, ui.Image> _images = {};
 
+  /// The laid-out texts of the pages, kept across paints: a tap on a
+  /// field (the selection repaint) or a decoded image draws them, it lays
+  /// none out again (audit 2026-10-23 P-8).
+  final _labels = StyledLabelCache();
+
+  /// How many text layouts the pages made (tests read it).
+  int get labelLayouts => _labels.layouts;
+
   XfaForm get _form => widget.form;
 
   @override
@@ -56,6 +66,7 @@ class _SapFormViewState extends State<SapFormView>
     for (final i in _images.values) {
       i.dispose();
     }
+    _labels.clear();
     super.dispose();
   }
 
@@ -135,6 +146,7 @@ class _SapFormViewState extends State<SapFormView>
             form: _form,
             images: _images,
             selected: _selected,
+            labels: _labels,
             onSelect: (e) => setState(() => _selected = e),
           ),
         ),
@@ -381,12 +393,14 @@ class _FormPages extends StatelessWidget {
     required this.images,
     required this.selected,
     required this.onSelect,
+    this.labels,
   });
 
   final XfaForm form;
   final Map<String, ui.Image> images;
   final XfaElement? selected;
   final ValueChanged<XfaElement> onSelect;
+  final StyledLabelCache? labels;
 
   @override
   Widget build(BuildContext context) {
@@ -400,6 +414,7 @@ class _FormPages extends StatelessWidget {
             images: images,
             selected: selected,
             onSelect: onSelect,
+            labels: labels,
           ),
       ];
       if (form.pages.length == 1) {
@@ -458,6 +473,7 @@ class _PageCard extends StatelessWidget {
     required this.images,
     required this.selected,
     required this.onSelect,
+    this.labels,
   });
 
   final XfaForm form;
@@ -465,6 +481,7 @@ class _PageCard extends StatelessWidget {
   final Map<String, ui.Image> images;
   final XfaElement? selected;
   final ValueChanged<XfaElement> onSelect;
+  final StyledLabelCache? labels;
 
   static const double _scale = 1.0; // 1 pt = 1 logical px before zoom
 
@@ -518,6 +535,7 @@ class _PageCard extends StatelessWidget {
             images: images,
             theme: Theme.of(context),
             selected: selected,
+            labels: labels,
           ),
         ),
         ),
@@ -533,6 +551,7 @@ class _FormPainter extends CustomPainter {
     required this.images,
     required this.theme,
     required this.selected,
+    this.labels,
   });
 
   final XfaForm form;
@@ -540,6 +559,32 @@ class _FormPainter extends CustomPainter {
   final Map<String, ui.Image> images;
   final ThemeData theme;
   final XfaElement? selected;
+
+  /// The view's laid-out texts, kept across paints (audit 2026-10-23
+  /// P-8); null lays each out per paint (a painter built on its own).
+  final StyledLabelCache? labels;
+
+  /// [text] in [style] laid out for [rect] — one line when the rect is
+  /// shorter than 1.6 lines, else as many as fit — from the cache when
+  /// the view holds one. The caller disposes it only when [labels] is
+  /// null.
+  TextPainter _layout(String text, TextStyle style, Rect rect, double size) {
+    final maxLines = rect.height < size * 1.6 ? 1 : null;
+    // the element's own width (XFA millimetres): the same per element on
+    // every paint, so one layout per element
+    final maxWidth = rect.width <= 0 ? 1.0 : rect.width;
+    final cache = labels;
+    if (cache != null) {
+      return cache.label(text, style,
+          maxLines: maxLines, maxWidth: maxWidth, ellipsis: '…');
+    }
+    return TextPainter(
+      text: TextSpan(text: text, style: style),
+      textDirection: TextDirection.ltr,
+      maxLines: maxLines,
+      ellipsis: '…',
+    )..layout(minWidth: 0, maxWidth: maxWidth);
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -678,17 +723,12 @@ class _FormPainter extends CustomPainter {
       fontStyle: f?.italic == true ? FontStyle.italic : FontStyle.normal,
       color: docInk,
     );
-    final tp = TextPainter(
-      text: TextSpan(text: e.captionText, style: style),
-      textDirection: TextDirection.ltr,
-      maxLines: rect.height < size * 1.6 ? 1 : null,
-      ellipsis: '…',
-    )..layout(minWidth: 0, maxWidth: rect.width <= 0 ? 1 : rect.width);
+    final tp = _layout(e.captionText!, style, rect, size);
     tp.paint(
       canvas,
       Offset(rect.left, rect.top + (rect.height - tp.height) / 2),
     );
-    tp.dispose();
+    if (labels == null) tp.dispose();
   }
 
   void _paintEdges(Canvas canvas, Rect rect, XfaPlaced e,
@@ -787,17 +827,12 @@ class _FormPainter extends CustomPainter {
       // noise; nothing to draw
       return;
     }
-    final tp = TextPainter(
-      text: TextSpan(text: text, style: style),
-      textDirection: TextDirection.ltr,
-      maxLines: rect.height < size * 1.6 ? 1 : null,
-      ellipsis: '…',
-    )..layout(minWidth: 0, maxWidth: rect.width <= 0 ? 1 : rect.width);
+    final tp = _layout(text, style, rect, size);
     tp.paint(
       canvas,
       Offset(rect.left + 1, rect.top + (rect.height - tp.height) / 2),
     );
-    tp.dispose();
+    if (labels == null) tp.dispose();
   }
 
   Color _ui(XfaColor c) => Color.fromARGB(255, c.r, c.g, c.b);

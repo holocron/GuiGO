@@ -97,9 +97,14 @@ class SapControlToolbarView extends StatelessWidget {
         Expanded(
           child: Align(
             alignment: Alignment.topLeft,
+            // a compact row: SAP GUI's tight spacing, so a one-cell dock
+            // pane's two buttons (SE80's F4 / Display beside the object
+            // name, 56 points wide) fit beside the More button
             child: ScrollingButtonRow(
               bottomGap: m.bottomGap,
               arrowSize: m.arrow + 4,
+              spacing: m.flat ? 2 : 6,
+              padding: EdgeInsets.symmetric(horizontal: m.flat ? 2 : 8),
               children: children,
             ),
           ),
@@ -189,6 +194,16 @@ class _MoreButton extends StatelessWidget {
             width: metrics.button,
             height: metrics.button,
           ),
+          // a compact row: the button its own size, not padded to the
+          // 48-point tap minimum (which left a one-cell dock pane's
+          // buttons a 0-point viewport); no smaller than the row's own
+          // buttons
+          style: identical(metrics, _ToolbarMetrics.natural)
+              ? null
+              : IconButton.styleFrom(
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  minimumSize: Size.zero,
+                ),
           onPressed: enabled ? () => _open(ctx) : null,
         ),
       ),

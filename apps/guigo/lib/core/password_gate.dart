@@ -13,7 +13,8 @@
 /// `EncryptedSharedPreferences`, which encrypts at rest but has no unlock
 /// gate of its own.
 /// * The biometric check itself failing (plugin unavailable, an error)
-/// returns null: the caller falls back to manual entry.
+/// returns null: the caller falls back to manual entry. So does the
+/// secure store failing to answer ([hasStored] / [read] throwing).
 ///
 /// Returns the released password, or null when nothing is stored (or the
 /// stored value is empty) or the gate was not passed.
@@ -23,7 +24,16 @@ Future<String?> releaseStoredPassword({
   required Future<bool> Function() authenticate,
   required Future<String?> Function() read,
 }) async {
-  if (!await hasStored()) return null;
+  // the store's own failures (a PlatformException from a corrupt Android
+  // Keystore, iOS -34018) take the same way out as a failed gate: null,
+  // the caller asks for the password. Outside this try they reached the
+  // error view, whose Retry re-hit the store — a lockout no typed
+  // password could end (audit 2026-10-23 R-9)
+  try {
+    if (!await hasStored()) return null;
+  } catch (_) {
+    return null; // the store unreadable — manual entry
+  }
   bool released;
   try {
     released = !await biometricsEnrolled() || await authenticate();
@@ -31,6 +41,11 @@ Future<String?> releaseStoredPassword({
     released = false; // biometrics unavailable — manual entry
   }
   if (!released) return null;
-  final stored = await read();
+  final String? stored;
+  try {
+    stored = await read();
+  } catch (_) {
+    return null; // the store unreadable — manual entry
+  }
   return (stored == null || stored.isEmpty) ? null : stored;
 }

@@ -79,6 +79,73 @@ const Set<String> dropColumns = {'RFC_QUEUE', 'ERROR_INFO', 'VERBS', 'IMPORT_XML
 const List<int> rfcTerm = [0xff, 0xff, 0x00, 0x00, 0xff, 0xff];
 const int tableInlineMax = cellSeg; // <= 250 B -> inline 03 04 rows
 
+// ---------------------------------------------------------------------------
+// The RFC_TR container's token tags (two bytes, `<a> <b>` — spelled here as
+// the u16 `0xaabb`, the frontend_rfc.dart rfcTag* convention). The flush
+// call's reply and the DP / DOI / stream / listbox answers are all this
+// grammar (audit 2026-10-23 §6.6) — dp_cache.dart, doi.dart,
+// stream_paint.dart, html_viewer.dart and listbox_valueset.dart read and
+// write it through these names too.
+// ---------------------------------------------------------------------------
+
+/// `02 01` — a parameter's NAME (`EXPORT_XML`, `EXCEPT_DESCRIPT`, a DP
+/// answer's IMPORTING scalars; frontend_rfc.dart's rfcTagParamName).
+const int rfcTagParamName = 0x0201;
+
+/// `02 03` — the parameter's VALUE following its name.
+const int rfcTagParamValue = 0x0203;
+
+/// `03 01` — a table column's NAME (`PARAMS`, `VARS`, `XML_DATA_STREAM`,
+/// `VERBS`; a DP answer's `DATAASC` / `FORMAT` / `PROPS`).
+const int rfcTagColumnName = 0x0301;
+
+/// `03 02` — the column's descriptor (8 bytes: width u32, count u32).
+const int rfcTagColumnDesc = 0x0302;
+
+/// `03 04` — one inline table row (tables up to [tableInlineMax]).
+const int rfcTagTableRow = 0x0304;
+
+/// `03 05` — an LZH cell segment (rfc_cells.dart [wrap0305Cell]).
+const int rfcTagTableCell = 0x0305;
+
+/// `03 06` — the cell's close after its last segment.
+const int rfcTagTableClose = 0x0306;
+
+/// `02 13` — the end of a DP table's columns (the pull's / push's table
+/// close that bounds the last column; dp_cache.dart, doi.dart).
+const int rfcTagTableEnd = 0x0213;
+
+/// `06 67` — the GUI-version trailer of a DP answer ([propsVersion]; the
+/// same tag frontend_rfc.dart reads as rfcTagStats).
+const int rfcTagVersionTrailer = 0x0667;
+
+/// `3c 02` — the SVARS section's delimiter (empty, before and after
+/// [rfcTagSvarsXml]).
+const int rfcTagSvarsSection = 0x3c02;
+
+/// `3c 05` — the SVARS XML the reply carries.
+const int rfcTagSvarsXml = 0x3c05;
+
+/// The two bytes of a u16 tag, for a byte-stream literal
+/// (`...rfcTagBytes(rfcTagColumnName)`).
+List<int> rfcTagBytes(int tag) => [tag >> 8, tag & 0xff];
+
+/// A column-name token `03 01 <len u16> <name> 03 01` — the anchor a DP /
+/// DOI column is found by and the header its answer is written with.
+Uint8List rfcColumnNameToken(String name) {
+  final n = name.codeUnits;
+  return Uint8List.fromList([
+    ...rfcTagBytes(rfcTagColumnName),
+    (n.length >> 8) & 0xff, n.length & 0xff,
+    ...n,
+    ...rfcTagBytes(rfcTagColumnName),
+  ]);
+}
+
+/// The u16 tag at [at] of [b] (`b[at] << 8 | b[at + 1]`), -1 past the end.
+int rfcTagAt(Uint8List b, int at) =>
+    at + 2 <= b.length ? (b[at] << 8) | b[at + 1] : -1;
+
 /// One RFC reply token `<a> <b> <len u16> <data> <a> <b>` — the builder
 /// every reply / answer shares. A token's length is a u16: [data] past 64 KB
 /// throws instead of wrapping (a wrapped length desyncs the server's token
@@ -98,7 +165,8 @@ Uint8List rfcToken(int a, int b, Uint8List data) {
   return out;
 }
 
-Uint8List _tok(List<int> tag, Uint8List data) => rfcToken(tag[0], tag[1], data);
+Uint8List _tok(int tag, Uint8List data) =>
+    rfcToken(tag >> 8, tag & 0xff, data);
 
 /// The body of one reply table column after its `03 02` dims: inline `03 04`
 /// rows when the table fits one segment, else one LZH `03 05` cell + `03 06`.
@@ -108,7 +176,7 @@ Uint8List tableColumn(List<Uint8List> rows, {int? width}) {
   if (total <= tableInlineMax) {
     final out = BytesBuilder(copy: false);
     for (final r in rows) {
-      out.add(_tok([0x03, 0x04], r));
+      out.add(_tok(rfcTagTableRow, r));
     }
     return out.takeBytes();
   }
@@ -122,7 +190,7 @@ Uint8List tableColumn(List<Uint8List> rows, {int? width}) {
   }
   return Uint8List.fromList([
     ...wrap0305Cell(lzhCompress(body)),
-    ..._tok([0x03, 0x06], Uint8List(0)),
+    ..._tok(rfcTagTableClose, Uint8List(0)),
   ]);
 }
 
@@ -147,14 +215,14 @@ List<CallColumn> parseCallColumns(Uint8List callRfc) {
   var i = 0;
   final n = b.length;
   while (i < n - 4) {
-    if (b[i] == 0x03 && b[i + 1] == 0x01) {
+    if (rfcTagAt(b, i) == rfcTagColumnName) {
       final ln = bd.getUint16(i + 2);
       if (i + 4 + ln + 2 <= n) {
         final name = String.fromCharCodes(b, i + 4, i + 4 + ln);
-        if (b[i + 4 + ln] == 0x03 && b[i + 5 + ln] == 0x01 && want.contains(name)) {
+        if (rfcTagAt(b, i + 4 + ln) == rfcTagColumnName && want.contains(name)) {
           var j = i + 6 + ln;
           Uint8List? desc;
-          if (j + 4 <= n && b[j] == 0x03 && b[j + 1] == 0x02) {
+          if (j + 4 <= n && rfcTagAt(b, j) == rfcTagColumnDesc) {
             final dl = bd.getUint16(j + 2);
             // a wire length past the buffer is a truncated/hostile call:
             // skip this candidate rather than throw out of the reply build
@@ -170,12 +238,10 @@ List<CallColumn> parseCallColumns(Uint8List callRfc) {
           // the content — the the test system-class call dialect (prd's omits it);
           // without the skip the cell never attaches and the reply drops
           // the column's table
-          while (j + 2 <= n &&
-              b[j] == 0x03 &&
-              b[j + 1] == 0x02 &&
+          while (rfcTagAt(b, j) == rfcTagColumnDesc &&
               (j + 4 > n ||
-                  (b[j + 2] == 0x03 &&
-                      (b[j + 3] == 0x04 || b[j + 3] == 0x05)))) {
+                  rfcTagAt(b, j + 2) == rfcTagTableRow ||
+                  rfcTagAt(b, j + 2) == rfcTagTableCell)) {
             j += 2;
           }
           Uint8List? cellLzh;
@@ -184,9 +250,9 @@ List<CallColumn> parseCallColumns(Uint8List callRfc) {
           if (cell != null) {
             final p = parse0305Cell(cell.bytes);
             cellLzh = p?.lzh;
-          } else if (j + 4 <= n && b[j] == 0x03 && b[j + 1] == 0x04) {
+          } else if (j + 4 <= n && rfcTagAt(b, j) == rfcTagTableRow) {
             rows = [];
-            while (j + 4 <= n && b[j] == 0x03 && b[j + 1] == 0x04) {
+            while (j + 4 <= n && rfcTagAt(b, j) == rfcTagTableRow) {
               final rl = bd.getUint16(j + 2);
               if (j + 4 + rl > n) break;
               rows.add(Uint8List.sublistView(b, j + 4, j + 4 + rl));
@@ -229,16 +295,16 @@ Uint8List buildReply(
   final cols = parseCallColumns(callRfc);
   final out = BytesBuilder(copy: false)..add(prefix ?? constPrefix);
   if (svarsXml != null) {
-    out.add(_tok([0x3c, 0x02], Uint8List(0)));
-    out.add(_tok([0x3c, 0x05], svarsXml));
-    out.add(_tok([0x3c, 0x02], Uint8List(0)));
+    out.add(_tok(rfcTagSvarsSection, Uint8List(0)));
+    out.add(_tok(rfcTagSvarsXml, svarsXml));
+    out.add(_tok(rfcTagSvarsSection, Uint8List(0)));
   }
   if (controlXml != null) {
-    out.add(_tok([0x02, 0x01], codepad('EXPORT_XML')));
-    out.add(_tok([0x02, 0x03], controlXml));
+    out.add(_tok(rfcTagParamName, codepad('EXPORT_XML')));
+    out.add(_tok(rfcTagParamValue, controlXml));
   }
-  out.add(_tok([0x02, 0x01], codepad('EXCEPT_DESCRIPT')));
-  out.add(_tok([0x02, 0x03], spaces256));
+  out.add(_tok(rfcTagParamName, codepad('EXCEPT_DESCRIPT')));
+  out.add(_tok(rfcTagParamValue, spaces256));
 
   final drop = {...dropColumns};
   if (controlXml != null) drop.add('XML_DATA_STREAM');
@@ -251,11 +317,11 @@ Uint8List buildReply(
   final cellq = <Uint8List>[...auxCells]; // extra cells, in order
   for (final col in cols) {
     if (drop.contains(col.name)) continue;
-    out.add(_tok([0x03, 0x01], codepad(col.name)));
-    out.add(_tok([0x03, 0x02], col.desc ?? Uint8List(0)));
+    out.add(_tok(rfcTagColumnName, codepad(col.name)));
+    out.add(_tok(rfcTagColumnDesc, col.desc ?? Uint8List(0)));
     if (col.name == 'PARAMS' && paramsInline != null) {
       for (final r in paramsInline) {
-        out.add(_tok([0x03, 0x04], r));
+        out.add(_tok(rfcTagTableRow, r));
       }
       continue;
     }
@@ -263,11 +329,11 @@ Uint8List buildReply(
       final lzh = cellByName.remove(col.name) ??
           (cellq.isNotEmpty ? cellq.removeAt(0) : col.cellLzh!);
       out.add(wrap0305Cell(lzh));
-      out.add(_tok([0x03, 0x06], Uint8List(0)));
+      out.add(_tok(rfcTagTableClose, Uint8List(0)));
     } else if (col.rows != null) {
       final rowsSource = paramsRows ?? transformParamsRows(col.rows!);
       for (final r in rowsSource) {
-        out.add(_tok([0x03, 0x04], r));
+        out.add(_tok(rfcTagTableRow, r));
       }
     }
   }
@@ -286,10 +352,10 @@ Uint8List dpTableColumn(String name, int width, int count, Uint8List cell) {
   desc.buffer.asByteData().setUint32(0, width);
   desc.buffer.asByteData().setUint32(4, count);
   return Uint8List.fromList([
-    ..._tok([0x03, 0x01], codepad(name)),
-    ..._tok([0x03, 0x02], desc),
+    ..._tok(rfcTagColumnName, codepad(name)),
+    ..._tok(rfcTagColumnDesc, desc),
     ...wrap0305Cell(cell),
-    ..._tok([0x03, 0x06], Uint8List(0)),
+    ..._tok(rfcTagTableClose, Uint8List(0)),
   ]);
 }
 
@@ -299,8 +365,8 @@ Uint8List dpScalarPair(String name, String value) {
   final n = codepad(name);
   final v = codepad(value);
   return Uint8List.fromList([
-    0x02, 0x01, ..._u16b(n.length), ...n, 0x02, 0x01,
-    0x02, 0x03, ..._u16b(v.length), ...v, 0x02, 0x03,
+    ..._tok(rfcTagParamName, n),
+    ..._tok(rfcTagParamValue, v),
   ]);
 }
 
@@ -334,7 +400,7 @@ Uint8List buildDpAnswer(
   }
   out.add(tableRegion);
   if (trailer) {
-    out.add(_tok([0x06, 0x67], propsVersion));
+    out.add(_tok(rfcTagVersionTrailer, propsVersion));
   }
   out.add(Uint8List.fromList(rfcTerm));
   return out.takeBytes();

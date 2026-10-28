@@ -6,6 +6,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import '../codepages.dart';
+import '../framing/decode_worker.dart' show dyntAtomsOf;
 import '../framing/diag_frame.dart';
 import '../framing/envelope.dart';
 import '../items/dynt_atom.dart';
@@ -18,7 +19,8 @@ import 'type_ahead.dart' show xmlpropArmsTypeAhead;
 
 export 'field_routing.dart' show FieldRouting;
 export 'menu_entries.dart';
-export 'table_controls.dart' show TableControlInfo, TcPlaneItem, tcRoutingSids;
+export 'table_controls.dart'
+    show TableControlInfo, TcPlaneItem, tcHeaderArrays, tcRoutingSids;
 
 enum FieldKind {
   input,
@@ -584,10 +586,16 @@ class ScreenModel {
       program == null && fields.isEmpty && title.isEmpty && message.isEmpty;
 }
 
-/// The last 16/6/2 / 16/6/3 / 16/6/12 values of [frames] (system id, app
-/// server, client), each null when absent.
-(String?, String?, String?) _systemOf(List<Uint8List> frames) {
-  String? db, cpu, client;
+/// The turn's session-wide ST_R3INFO header values: the last 16/6/2 /
+/// 16/6/3 / 16/6/12 / 16/6/7 of [frames] (system id, app server, client,
+/// transaction code), each null when absent. The kernel sends all four in
+/// the frame's header block AHEAD of the SES (every recorded 16/6/7 sits
+/// before it), so a turn that opens a window drops them with segment[0];
+/// this scan keeps them. An empty 16/6/7 never clears a known tcode (the
+/// [_foldAppl] rule); the latest non-empty one in the turn wins, as the
+/// reference client's fold over every item of the frame.
+(String?, String?, String?, String?) _headerOf(List<Uint8List> frames) {
+  String? db, cpu, client, tcode;
   String text(Uint8List v) {
     var end = v.indexOf(0);
     if (end < 0) end = v.length;
@@ -602,9 +610,13 @@ class ScreenModel {
       if (it.sid == 2) db = text(it.value);
       if (it.sid == 3) cpu = text(it.value);
       if (it.sid == 12) client = text(it.value);
+      if (it.sid == 7) {
+        final t = text(it.value);
+        if (t.isNotEmpty) tcode = t;
+      }
     }
   }
-  return (db, cpu, client);
+  return (db, cpu, client, tcode);
 }
 
 /// One SES window segment: the SES that opens it plus every item that
@@ -711,14 +723,19 @@ WindowedFold foldWindows(
         : null;
   }
   final active = _foldSegment(activeCarry, activeSeg, activeModal);
-  // the system rides ST_R3INFO ahead of the frame's SES (every frame): the
-  // turn's, else the window's previous paint's
-  final (db, cpu, client) = _systemOf(frames);
+  // the system and the transaction ride ST_R3INFO ahead of the frame's SES
+  // (every frame): the turn's, else the window's previous paint's. The
+  // tcode belongs to the session, not to one SES window — a popup inside
+  // SE24 reports SE24 (the reference client folds every item of the frame); a 16/6/7
+  // folded inside the segment (after its SES) or carried stays when the
+  // header has none.
+  final (db, cpu, client, tcode) = _headerOf(frames);
   void system(ScreenModel m, ScreenModel? carry) {
     m
       ..systemId = db ?? carry?.systemId
       ..appServer = cpu ?? carry?.appServer
-      ..client = client ?? carry?.client;
+      ..client = client ?? carry?.client
+      ..tcode = tcode ?? m.tcode;
   }
 
   system(active, activeCarry);
@@ -1177,11 +1194,30 @@ typedef _Cell = (String, int, int, int, int);
 typedef _Line = (String, int, int, int);
 
 class _Level {
-  _Level(this.kind, this.name, this.top, this.left);
+  _Level(
+    this.kind,
+    this.name,
+    this.top,
+    this.left, {
+    this.width = 0,
+    this.height = 0,
+    this.clipRight,
+  });
   final int kind;
   final String name;
   final int top; // absolute
   final int left;
+  final int width; // the level's own 9-byte geometry (0 = undeclared)
+  final int height;
+
+  /// The visible right edge (exclusive, absolute column) the level's
+  /// ANCESTORS bound it to: min(left + width) over the levels on the path
+  /// above it that declare a width; null when none does. The kernel sends
+  /// a table control's 16/10/5 extent unclipped (SE24's MC 255 wide inside
+  /// CSS 122, a recorded session TC0 205 inside TS_SCREEN 116) and
+  /// expects the area to clip it, as the GUI's viewport does (reference client
+  /// diag_render: "the control's region clips the drawn box").
+  final int? clipRight;
 }
 
 /// The 16/10 container PATH of a paint (reference client
@@ -1220,11 +1256,22 @@ class _ContainerPath {
       final name = wireDecode(Uint8List.sublistView(v, 0, end)).trim();
       if (name.isEmpty || g == null) return null;
       final parent = levels.isNotEmpty ? levels.last : null;
+      // the live ancestor path, never `declared` by name (names repeat:
+      // ME21N SUB1/SUB2)
+      int? clipRight;
+      for (final a in levels) {
+        if (a.width <= 0) continue;
+        final r = a.left + a.width;
+        if (clipRight == null || r < clipRight) clipRight = r;
+      }
       final lv = _Level(
         g.$1,
         name,
         (parent?.top ?? 0) + g.$2,
         (parent?.left ?? 0) + g.$3,
+        width: g.$4,
+        height: g.$5,
+        clipRight: clipRight,
       );
       levels.add(lv);
       // the NUL-separated PROG / DYNP after the name
@@ -1562,10 +1609,12 @@ void _foldAppl(ScreenModel m, DiagItem it, _FoldState st) {
         st.tabPages = Uint8List.fromList(it.value);
         st.expectPages = false;
       }
-      // atoms ride 9/2 (dynpro paint) and 9/16 (tabstrip paint, APPL4)
+      // atoms ride 9/2 (dynpro paint) and 9/16 (tabstrip paint, APPL4);
+      // a frame the decode worker decoded arrives with them parsed
+      // (audit 2026-10-23 P-1), an inline-decoded one parses them here
       if (it.sid == 2 || it.sid == 16) {
         final host = st.path.host;
-        for (final a in parseDyntAtoms(it.value).atoms) {
+        for (final a in dyntAtomsOf(it).atoms) {
           st.atoms.add(
             _PlacedAtom(a, host?.name, host?.top ?? 0, host?.left ?? 0,
                 st.plane, st.plane.current),
@@ -1589,6 +1638,7 @@ void _foldAppl(ScreenModel m, DiagItem it, _FoldState st) {
           ..absLeft = lv.left
           ..width = g.width
           ..height = g.height
+          ..clipRight = lv.clipRight
           ..container = g.parent;
       }
       final v = it.value;
@@ -1850,7 +1900,8 @@ void _buildFields(ScreenModel m, List<_PlacedAtom> placed) {
             ? null
             : (a.tabstripFunctionCode ?? '').trim(),
         pageId: a.tabstripPageId,
-        on: a.tabstripPageId != 0,
+        // the 0x40 record flag, not the page id (2 on every tab)
+        on: a.isActiveTab,
         area: a.area,
         block: a.block,
         group: a.group,

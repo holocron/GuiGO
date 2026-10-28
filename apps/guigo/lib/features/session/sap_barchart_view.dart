@@ -1053,6 +1053,15 @@ class BarChartPainter extends CustomPainter {
     if (cache == null) tp.dispose();
   }
 
+  /// A drag frame repaints the whole surface (audit 2026-10-23 P-10):
+  /// the table (dy), the header ribbon (dx) and the time area (dx and
+  /// dy) are three regions of ONE picture, culled to the visible span and
+  /// rows and drawn from cached label layouts ([labels]), so the frame
+  /// costs the visible rects alone. Splitting them into layers that a
+  /// pan would translate (a table layer keyed on dy, a header layer on
+  /// dx) is not contained: the painter's hit boxes, paint record and the
+  /// tests reading them come from one paint, and a vertical pan would
+  /// repaint the time layer anyway — left as the direction.
   @override
   bool shouldRepaint(BarChartPainter old) =>
       old.geo.model != geo.model ||

@@ -160,6 +160,12 @@ class _SessionScreenState extends State<SessionScreen>
   /// its main window and its modal dialogs.
   final Map<String, int> _widestCols = {};
 
+  /// The column widths the user dragged on THIS logon's table controls
+  /// ([DynproZoomScope.columnWidths]) and column trees (by shell,
+  /// [SapTreeView.columnWidths]): client-only, kept while the logon lives.
+  final Map<String, Map<int, double>> _tcColumnWidths = {};
+  final Map<String, Map<String, double>> _treeColumnWidths = {};
+
   /// The last moment the logon showed life (a server turn, an action, the
   /// connect) — what a resume from the background is measured against.
   DateTime _lastActivity = DateTime.now();
@@ -264,9 +270,15 @@ class _SessionScreenState extends State<SessionScreen>
     WidgetsBinding.instance.addObserver(this);
     _turnTick.addListener(_onTurnFrame);
     FocusManager.instance.addListener(_reclaimKeys);
-    SapIconAtlas.load().then((a) {
-      if (mounted) setState(() => _icons = a);
-    });
+    // the atlas failing to load (a missing asset) leaves the icons as
+    // text, not the app in an unhandled zone error (audit 2026-10-23 R-12)
+    SapIconAtlas.load().then(
+      (a) {
+        if (mounted) setState(() => _icons = a);
+      },
+      onError: (Object e, StackTrace _) =>
+          debugPrint('GuiGo: icon atlas not loaded: $e'),
+    );
   }
 
   /// A turn of the current logon arrived: drawn on the next frame.
@@ -406,7 +418,18 @@ class _SessionScreenState extends State<SessionScreen>
     _traceLen = -1;
     _traceLast = null;
     _connectLog.value = const [];
+    // a multi-logon wall still up from the previous attempt (its socket
+    // died under it, its connect timed out): answered 'cancel' and
+    // dropped, as dispose does — left pending it parked that attempt's
+    // connect, and _syncModalRoute read it as a modal to draw over the
+    // new logon, read-only and undismissable (audit 2026-10-23 R-11)
+    final staleWall = _wallCompleter;
+    if (staleWall != null && !staleWall.isCompleted) {
+      staleWall.complete(WallOption.cancelLogon);
+    }
     setState(() {
+      _wallCompleter = null;
+      _wall = null;
       _session = null;
       _screen = null;
       _lost = false;
@@ -416,6 +439,14 @@ class _SessionScreenState extends State<SessionScreen>
       _neutralError = false;
       _showDetails = false;
       _widestCols.clear();
+      _tcColumnWidths.clear();
+      _treeColumnWidths.clear();
+      // the editors' view capacities are the previous logon's documents':
+      // the kernel reuses shell ids across logons, so a same-screen
+      // re-logon applied the old document's lines to the new one's
+      // LastVisibleLine (audit 2026-10-23 R-13)
+      _editorViewLines.clear();
+      _editorRegionLines.clear();
     });
     for (final s in previous) {
       _closeQuietly(s);
@@ -471,16 +502,6 @@ class _SessionScreenState extends State<SessionScreen>
         await _closeQuietly(live);
         return;
       }
-      // a typed password SAP accepted is the current one: with "Store
-      // password" on, it replaces whatever the store held
-      if (!fromStore && _args.entry.storePassword && pw.isNotEmpty) {
-        await _args.store.savePassword(_args.entry.id, pw);
-        _storedRefusal = null;
-      }
-      if (!mounted || !identical(_attempt, live)) {
-        await _closeQuietly(live);
-        return;
-      }
       _lastActivity = DateTime.now();
       setState(() {
         _session = live;
@@ -489,6 +510,15 @@ class _SessionScreenState extends State<SessionScreen>
       });
       // the body may have changed size while the logon ran (a rotation)
       _scheduleResize();
+      // a typed password SAP accepted is the current one: with "Store
+      // password" on, it replaces whatever the store held — best effort,
+      // after the session is up and not awaited by it: a secure store
+      // that refuses the write (Android Keystore after a restore, iOS
+      // -34018) used to fail the logon SAP had just accepted, every Retry
+      // re-hitting it (audit 2026-10-23 R-10)
+      if (!fromStore && _args.entry.storePassword && pw.isNotEmpty) {
+        unawaited(_storeAcceptedPassword(pw));
+      }
     } catch (e) {
       // the failed attempt's socket and logon go with it
       final failed = session;
@@ -505,6 +535,18 @@ class _SessionScreenState extends State<SessionScreen>
         _pollTrace();
         setState(() => _busy = false);
       }
+    }
+  }
+
+  /// Store the password SAP accepted ([_connectOnce]); a store failure is
+  /// a snack bar, never the logon's (audit 2026-10-23 R-10). The refused
+  /// stored password stays marked refused until a write went through.
+  Future<void> _storeAcceptedPassword(String pw) async {
+    try {
+      await _args.store.savePassword(_args.entry.id, pw);
+      _storedRefusal = null;
+    } on Object catch (e) {
+      if (mounted) _notify('Password not stored: $e');
     }
   }
 
@@ -578,7 +620,15 @@ class _SessionScreenState extends State<SessionScreen>
     // session already answered the call and never waits on it
     session.browserLaunches.listen((launch) async {
       if (!mounted || !_current(session)) return;
-      final why = await BrowserPlatform.openOrExplain(launch);
+      // the platform's own failure (no handler for the scheme, a plugin
+      // error) is a notice, not an unhandled zone error (audit
+      // 2026-10-23 R-12)
+      String? why;
+      try {
+        why = await BrowserPlatform.openOrExplain(launch);
+      } on Object catch (e) {
+        why = 'Could not open the link: $e';
+      }
       if (why == null || !mounted) return;
       _notify(why);
     });
@@ -588,7 +638,12 @@ class _SessionScreenState extends State<SessionScreen>
     // already (ShellExecute 42), nothing waits on the user
     session.frontendFileOpens.listen((file) async {
       if (!mounted || !_current(session)) return;
-      final why = await openFrontendFile(file);
+      String? why; // audit 2026-10-23 R-12: a viewer failure is a notice
+      try {
+        why = await openFrontendFile(file);
+      } on Object catch (e) {
+        why = 'Could not open the file: $e';
+      }
       if (why == null || !mounted) return;
       _notify(why);
     });
@@ -607,7 +662,19 @@ class _SessionScreenState extends State<SessionScreen>
         Navigator.of(context).pop();
         return;
       }
-      setState(() => _error = why);
+      // the socket died under the multi-logon wall: the wall is answered
+      // 'cancel' so the connect parked on it ends (and _connecting with
+      // it — Retry was a silent no-op meanwhile) and dropped, so no stale
+      // completer outlives this logon (audit 2026-10-23 R-11)
+      final wall = _wallCompleter;
+      if (wall != null && !wall.isCompleted) {
+        wall.complete(WallOption.cancelLogon);
+      }
+      setState(() {
+        _wallCompleter = null;
+        _wall = null;
+        _error = why;
+      });
     });
     return session;
   }
@@ -798,8 +865,14 @@ class _SessionScreenState extends State<SessionScreen>
     // the on-screen keyboard shrinks the body, not the SAP window: keep the
     // height measured without it (a keyboard up for a field resized SM04's
     // grid to the half screen above it, and every toggle repainted)
-    if (keyboard > 0 && _bodySize != null) {
-      size = Size(size.width, _bodySize!.height);
+    if (keyboard > 0) {
+      // a first layout under a keyboard still up (a route pushed while one
+      // slides down) has no height of its own to keep: the estimate's,
+      // never the shrunk one — the logon would report it
+      size = Size(
+        size.width,
+        _bodySize?.height ?? _estimatedBodySize().height,
+      );
     }
     if (_bodySize == size) return;
     _bodySize = size;
@@ -813,7 +886,9 @@ class _SessionScreenState extends State<SessionScreen>
 
   /// The body's size before it was ever laid out (the logon may start
   /// first): the screen less the app bar with its command row, the status /
-  /// key bar and the system insets.
+  /// key bar and the top and bottom insets — the full width, the body is
+  /// laid out at it (sideways on a notched phone the side insets cost 17
+  /// columns and a resize round).
   Size _estimatedBodySize() {
     // read, not depended on: a dependency taken here (outside build)
     // rebuilt the whole screen on every MediaQuery change — each frame of
@@ -829,9 +904,13 @@ class _SessionScreenState extends State<SessionScreen>
     final statusAndKeys =
         32.0 + (landscape ? 36 + 4 + 4 : kMinInteractiveDimension + 14);
     final chrome = landscape ? 48.0 : kToolbarHeight + 48;
+    // the bottom inset the keyboard hides (iOS drops it from padding while
+    // one is up) is the bar's again once it goes: count it either way
+    final insets =
+        mq.padding.top + math.max(mq.padding.bottom, mq.viewPadding.bottom);
     return Size(
-      mq.size.width - mq.padding.horizontal,
-      mq.size.height - mq.padding.vertical - chrome - statusAndKeys,
+      mq.size.width,
+      mq.size.height - insets - chrome - statusAndKeys,
     );
   }
 
@@ -885,6 +964,7 @@ class _SessionScreenState extends State<SessionScreen>
     );
     final body = DynproZoomScope(
       widest: _widestCols,
+      columnWidths: _tcColumnWidths,
       child: SessionBusy(
         busy: _busyN,
         child: PopScope(
@@ -1543,11 +1623,18 @@ class _SessionScreenState extends State<SessionScreen>
             onListboxPick: _pickListbox,
             model: base,
             busy: modalActive,
+            // the window the kernel lays a window-following screen out for
+            // (SE24's methods table at 18 x 124): drawn at its own cell
+            windowCells: _session != null && _session!.ctx.windowSized
+                ? (_session!.screenRows, _session!.screenCols)
+                : null,
             controls: _hostedControls(),
             onFill: _fillField,
             onPress: (vkey) => _run(() async => _session!.press(vkey)),
             onOkcode: (cmd) => _run(() async => _session!.okcode(cmd)),
             onCheckbox: _checkboxTapped,
+            onTableColumnWidths: _tableColumnWidths,
+            onTablePage: _pageTable,
             onRadio: (group, chosen) =>
                 _run(() async => _session!.selectRadio(group, chosen)),
           ),
@@ -2015,30 +2102,11 @@ class _SessionScreenState extends State<SessionScreen>
   ) {
     final all = _withoutCoveredDocks(_onePerShell(regions));
     final dyn = all.where((r) => r.kind == 'dynpro').firstOrNull?.rect;
-    bool onDynpro(ScreenRegion r) {
-      if (dyn == null || r.kind == 'dynpro' || r.kind == 'sash') return false;
-      const e = 0.01;
-      final c = r.rect;
-      return c.row >= dyn.row - e &&
-          c.col >= dyn.col - e &&
-          c.row + c.rows <= dyn.row + dyn.rows + e &&
-          c.col + c.cols <= dyn.col + dyn.cols + e;
-    }
+    bool onDynpro(ScreenRegion r) => _onDynpro(r, dyn);
 
-    final nested = <(Rect, String?, ComposedPane)>[
-      for (final r in all)
-        if (onDynpro(r))
-          if (_regionPane(base, r, modal) case final p?)
-            (
-              Rect.fromLTWH(
-                r.rect.col - dyn!.col,
-                r.rect.row - dyn.row,
-                r.rect.cols,
-                r.rect.rows,
-              ),
-              r.container ?? r.shell,
-              p,
-            ),
+    final nested = <_NestedRegion>[
+      for (final n in _nestedOn(all, dyn))
+        if (_regionPane(base, n.region, modal) case final p?) n.withPane(p),
     ];
     final s = _session;
     // the free sashes of the splitters drawn ON the dynpro (their cells
@@ -2046,16 +2114,7 @@ class _SessionScreenState extends State<SessionScreen>
     // client's own (SplitterSashGrip, SapSession.noteSplitterSash)
     final sashes = dyn == null || s == null || modal
         ? const <SplitterSash>[]
-        : [
-            for (final sh in _viewOf(s).sashes)
-              if (!sh.fixed &&
-                  sh.line.row >= dyn.row - 0.01 &&
-                  sh.line.col >= dyn.col - 0.01 &&
-                  sh.line.row + sh.line.rows <= dyn.row + dyn.rows + 0.01 &&
-                  sh.line.col + sh.line.cols <= dyn.col + dyn.cols + 0.01 &&
-                  (sh.rows ? sh.line.cols : sh.line.rows) > 0)
-                sh,
-          ];
+        : _freeSashesOn(_viewOf(s).sashes, dyn);
     return [
       for (final r in all)
         if (!onDynpro(r))
@@ -2076,6 +2135,76 @@ class _SessionScreenState extends State<SessionScreen>
     ];
   }
 
+  /// Whether region [r] lies ON the dynpro area [dyn] (a splitter cell, a
+  /// hosted control inside the custom-control area): drawn on the dynpro's
+  /// canvas, not as a composer pane. Never the dynpro itself or a fixed
+  /// sash.
+  static bool _onDynpro(ScreenRegion r, CellRect? dyn) {
+    if (dyn == null || r.kind == 'dynpro' || r.kind == 'sash') return false;
+    const e = 0.01;
+    final c = r.rect;
+    return c.row >= dyn.row - e &&
+        c.col >= dyn.col - e &&
+        c.row + c.rows <= dyn.row + dyn.rows + e &&
+        c.col + c.cols <= dyn.col + dyn.cols + e;
+  }
+
+  /// The regions of [all] on the dynpro [dyn], each at its dynpro cells
+  /// with a key stable across compositions of the same window (kind,
+  /// shell, container — a repeat, two gauges of one container, numbered
+  /// in order): a sash drag's re-layout finds each one's built content by
+  /// it (audit 2026-10-23 P-7).
+  static List<_NestedRegion> _nestedOn(List<ScreenRegion> all, CellRect? dyn) {
+    if (dyn == null) return const [];
+    final seen = <String, int>{};
+    return [
+      for (final r in all)
+        if (_onDynpro(r, dyn))
+          () {
+            final base = '${r.kind}|${r.shell}|${r.container}';
+            final n = seen.update(base, (v) => v + 1, ifAbsent: () => 0);
+            return _NestedRegion(
+              Rect.fromLTWH(
+                r.rect.col - dyn.col,
+                r.rect.row - dyn.row,
+                r.rect.cols,
+                r.rect.rows,
+              ),
+              r.container ?? r.shell,
+              n == 0 ? base : '$base#$n',
+              r,
+            );
+          }(),
+    ];
+  }
+
+  /// The free (draggable) sashes of [sashes] lying on the dynpro [dyn].
+  static List<SplitterSash> _freeSashesOn(
+    List<SplitterSash> sashes,
+    CellRect dyn,
+  ) => [
+    for (final sh in sashes)
+      if (!sh.fixed &&
+          sh.line.row >= dyn.row - 0.01 &&
+          sh.line.col >= dyn.col - 0.01 &&
+          sh.line.row + sh.line.rows <= dyn.row + dyn.rows + 0.01 &&
+          sh.line.col + sh.line.cols <= dyn.col + dyn.cols + 0.01 &&
+          (sh.rows ? sh.line.cols : sh.line.rows) > 0)
+        sh,
+  ];
+
+  /// The splitter sash drag in progress on the dynpro, or null: the session
+  /// whose layout it moves and a step count (a new value per cell step).
+  /// The dynpro pane listens to it and re-lays its overlays out to the
+  /// session's live composition; the screen's own state does not change
+  /// until the finger lifts ([_sashDragEnded]) — a setState per step bumped
+  /// the generation, recomposed the window and rebuilt EVERY pane with its
+  /// hosted trees, grids and editors (audit 2026-10-23 P-7; the
+  /// ScreenComposer.onDockResize pattern: layout follows the finger, the
+  /// state the lift).
+  final ValueNotifier<(SapSession, int)?> _sashDrag = ValueNotifier(null);
+  int _sashDragSteps = 0;
+
   /// The user dragged sash [sh] of a splitter drawn on the dynpro: its
   /// cells now span [extents]. The session holds the layout (its regions
   /// re-lay out at once) and reports the resized cells with the next round
@@ -2084,7 +2213,15 @@ class _SessionScreenState extends State<SessionScreen>
     final s = _session;
     if (!mounted || s == null) return;
     s.noteSplitterSash(sh.splitter, rows: sh.rows, extents: extents);
-    setState(() {});
+    _sashDrag.value = (s, ++_sashDragSteps);
+  }
+
+  /// The finger left a sash grip: the layout the drag gave the dynpro pane
+  /// becomes the screen's (one generation, one recompose, one pane build).
+  void _sashDragEnded() {
+    if (_sashDrag.value == null) return;
+    _sashDrag.value = null;
+    if (mounted) setState(() {});
   }
 
   /// The user dragged the edge of docking container [dock] to [cols]
@@ -2121,7 +2258,7 @@ class _SessionScreenState extends State<SessionScreen>
     ScreenModel base,
     ScreenRegion r,
     bool modal, {
-    List<(Rect, String?, ComposedPane)> nested = const [],
+    List<_NestedRegion> nested = const [],
     List<SplitterSash> sashes = const [],
     Offset origin = Offset.zero,
   }) {
@@ -2133,62 +2270,116 @@ class _SessionScreenState extends State<SessionScreen>
       r.rect.rows,
     );
     if (r.kind == 'dynpro') {
+      final s = _session;
       return ComposedPane(
         cells: cells,
         main: true,
-        builder: (context, cell) => DynproView(
-          onEdit: _stageEdit,
-          onValueHelp: _valueHelp,
-          onFocusField: _focusField,
-          onContextMenu: _screenMenu,
-          onListPick: _listPick,
-          onListCursor: _placeListCursor,
-          onListCell: _stageListCell,
-          onListScroll: _listScroll,
-          onDoubleClick: _doubleClick,
-          listboxValueSet: _listboxValueSet,
-          onListboxPick: _pickListbox,
-          model: base,
-          busy: modal,
-          cell: cell,
-          overlays: [
-            for (final (cells, id, p) in nested)
-              DynproOverlay(
-                cells,
-                id: id,
-                DecoratedBox(
-                  decoration: BoxDecoration(
-                    border: Border.all(
-                      color: Theme.of(context).colorScheme.outlineVariant,
-                      width: 0.5,
-                    ),
-                  ),
-                  child: p.builder(context, cell),
-                ),
+        builder: (context, cell) {
+          // the nested regions' content, built ONCE per pane build and
+          // keyed by region: a sash drag hands the same widgets to new
+          // overlay rects, so the hosted trees / grids / pictures re-lay
+          // out and never rebuild (audit 2026-10-23 P-7)
+          final border = BoxDecoration(
+            border: Border.all(
+              color: Theme.of(context).colorScheme.outlineVariant,
+              width: 0.5,
+            ),
+          );
+          final content = <String, Widget>{
+            for (final n in nested)
+              n.key: DecoratedBox(
+                decoration: border,
+                child: n.pane!.builder(context, cell),
               ),
-            for (final sh in sashes)
+          };
+          List<DynproOverlay> overlaysOf(
+            Iterable<_NestedRegion> placed,
+            List<SplitterSash> live,
+            Offset origin,
+          ) => [
+            for (final n in placed)
+              if (content[n.key] case final w?)
+                DynproOverlay(n.cells, id: n.id, w),
+            for (final sh in live)
               DynproOverlay(
                 SplitterSashGrip.cellsOf(sh, origin),
                 id: 'sash-${sh.splitter}-${sh.rows ? 'r' : 'c'}${sh.index}',
                 minPoints: const Size.square(SplitterSashGrip.hitPoints),
                 const SizedBox.shrink(),
-                builder: (canvasCell) => SplitterSashGrip(
-                  key: ValueKey(
-                    'sash-${sh.splitter}-${sh.rows ? 'r' : 'c'}${sh.index}',
+                // the lift of the finger ends the drag (the grip reports
+                // steps only): raw pointer events, under the grip's own
+                // gesture
+                builder: (canvasCell) => Listener(
+                  onPointerUp: (_) => _sashDragEnded(),
+                  onPointerCancel: (_) => _sashDragEnded(),
+                  child: SplitterSashGrip(
+                    key: ValueKey(
+                      'sash-${sh.splitter}-${sh.rows ? 'r' : 'c'}${sh.index}',
+                    ),
+                    sash: sh,
+                    cell: canvasCell,
+                    onMoved: (extents) => _sashMoved(sh, extents),
                   ),
-                  sash: sh,
-                  cell: canvasCell,
-                  onMoved: (extents) => _sashMoved(sh, extents),
                 ),
               ),
-          ],
-          onFill: _fillField,
-          onPress: (vkey) => _run(() async => _session!.press(vkey)),
-          onOkcode: (cmd) => _run(() async => _session!.okcode(cmd)),
-          onCheckbox: _checkboxTapped,
-          onRadio: (group, chosen) =>
-              _run(() async => _session!.selectRadio(group, chosen)),
-        ),
+          ];
+          Widget view(List<DynproOverlay> overlays) => DynproView(
+            onEdit: _stageEdit,
+            onValueHelp: _valueHelp,
+            onFocusField: _focusField,
+            onContextMenu: _screenMenu,
+            onListPick: _listPick,
+            onListCursor: _placeListCursor,
+            onListCell: _stageListCell,
+            onListScroll: _listScroll,
+            onDoubleClick: _doubleClick,
+            listboxValueSet: _listboxValueSet,
+            onListboxPick: _pickListbox,
+            model: base,
+            busy: modal,
+            cell: cell,
+            // a table control is boxed to the pane (SE80 sideways: 98
+            // columns in an 84-column pane): its columns scroll inside it
+            maxCols: r.rect.cols.floor(),
+            overlays: overlays,
+            onFill: _fillField,
+            onPress: (vkey) => _run(() async => _session!.press(vkey)),
+            onOkcode: (cmd) => _run(() async => _session!.okcode(cmd)),
+            onCheckbox: _checkboxTapped,
+            onTableColumnWidths: _tableColumnWidths,
+            onTablePage: _pageTable,
+            onRadio: (group, chosen) =>
+                _run(() async => _session!.selectRadio(group, chosen)),
+          );
+          final composed = overlaysOf(nested, sashes, origin);
+          if (sashes.isEmpty || s == null) return view(composed);
+          // a sash drag in progress: the overlays at the cells of the
+          // session's LIVE composition (noteSplitterSash holds the dragged
+          // extents), the dynpro pane alone rebuilt — the composer's other
+          // panes and the nested content stay as built
+          return ValueListenableBuilder<(SapSession, int)?>(
+            valueListenable: _sashDrag,
+            builder: (context, drag, _) {
+              if (drag == null || !identical(drag.$1, s)) {
+                return view(composed);
+              }
+              final comp = s.baseComposition;
+              final all = _withoutCoveredDocks(_onePerShell(comp.regions));
+              final dyn = all
+                  .where((r) => r.kind == 'dynpro')
+                  .firstOrNull
+                  ?.rect;
+              if (dyn == null) return view(composed);
+              return view(
+                overlaysOf(
+                  _nestedOn(all, dyn),
+                  _freeSashesOn(comp.sashes, dyn),
+                  Offset(dyn.col, dyn.row),
+                ),
+              );
+            },
+          );
+        },
       );
     }
     final gauge = r.gauge;
@@ -2337,13 +2528,13 @@ class _SessionScreenState extends State<SessionScreen>
           ),
         );
       } else if (office != null) {
-        // read-only (sap_office_view.dart); the first touch is the
-        // container's activation event, as in SAP GUI's in-place Word
+        // read-only (sap_office_view.dart); the first touch enters the
+        // in-place document: no round now, its OnCloseDocument rides
+        // before the user's next one (sap_session_office.dart)
         content = SapOfficeView(
           key: ValueKey('office-$shell'),
           document: office,
-          onActivate: () =>
-              _run(() async => _session!.officeDocumentActivated(shell)),
+          onActivate: () => _session?.officeDocumentEntered(shell),
         );
       } else if (html.isNotEmpty) {
         // an HTML viewer (the F1 Performance Assistant, a help page): its
@@ -2394,6 +2585,9 @@ class _SessionScreenState extends State<SessionScreen>
             () async =>
                 _session!.doubleClickTreeNode(shell, key, itemName: item),
           ),
+          // the column widths the user dragged on this shell's tree, kept
+          // for the logon (client-only: the real GUI sends none)
+          columnWidths: _treeColumnWidths.putIfAbsent(shell, () => {}),
         );
       } else if (grid != null) {
         content = _gridView(grid, menu: base.modalLevel == 0);
@@ -3290,6 +3484,21 @@ class _SessionScreenState extends State<SessionScreen>
     _run(() async => s.setCheckbox(f, on));
   }
 
+  /// A table-control column edge let go ([DynproView.onTableColumnWidths]):
+  /// the widths are STAGED, no round — the next action's 16/9/14 carries
+  /// them as the real GUI's does (a recorded session g[27]),
+  /// and the server's mirrored 18/9/14 is the control's layout after it.
+  void _tableColumnWidths(TableControlInfo tc, List<int> widths) {
+    _session?.noteTableColumnLayout(tc, widths: widths);
+  }
+
+  /// A table control paged ([DynproView.onTablePage]): the real GUI's
+  /// Page Down / Up with the cursor in the control; the server repaints its
+  /// lines (SapSession.pageTableControl).
+  void _pageTable(TableControlInfo tc, int vkey) {
+    _run(() async => _session!.pageTableControl(tc.name, vkey));
+  }
+
   Future<void> _fillField(ScreenField f, String text) async {
     if (f.tableControl != null) {
       // a table-control cell has no screen atom: the step-loop cell
@@ -4104,6 +4313,7 @@ class _SessionScreenState extends State<SessionScreen>
     }
     _turnTick.removeListener(_onTurnFrame);
     _turnTick.dispose();
+    _sashDrag.dispose();
     _modalBusyN?.dispose();
     _ui.dispose();
     _busyN.dispose();
@@ -4233,6 +4443,8 @@ class _SessionScreenState extends State<SessionScreen>
             onPress: (vkey) => _run(() async => _session!.press(vkey)),
             onOkcode: (cmd) => _run(() async => _session!.okcode(cmd)),
             onCheckbox: wallPrompt ? null : _checkboxTapped,
+            onTableColumnWidths: wallPrompt ? null : _tableColumnWidths,
+            onTablePage: wallPrompt ? null : _pageTable,
             onRadio: wallPrompt
                 ? null // the wall answer is composed on confirm
                 : (group, chosen) => _run(
@@ -4296,6 +4508,7 @@ class _SessionScreenState extends State<SessionScreen>
         barrierLabel: 'Modal window',
         builder: (dialogContext) => _functionKeyScope(DynproZoomScope(
           widest: _widestCols,
+          columnWidths: _tcColumnWidths,
           child: SessionBusy(
           busy: _modalBusy,
           // the dialog's own snack-bar surface ([_notify]): a Scaffold of
@@ -4496,6 +4709,21 @@ class _Placeholder extends StatelessWidget {
       ),
     );
   }
+}
+
+/// A region drawn ON the dynpro's canvas ([_SessionScreenState._nestedOn]):
+/// its dynpro cells, its overlay id, a key stable across compositions and
+/// the pane built for it (null until [withPane]).
+class _NestedRegion {
+  const _NestedRegion(this.cells, this.id, this.key, this.region, [this.pane]);
+  final Rect cells;
+  final String? id;
+  final String key;
+  final ScreenRegion region;
+  final ComposedPane? pane;
+
+  _NestedRegion withPane(ComposedPane p) =>
+      _NestedRegion(cells, id, key, region, p);
 }
 
 /// The session's control models for one generation of the screen, each

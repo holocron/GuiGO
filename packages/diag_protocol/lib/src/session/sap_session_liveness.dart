@@ -21,6 +21,10 @@ class TransportLimits {
     this.minPingInterval = const Duration(seconds: 10),
     this.minSilence = const Duration(minutes: 5),
     this.silenceRecheck = const Duration(seconds: 2),
+    this.writeDeadline = const Duration(seconds: 60),
+    this.openWindows = 16,
+    this.actionQueueDepth = 32,
+    this.automationStreamBytes = 32 << 20,
   });
 
   /// NI payloads / bytes one receive turn may read before it ends — a peer
@@ -79,6 +83,43 @@ class TransportLimits {
   /// a tick overdue after the app was suspended runs before the socket
   /// delivers what queued meanwhile (audit 2026-10-17 R6).
   final Duration silenceRecheck;
+
+  /// How long one socket flush may take before the peer is declared gone
+  /// (audit 2026-10-23 R-1): a dispatcher that ACKs TCP but stops reading
+  /// (a wedged work process, a hung relay) holds the write forever — no
+  /// receive deadline can start on a request that never left, and `busy`
+  /// disables the idle watchdog meanwhile. A real kernel drains a frame
+  /// in milliseconds; a request-stream chunk is under 30 kB.
+  final Duration writeDeadline;
+
+  /// Windows the mode table holds open at once (audit 2026-10-23 R-2):
+  /// every window owns a full per-window state (its DP cache, trees,
+  /// grids, editors), and a stream cycling fresh mode bytes would retain
+  /// one per byte. A real kernel caps a logon at six modes. Past the cap
+  /// the OLDEST background window is retired — closed on the client side,
+  /// its parked frames dropped — before the new one is born.
+  final int openWindows;
+
+  /// External calls that may wait behind the running action (audit
+  /// 2026-10-23 R-5): a UI that enqueues per keystroke while the first
+  /// action stalls (up to the 10-minute dialog step) would otherwise
+  /// replay hundreds of stale rounds afterwards. A call past the depth is
+  /// refused at once ([ActionQueueFullError]); a call made from inside the
+  /// running action is never counted.
+  final int actionQueueDepth;
+
+  /// The bytes a window's chunked automation call may gather before its
+  /// sid-0 closer ([AutomationStream.maxPendingBytes]; audit 2026-10-23
+  /// R-6): a kernel streaming chunks that never close would balloon the
+  /// stream for the logon's life. Past it the stream is abandoned and
+  /// counted as an answer failure.
+  final int automationStreamBytes;
+}
+
+/// An external call was refused because [TransportLimits.actionQueueDepth]
+/// calls already wait behind the running action (audit 2026-10-23 R-5).
+class ActionQueueFullError extends StateError {
+  ActionQueueFullError(super.message);
 }
 
 /// The connection went silent past what the server's own NI_PING cadence
@@ -117,6 +158,13 @@ extension SapSessionLiveness on SapSession {
     if (grace > Duration.zero) await Future<void>.delayed(grace);
     if (dead()) return false;
     if (_pingGap == null) return true;
+    // an action in flight (a 6–9 min report the server is still computing
+    // on, probed on resume from the background): its own wait judges the
+    // silence, as the idle watchdog leaves it to — the probe reports the
+    // socket state only (audit 2026-10-23 R-3). The logon ladder is not
+    // such an action: it runs under its own deadline, and a peer gone
+    // silent under it is condemned here as before.
+    if (busy && !_bootstrapping) return true;
     if (_silentTooLong()) {
       _abortTransport(ConnectionLostError(_silenceMessage()));
       return false;
@@ -128,9 +176,47 @@ extension SapSessionLiveness on SapSession {
   /// (null: it has not pinged yet).
   Duration? get serverPingInterval => _pingGap;
 
+  /// Test hook: the server's idle ping cadence as if learned ([gap]), and
+  /// the last wire traffic at [lastWire] — the silence judgement of
+  /// [probeLiveness] driven without a peer.
+  void pingCadenceForTest(Duration gap, {DateTime? lastWire}) {
+    _pingGap = gap;
+    _pingSample = gap;
+    _lastWire = lastWire ?? DateTime.now();
+  }
+
   /// Parked frames dropped over all windows ([TransportLimits.
   /// parkedFramesPerWindow]); a window that lost any is [SapWindow.suspect].
   int get parkedFramesDropped => _parkedDropped;
+
+  /// Background windows retired to make room for a newborn one
+  /// ([TransportLimits.openWindows]; audit 2026-10-23 R-2).
+  int get windowsRetired => _windowsRetired;
+
+  /// The bytes of the unread inbox as the ceiling counts them
+  /// ([TransportLimits.inboxBytes]; a requeued frame counts again —
+  /// audit 2026-10-23 R-8).
+  int get bufferedInboxBytes => _inboxBytes;
+
+  /// Flush [s] within [TransportLimits.writeDeadline] (audit 2026-10-23
+  /// R-1): a peer that stops reading holds the flush forever — it is
+  /// declared gone like a silent one ([ConnectionLostError], the transport
+  /// dropped, [closed] fired). [bytes] names the write in the message.
+  Future<void> _flushWithin(Socket s, int bytes) async {
+    final limit = limits.writeDeadline;
+    final flushed = s.flush();
+    try {
+      await flushed.timeout(limit);
+    } on TimeoutException {
+      final e = ConnectionLostError(
+        'the server stopped reading: a $bytes-B frame was not accepted in '
+        '${limit.inSeconds}s — the dispatcher or the network path to it '
+        'is wedged; log on again',
+      );
+      _abortTransport(e);
+      throw e;
+    }
+  }
 
   /// Destroy the socket and forget it: nothing writes to a destroyed
   /// socket afterwards (a pong, a send), every later use sees no socket.
@@ -188,6 +274,18 @@ extension SapSessionLiveness on SapSession {
   void _inboxTaken(Uint8List payload) {
     _inboxBytes -= payload.length;
     if (_inboxBytes < 0 || _inbox.isEmpty) _inboxBytes = 0;
+  }
+
+  /// [payload] goes back to the FRONT of the inbox, to be read again (a
+  /// hand-back's parked frames, a request stream's non-receipt, the frames
+  /// behind a route's NI_PONG): counted again — [_inboxTaken] counted it
+  /// out when it was first read, and a re-add that did not re-count left
+  /// the ceiling soft after every hand-back (audit 2026-10-23 R-8). No
+  /// ceiling check here: the frames were buffered within it once, and the
+  /// next listener add judges the total.
+  void _inboxRequeue(Uint8List payload) {
+    _inbox.addFirst(payload);
+    _inboxBytes += payload.length;
   }
 
   /// A server NI_PING arrived [idle] after the previous wire traffic: the
@@ -316,6 +414,42 @@ extension _SapSessionParked on SapSession {
       );
       _abortTransport(e);
       throw e;
+    }
+  }
+
+  /// Room in the mode table for a window about to be born
+  /// ([TransportLimits.openWindows]; audit 2026-10-23 R-2): while the table
+  /// is full, the OLDEST background window (birth order; never the live
+  /// one, the newborn's parent) is retired — closed on the client side
+  /// like a `0m 09` of a background window, its parked frames dropped,
+  /// its state let go. A later frame in its mode byte is a new window.
+  /// Real kernels hold ~6 modes: a real logon never gets here.
+  void _retireForBirth() {
+    final l = limits;
+    while (_modes.open.length >= l.openWindows) {
+      _WindowState? oldest;
+      for (final w in _modes.open.values) {
+        if (w.mode != _modes.liveMode) {
+          oldest = w;
+          break;
+        }
+      }
+      if (oldest == null) return; // only the live window: nothing to retire
+      _modes.open.remove(oldest.mode);
+      _modes.closed.add(oldest.snapshot(active: false, closed: true));
+      _modes.closedCount++;
+      if (_modes.closed.length > _WindowTable.maxClosedKept) {
+        _modes.closed.removeAt(0);
+      }
+      final parked = oldest.queue.length;
+      oldest.queue.clear();
+      _parkedDropped += parked;
+      _windowsRetired++;
+      lastFailure =
+          'window (${oldest.number}) (DIAG mode ${oldest.mode}) retired: '
+          '${l.openWindows} windows open already'
+          '${parked == 0 ? '' : ', $parked parked frame(s) dropped'}';
+      _trace('[mode] $lastFailure');
     }
   }
 

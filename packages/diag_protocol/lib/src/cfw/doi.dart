@@ -26,34 +26,68 @@ import 'tree_header_names.dart' show collapseInlineRow;
 const String macroRefusedRc = '30';
 const String macroRefusedText =
     'macro not executed: no macro engine on this client';
+// The two sheet names GuiGo answers without a document to read them from
+// (audit 2026-10-23 §6.4). They are NOT two defaults of one kind: the first
+// is a document's OWN name, the second the emulated Office's. Both are
+// replayed byte-for-byte against their recordings (doi_replay_test,
+// xxl_word_demos_replay_test), so neither is a free choice — the
+// localisation they carry is part of the emulated-client identity, like
+// the Windows GUI version string.
+
 /// The sheet a document OPENED from bytes GuiGo cannot read starts with —
-/// the BDS demo sheet's own `Tabelle1` (a recorded session gui[84]).
+/// the BDS demo sheet's own `Tabelle1` (a recorded session gui[84]): the
+/// name lives in the document, not in Office, so a German demo document
+/// answers German wherever it is opened. Not a client default.
 const String defaultSheet = 'Tabelle1';
 
-/// The sheet a CREATED workbook starts with: the French Office 16's new
-/// workbook `Feuil1` — XXL's GetActiveSheet (a recorded session
-/// srv[56] -> gui[47] t8 `Feuil1`, InsertFull2's source sheet #5), the same
-/// name the created chart's data sheet bears (doi_default_chart.dart).
+/// THE client default: the sheet a CREATED workbook starts with. It is the
+/// new-workbook name of the Office this client emulates — the French Office
+/// 16 of the reference captures (XXL's GetActiveSheet, a recorded session
+/// two_runs srv[56] -> gui[47] t8 `Feuil1`, InsertFull2's source sheet #5;
+/// the created chart's data sheet, doi_default_chart.dart). A server flow
+/// branching on the sheet name sees this locale on every device, exactly
+/// as it would from that Office; a per-device name would break the
+/// recorded replays and buy nothing (no SAP flow in the captures reads it
+/// back as text). Every created sheet name goes through this constant.
 const String createdSheet = 'Feuil1';
 final RegExp containerClassRx = RegExp(r'^SAP\.DocumentContainerControl\.\d+$', caseSensitive: false);
 
 const Set<String> rangeRoles = {'RangeDef', 'Ranges', 'Content2', 'Content'};
 
-/// The container's event the real GUI raised on an open document (`%_GC
-/// <shell> 2`, PARAMs 0..2 = 1, 1, 1): a recorded session gui[19] (the
-/// chart), a recorded session gui[15] / a recorded session
-/// selection_redo gui[41] (SO10's Word editor) — and NOT on five other
-/// opens (the BDS sheet 124 and pivot 149, Word 97 143, the SmartForms
-/// text node 146 — that GUI went idle into `/nex` without it — and the SFP
-/// Designer 173): the user's activation of the in-place document, not an
-/// automatic follow-up of the open ([SapSession.officeDocumentActivated]).
-/// The ABAP names it ON_CLOSE_DOCUMENT (C_OI_CONTAINER_CONTROL_PROXY
-/// EVENTID_ONCLOSE = 2: PARAM 0 the document cookie, PARAM 1 has_changed;
-/// the server's answer FreeObjects the document's proxies, SO10 srv[50]):
-/// the real GUI also raises it when the user closes Office's window
-/// (a recorded session gui[118]), and the has_changed it
-/// carries is what CloseDocument answers next ([doiNoteCloseEvent]).
-const int officeActivationEvent = 2;
+/// The container's event 2 (`%_GC <shell> 2`): SAPsdcc.OCX's typelib
+/// names it `_SAPContainerControlEvents.OnCloseDocument(nCookie,
+/// bEverChanged, bChangedAfterSave)` (dispid 2; 1 is OnCustomEvent, 3
+/// OnSaveDocument), PARAMs 0..2 in that order ([doiCloseEventParams]); the
+/// ABAP's ON_CLOSE_DOCUMENT. The real GUI raised it on a DOI container in
+/// eleven recorded rounds, each when the user was DONE with the document:
+///
+/// * an Office window closed by the user — a recorded session gui[19]
+/// (the chart), a recorded session gui[43] / [58] /
+/// [90], a recorded session gui[50] / [86],
+/// a recorded session gui[118] (DECODE: "the operator
+/// closed Word / Excel");
+/// * an in-place document left for the SAP window, the event round right
+/// before the user's SAP action — a recorded session
+/// gui[41] then `/nex` gui[43] (SO10 display), a recorded session
+/// gui[15] then the Save key gui[17] (SO10 change, after typing in
+/// Word), a recorded session gui[956] then F3 gui[958] (SO10
+/// display) and gui[1234] then F3 gui[1239] (SMARTFORMS display),
+/// a recorded session gui[156] then the tree click gui[158]
+/// (OAOR's Word).
+///
+/// Never on the click INTO the document (a selection, a click in Word
+/// sends nothing: editor_selection_redo DECODE §3) and never on a document
+/// the user did not work in: a recorded session opened ten
+/// SMARTFORMS text nodes in place, each container registering event 2
+/// (srv[21] RegisterOcxEvent(134, 2)), and left them by tree clicks with no
+/// event at all; a recorded session went to `/nex` without
+/// it. The server's answer is ON_CLOSE_DOCUMENT's: SO10 frees the document
+/// proxies (editor_selection_redo srv[50]), SMARTFORMS tears the Word
+/// editor down (connect_su53 srv[1507..1509]: CloseDocument, ReleaseDocument,
+/// ReleaseAllDocuments, StopLinkServer, DestroyWindow) — so a frontend that
+/// raised it on the first touch closed the document under the user's
+/// finger. GuiGo raises it on leaving ([SapSession.officeDocumentEntered]).
+const int officeCloseDocumentEvent = 2;
 
 /// The SAPscript Word template's own macros the recorded Office 16 GUI ran
 /// (rc '0', LastErrorString ''): SO10 srv[47] `ExecuteMacro2('AutoExec')`,
@@ -404,25 +438,33 @@ class Document {
     return (bottom > 0 ? bottom + 2 : 1, 1);
   }
 
-  /// The has_changed the container's close event reported for this
-  /// document (`%_GC <shell> 2`, PARAM 0 the document cookie, PARAM 1
-  /// has_changed: C_OI_CONTAINER_CONTROL_PROXY EVENTID_ONCLOSE 2, DISPATCH
-  /// -> ON_CLOSE_DOCUMENT), cleared by a later SaveDocumentToURL — what
-  /// CloseDocument(n, save) answers (its RESULT is has_changed, whatever
-  /// the save flag: CLOSE_DOCUMENT of that class). It fits all eleven
-  /// recorded closes: 1 after an event (1, 1, 1) with no save since
-  /// (a recorded session srv[32] the chart, gui[19]; a recorded session
-  /// excel_word_demos srv[77] the chart, gui[58]; a recorded session
-  /// macros_disabled srv[144] the Word demo saved BEFORE the event,
-  /// gui[118]); 0 after (1, 0, 0) (xxl_excel_word_demos srv[107], gui[90]),
-  /// after an event then a save (a recorded session srv[28]: gui[15],
-  /// save srv[23]) and with no event at all (a recorded session srv[103] /
-  /// [170], word_demo_links srv[43], bds_cold_cache srv[48] / [66],
-  /// macros_disabled srv[45] — an OPENED sheet the server wrote ranges
-  /// into, so no Office dirty flag of a still-open document is reported).
-  /// The former "created and never saved" rule missed macros_disabled
-  /// srv[144].
-  bool closeEventChanged = false;
+  /// Office's dirty state as the frontend reports it — OnCloseDocument's
+  /// bEverChanged ([everChanged]) and bChangedAfterSave ([changedSinceSave],
+  /// also CloseDocument's out-parameter bChanged: SAPsdcc.OCX typelib
+  /// `CloseDocument(nCookie, nSaveMode, bChanged)`). A document is dirty
+  /// once CREATED (a recorded session gui[19], xxl_excel_word_demos
+  /// gui[43] / [58], xxl_two_runs gui[50] / [86]: (1, 1, 1)) or once a
+  /// macro RAN in it (rc 0: the SAPscript template's AutoExec /
+  /// ProtectDocument — editor_selection_redo gui[41], text_html gui[15],
+  /// connect_su53 gui[956] / [1234] (1, 1, 1); R3UpdateTables in
+  /// macros_disabled gui[118] (1, 1, 1)); a refused macro or a plain open
+  /// leaves it clean (xxl_excel_word_demos gui[90] after rc 30,
+  /// alv_excel_inplace gui[156] OAOR's protected Word: (1, 0, 0)). A
+  /// SaveDocumentToURL clears [changedSinceSave]. CloseDocument answers
+  /// [changedSinceSave] whatever its save flag — every recorded close:
+  /// 1 for SMARTFORMS' nine text nodes with no event (a recorded session
+  /// smartforms_text_word srv[39] .. [123]) and connect_su53 srv[1497] /
+  /// [1105] / [1507], a recorded session srv[32], xxl_excel_word_demos
+  /// srv[77], macros_disabled srv[144]; 0 after a save (text_html srv[28],
+  /// save srv[23]), after a refused macro (xxl_excel_word_demos srv[107],
+  /// word_demo_links srv[43], a recorded session srv[170]) and for an
+  /// opened document no macro ran in (a recorded session srv[103],
+  /// bds_cold_cache srv[48] / [66], macros_disabled srv[45] — ranges the
+  /// server wrote into an opened sheet do not count).
+  late bool everChanged = created;
+
+  /// See [everChanged].
+  late bool changedSinceSave = created;
 }
 
 int _int(String? v, int dflt) => int.tryParse((v ?? '').trim()) ?? dflt;
@@ -569,10 +611,15 @@ class DoiState {
   /// ('BASIC', dp) SaveDataToUrl(…, …A000), pulled by srv[172]).
   final Map<String, Uint8List> progIdListSinks = {};
 
-  /// The containers whose open document has not had its activation event
-  /// yet ([officeActivationEvent]), newest last — consumed by the session's
-  /// [SapSession.officeDocumentActivated].
-  final Set<String> pendingActivation = {};
+  /// The containers whose open document has not raised its OnCloseDocument
+  /// yet ([officeCloseDocumentEvent]) — once per opened document; a
+  /// CloseDocument of the server's ends it.
+  final Set<String> closeEventPending = {};
+
+  /// The containers whose in-place document the user ENTERED (tapped into)
+  /// since it opened, entry order: the next user round leaves it, and its
+  /// OnCloseDocument goes out first ([SapSession.officeDocumentEntered]).
+  final Set<String> entered = {};
 
   /// The OCX events each container registered (RegisterOcxEvent).
   final Map<String, Set<int>> registeredEvents = {};
@@ -612,9 +659,10 @@ class DoiState {
     _capOldest(progIdListSinks, maxEntries);
     _capOldest(registeredEvents, maxEntries);
     _capOldest(templates, maxDocs);
-    if (pendingActivation.length > maxEntries) {
-      pendingActivation.removeAll(
-          pendingActivation.take(pendingActivation.length - maxEntries).toList());
+    for (final s in [closeEventPending, entered]) {
+      if (s.length > maxEntries) {
+        s.removeAll(s.take(s.length - maxEntries).toList());
+      }
     }
     if (docBytes.length > maxDocs) {
       for (final u in docBytes.keys.take(docBytes.length - maxDocs).toList()) {
@@ -727,14 +775,7 @@ void applyOneTable(Document doc, DocRange rg, Uint8List seg) {
   // one `03 04` cell per row has its trailing blanks cut: pad each back to
   // the record width (decodeNamedDpTable)
   final perRow = dcells.length == dn && dcells.every((c) => c.length <= dw);
-  final data = perRow
-      ? join([
-          for (final c in dcells)
-            Uint8List(dw)
-              ..fillRange(0, dw, 0x20)
-              ..setRange(0, c.length, c),
-        ])
-      : join(dcells);
+  final data = perRow ? _padRows(dcells, dw, dn) : join(dcells);
   final fb = ByteData.sublistView(fmt);
   final cols = [
     for (var i = 0; i < fn && i < rg.cols; i++)
@@ -759,7 +800,7 @@ void applyOneTable(Document doc, DocRange rg, Uint8List seg) {
       var text = utf8.decode(raw, allowMalformed: true)
           .replaceAll('\u0000', '')
           .trim();
-      if (type == 0x44 && RegExp(r'^\d{8}$').hasMatch(text)) {
+      if (type == 0x44 && _yyyymmddRx.hasMatch(text)) {
         // D: the OCX's day.month.year
         text = '${text.substring(6)}.${text.substring(4, 6)}.'
             '${text.substring(0, 4)}';
@@ -768,6 +809,24 @@ void applyOneTable(Document doc, DocRange rg, Uint8List seg) {
     }
   }
 }
+
+/// The [n] row cells of a `03 04`-per-row DATAASC column, each padded with
+/// blanks back to the record width [w], as ONE `w * n` buffer: one
+/// allocation and one fill for the table instead of a padded copy per row
+/// plus the join (audit 2026-10-23 P-5). Same bytes as padding each row.
+Uint8List _padRows(List<Uint8List> cells, int w, int n) {
+  final out = Uint8List(w * n)..fillRange(0, w * n, 0x20);
+  for (var r = 0; r < n; r++) {
+    final c = cells[r];
+    out.setRange(r * w, r * w + c.length, c);
+  }
+  return out;
+}
+
+// Hoisted out of the row x column loop of [applyOneTable] (audit
+// 2026-10-23 P-2): a D cell's `yyyymmdd`, an N cell's digits.
+final RegExp _yyyymmddRx = RegExp(r'^\d{8}$');
+final RegExp _nDigitsRx = RegExp(r'^\d{1,15}$');
 
 /// A one-table field of ABAP [type] as a number: N digits, P packed BCD
 /// with [dec] decimals, I / s little-endian integers; null otherwise.
@@ -780,7 +839,7 @@ num? _oneTableNumber(Uint8List raw, int dec, int type) {
       return bd.getInt16(0, Endian.little);
     case 0x4e: // N
       final t = String.fromCharCodes(raw).trim();
-      return RegExp(r'^\d{1,15}$').hasMatch(t) ? int.parse(t) : null;
+      return _nDigitsRx.hasMatch(t) ? int.parse(t) : null;
     case 0x50 when raw.isNotEmpty && raw.length <= 9: // P (17 digits fit)
       var v = 0;
       for (var k = 0; k < raw.length; k++) {
@@ -813,16 +872,20 @@ num? _oneTableNumber(Uint8List raw, int dec, int type) {
 /// as `A1` / `XFD1048576` / `R1C1`). `22` fails (a recorded session
 /// disabled gui[57]: InsertRange2 6), `ert` passes (a recorded session
 /// srv[61]: 0).
+// [excelNameValid]'s rules, compiled once (audit 2026-10-23 P-2).
+final RegExp _excelNameRx =
+    RegExp(r'^[\p{L}_\\][\p{L}\p{N}._\\?]*$', unicode: true);
+final RegExp _r1c1Rx = RegExp(r'^R\d*C\d*$');
+final RegExp _a1Rx = RegExp(r'^([A-Z]{1,3})(\d+)$');
+
 bool excelNameValid(String name) {
   final n = name.trimRight();
   if (n.isEmpty || n.length > 255) return false;
-  if (!RegExp(r'^[\p{L}_\\][\p{L}\p{N}._\\?]*$', unicode: true).hasMatch(n)) {
-    return false;
-  }
+  if (!_excelNameRx.hasMatch(n)) return false;
   final u = n.toUpperCase();
   if (u == 'C' || u == 'R') return false;
-  if (RegExp(r'^R\d*C\d*$').hasMatch(u)) return false;
-  final a1 = RegExp(r'^([A-Z]{1,3})(\d+)$').firstMatch(u);
+  if (_r1c1Rx.hasMatch(u)) return false;
+  final a1 = _a1Rx.firstMatch(u);
   if (a1 != null) {
     var col = 0;
     for (final c in a1.group(1)!.codeUnits) {
@@ -834,25 +897,35 @@ bool excelNameValid(String name) {
   return true;
 }
 
-/// The container [shell] raised its OCX event 2 ([officeActivationEvent])
-/// with [params]: by the ABAP it is ON_CLOSE_DOCUMENT (C_OI_CONTAINER_
-/// CONTROL_PROXY EVENTID_ONCLOSE = 2; DISPATCH reads PARAM 0 the document
-/// cookie, PARAM 1 has_changed), whatever moment the frontend raises it
-/// at. Records has_changed on that container's document of that number
-/// for the CloseDocument that follows ([Document.closeEventChanged]) —
-/// GuiGo's own event (SapSession.officeDocumentActivated) and, in the
-/// replays, the real GUI's.
+/// The container [shell] raised OnCloseDocument ([officeCloseDocumentEvent])
+/// with [params] (nCookie, bEverChanged, bChangedAfterSave): the dirty
+/// state it reports is that document's ([Document.everChanged]) — what the
+/// CloseDocument that follows answers. GuiGo's own event reports its own
+/// flags; in the replays this takes the real GUI's (a macro that GUI ran
+/// and this one refuses: a recorded session gui[118]).
 void doiNoteCloseEvent(DoiState st, String shell, Map<int, String> params) {
   final docs = st.containers[shell.trim()]?['docs'];
   if (docs is! List<Document>) return;
   final n = _int(params[0], 1);
   for (final d in docs.reversed) {
     if (d.number == n && !d.closed) {
-      d.closeEventChanged = (params[1] ?? '').trim() == '1';
+      d.everChanged = (params[1] ?? '').trim() == '1';
+      d.changedSinceSave = (params[2] ?? '').trim() == '1';
       return;
     }
   }
 }
+
+/// OnCloseDocument's PARAMs 0..2 for [d] as SAPsdcc.OCX raises them:
+/// nCookie (the container's document number), bEverChanged,
+/// bChangedAfterSave ([Document.everChanged]) — `1, 1, 1` for SO10's /
+/// SMARTFORMS' SAPscript text (editor_selection_redo gui[41]),
+/// `1, 0, 0` for OAOR's protected Word (alv_excel_inplace gui[156]).
+List<String> doiCloseEventParams(Document d) => [
+  '${d.number}',
+  d.everChanged ? '1' : '0',
+  d.changedSinceSave ? '1' : '0',
+];
 
 Document? _anyDoc(DoiState st) =>
     st.createdDocs.isNotEmpty ? st.createdDocs.last.$2 : null;
@@ -1053,9 +1126,10 @@ Map<int, Uint8List> doiObserveCall(EaSession session, DoiState st, FlushCall cal
       (cont['docs'] as List<Document>).add(doc);
       cont['current'] = doc;
       st.createdDocs.add((shell, doc));
-      st.pendingActivation
+      st.closeEventPending
         ..remove(shell)
         ..add(shell);
+      st.entered.remove(shell); // a new document: not entered yet
       st.capDocs();
       if (res.isNotEmpty) {
         _putResult(out, res, Uint8List.fromList(doc.number.toString().codeUnits));
@@ -1299,6 +1373,10 @@ Map<int, Uint8List> doiObserveCall(EaSession session, DoiState st, FlushCall cal
         if (doc != null) {
           if (key == 'protectdocument') doc.readOnly = true;
           if (key == 'unprotectdocument') doc.readOnly = false;
+          // a macro that ran dirtied the document ([Document.everChanged])
+          doc
+            ..everChanged = true
+            ..changedSinceSave = true;
         }
         continue;
       }
@@ -1339,9 +1417,9 @@ Map<int, Uint8List> doiObserveCall(EaSession session, DoiState st, FlushCall cal
       if (doc != null && url.isNotEmpty) {
         _saveDocument(st, doc, url);
         doc.savedUrls.add(url);
-        // a save after the close event: unchanged again (a recorded session
-        // text_html gui[15] (1, 1, 1), srv[23] save, srv[28] close -> 0)
-        doc.closeEventChanged = false;
+        // saved: clean again (a recorded session gui[15] (1, 1, 1),
+        // srv[23] save, srv[28] close -> 0; [Document.everChanged])
+        doc.changedSinceSave = false;
         st.capDocs();
         // a refused save is the Office's failed save, error_nr 33: with
         // officeintegration/saveerrorcheck declared (frontend_features
@@ -1371,15 +1449,18 @@ Map<int, Uint8List> doiObserveCall(EaSession session, DoiState st, FlushCall cal
       final doc = _numberedDoc(st, shell, args['#1']);
       if (doc != null) {
         if (res.isNotEmpty) {
-          // has_changed (see [Document.closeEventChanged])
+          // bChanged (see [Document.everChanged])
           _putResult(out, res,
-              Uint8List.fromList((doc.closeEventChanged ? '1' : '0').codeUnits));
+              Uint8List.fromList((doc.changedSinceSave ? '1' : '0').codeUnits));
         }
         doc.closed = true;
         doc.version++;
         for (final e in st.containers.entries) {
           if (identical(e.value['current'], doc)) {
-            st.pendingActivation.remove(e.key);
+            // the server closed it: no OnCloseDocument of the frontend's
+            // follows (a recorded session srv[39] .. [123])
+            st.closeEventPending.remove(e.key);
+            st.entered.remove(e.key);
           }
         }
       }
@@ -1646,9 +1727,7 @@ String? dpgetInurl(Uint8List requestV) {
 
 /// The REQUEST's own FORMAT records ((width, records)).
 (int, List<Uint8List>) dpgetFormat(Uint8List requestV) {
-  final anchor = Uint8List.fromList([
-    0x03, 0x01, 0x00, 0x06, ...'FORMAT'.codeUnits, 0x03, 0x01,
-  ]);
+  final anchor = rfcColumnNameToken('FORMAT');
   var i = _indexOf(requestV, anchor, 0);
   if (i < 0) return (0, const []);
   final ds = i + anchor.length;
@@ -1661,8 +1740,8 @@ String? dpgetInurl(Uint8List requestV) {
   int endFrom(int from) {
     var end = requestV.length;
     for (final needle in [
-      [0x02, 0x13],
-      [0x03, 0x01, 0x00]
+      rfcTagBytes(rfcTagTableEnd),
+      [...rfcTagBytes(rfcTagColumnName), 0x00],
     ]) {
       final e = _indexOfBytes(requestV, needle, from);
       if (e >= 0 && e < end) end = e;
@@ -1850,10 +1929,7 @@ Uint8List? buildPropertyTableAnswer(Uint8List requestV, List<Uint8List> rows) {
       trailer: false);
 }
 
-Uint8List _tok(String name) {
-  final n = Uint8List.fromList(name.codeUnits);
-  return Uint8List.fromList([0x03, 0x01, (n.length >> 8) & 0xff, n.length & 0xff, ...n, 0x03, 0x01]);
-}
+Uint8List _tok(String name) => rfcColumnNameToken(name);
 
 /// A column's `03 02 <u16 8> <u32 width> <u32 count> 03 02` dims token.
 Uint8List _dims(int w, int c) {

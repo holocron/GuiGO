@@ -61,26 +61,10 @@ class _ConnectionListScreenState extends State<ConnectionListScreen> {
       ),
     );
     if (saved == null) return;
-    // ask only when there is nothing stored yet; editing host/client etc.
-    // keeps the existing password, and switching storage off forgets it
-    if (!saved.storePassword) {
-      await store.deletePassword(saved.id);
-    } else if (!await store.hasPassword(saved.id)) {
-      final pw = await _askPassword(
-        title: saved.user.isEmpty
-            ? 'Password for ${saved.label}'
-            : 'Password for ${saved.user} on ${saved.label}',
-        // the value is stored unverified; the logon path stores one only
-        // once SAP accepted it, which is what skipping here leads to
-        note:
-            'Not checked until you log on. "Ask at logon" asks then and '
-            'stores the password once SAP accepts it.',
-        cancelLabel: 'Ask at logon',
-      );
-      if (pw != null && pw.isNotEmpty) {
-        await store.savePassword(saved.id, pw);
-      }
-    }
+    // the entry first (audit 2026-10-23 R-14): the list on the screen is
+    // what the store holds, or the store's failure is told and the screen
+    // keeps the entry as it was — a password saved for an edit that was
+    // never stored would have been the stale entry's
     final entries = [..._entries];
     final i = entries.indexWhere((e) => e.id == saved.id);
     if (i >= 0) {
@@ -88,9 +72,71 @@ class _ConnectionListScreenState extends State<ConnectionListScreen> {
     } else {
       entries.add(saved);
     }
-    await store.saveAll(entries);
+    if (!await _stored(() => store.saveAll(entries), 'Could not save the system')) {
+      return;
+    }
     if (!mounted) return;
     setState(() => _entries = entries);
+    // ask only when there is nothing stored yet; editing host/client etc.
+    // keeps the existing password, and switching storage off forgets it
+    if (!saved.storePassword) {
+      await _stored(
+        () => store.deletePassword(saved.id),
+        'Could not delete the stored password',
+      );
+      return;
+    }
+    final bool has;
+    try {
+      has = await store.hasPassword(saved.id);
+    } on Object catch (e) {
+      _failed('Could not read the password store', e);
+      return;
+    }
+    if (has || !mounted) return;
+    final pw = await _askPassword(
+      title: saved.user.isEmpty
+          ? 'Password for ${saved.label}'
+          : 'Password for ${saved.user} on ${saved.label}',
+      // the value is stored unverified; the logon path stores one only
+      // once SAP accepted it, which is what skipping here leads to
+      note:
+          'Not checked until you log on. "Ask at logon" asks then and '
+          'stores the password once SAP accepts it.',
+      cancelLabel: 'Ask at logon',
+    );
+    if (pw != null && pw.isNotEmpty) {
+      await _stored(
+        () => store.savePassword(saved.id, pw),
+        'Could not store the password',
+      );
+    }
+  }
+
+  /// Run a store write; false, with [what] and the error on a snack bar,
+  /// when it threw. A store error used to be an unhandled zone error (the
+  /// menu drops these futures) while the list kept stale data
+  /// (audit 2026-10-23 R-14).
+  Future<bool> _stored(Future<void> Function() write, String what) async {
+    try {
+      await write();
+      return true;
+    } on Object catch (e) {
+      _failed(what, e);
+      return false;
+    }
+  }
+
+  void _failed(String what, Object error) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(
+        SnackBar(
+          content: Text('$what: $error'),
+          duration: const Duration(seconds: 6),
+        ),
+      );
   }
 
   Future<void> _delete(ConnectionEntry e) async {
@@ -120,10 +166,19 @@ class _ConnectionListScreenState extends State<ConnectionListScreen> {
       for (final x in _entries)
         if (x.id != e.id) x,
     ];
-    await store.deletePassword(e.id);
-    await store.saveAll(entries);
+    // the entry first, its password after (audit 2026-10-23 R-14): the
+    // other order erased the password and, when saveAll failed, left the
+    // entry — without its password. A password delete that fails leaves
+    // an orphan in the secure store, told, not an entry
+    if (!await _stored(() => store.saveAll(entries), 'Could not delete the system')) {
+      return;
+    }
     if (!mounted) return;
     setState(() => _entries = entries);
+    await _stored(
+      () => store.deletePassword(e.id),
+      'Could not delete the stored password',
+    );
   }
 
   /// Replace the stored password of [e] (after a password change in SAP)
@@ -138,7 +193,13 @@ class _ConnectionListScreenState extends State<ConnectionListScreen> {
       cancelLabel: 'Cancel',
     );
     if (pw == null || pw.isEmpty || !mounted) return;
-    await store.savePassword(e.id, pw);
+    // audit 2026-10-23 R-14: a refused write is told, not thrown away
+    if (!await _stored(
+      () => store.savePassword(e.id, pw),
+      'Could not store the password',
+    )) {
+      return;
+    }
     if (!mounted) return;
     // a secure-store write is otherwise invisible
     ScaffoldMessenger.of(context)

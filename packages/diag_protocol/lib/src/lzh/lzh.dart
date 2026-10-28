@@ -1206,7 +1206,9 @@ Uint8List _fixedHuffmanLiteral(Uint8List data) {
 /// The self-verify round-trips the emission through the native zlib fast
 /// path, which decodes on SAP's byte grid (the empty-block prefix), so it
 /// rejects exactly the STORED-block misalignment the verify exists for; a
-/// rejected emission is re-encoded (fixed Huffman, then literals). Debug builds
+/// rejected emission is re-encoded (fixed Huffman, then literals). An
+/// emission that is one Huffman block cannot hold one and ships unverified
+/// ([_needsSelfVerify], audit 2026-10-23 P-3). Debug builds
 /// (asserts on) also cross-check every accepted emission with the pure-Dart
 /// reference decoder. Without native zlib the literal encoder is the whole
 /// compressor, and its output is verified with the reference decoder — a
@@ -1238,14 +1240,15 @@ Uint8List lzhCompress(Uint8List data, {int level = 6}) {
     final deflate = lzhRawDeflateOverride ?? _nativeRawDeflate;
     for (final strategy in const [zDefaultStrategy, zFixed]) {
       for (final windowBits in const [-14, -13]) {
-        final stream = _noiseShiftDeflate(
-            deflate(data,
-                level: level, windowBits: windowBits, strategy: strategy),
-            data.length,
-            footer: footer);
-        final fast = lzhInflate(stream, declaredBound: true);
-        // misaligned STORED block: the next strategy, as with a 16K window
-        if (fast == null || !_bytesEqual(fast, data)) break;
+        final body =
+            deflate(data, level: level, windowBits: windowBits, strategy: strategy);
+        final stream = _noiseShiftDeflate(body, data.length, footer: footer);
+        if (_needsSelfVerify(body)) {
+          lzhSelfVerifies++;
+          final fast = lzhInflate(stream, declaredBound: true);
+          // misaligned STORED block: the next strategy, as with a 16K window
+          if (fast == null || !_bytesEqual(fast, data)) break;
+        }
         if (!_withinSapDistance(stream, data,
             level: level, windowBits: windowBits, strategy: strategy)) {
           continue;
@@ -1263,6 +1266,37 @@ Uint8List lzhCompress(Uint8List data, {int level = 6}) {
   }
   return stream;
 }
+
+/// Whether the zlib emission [body] (raw deflate, before the noise shift)
+/// must be round-tripped before it ships. The self-verify exists for ONE
+/// failure: a STORED block, byte-aligned in [body], misaligned by the 5-bit
+/// noise shift. A block's type sits in its header's bits 1..2, and the
+/// header of the FIRST block is byte 0 of [body] — so an emission whose
+/// first block is also its last (BFINAL, bit 0) and is Huffman-coded (BTYPE
+/// 01 / 10) cannot hold a STORED block anywhere: it is shipped unverified,
+/// trusting the deflater as every multi-block emission's verified bytes
+/// trust it (audit 2026-10-23 P-3). An emission whose first block is not
+/// final may hold a STORED block further on, which only a decode finds:
+/// it is verified as before — the per-payload gate is not a per-encoder
+/// verdict (an incompressible payload gets a STORED block from any level
+/// and strategy), so a "verify once per (level, window, strategy)" would
+/// ship a stream the kernel cannot inflate. [lzhVerifyEveryEmission]
+/// forces the round-trip on every emission; debug builds (asserts on)
+/// still cross-check every accepted emission with the reference decoder
+/// ([_withinSapDistance]).
+bool _needsSelfVerify(Uint8List body) =>
+    lzhVerifyEveryEmission ||
+    body.isEmpty ||
+    (body[0] & 0x01) == 0 || // not the final block: more headers follow
+    (body[0] & 0x06) == 0; // STORED (or reserved 11 == 6: never skipped)
+
+/// Round-trip every zlib emission through the fast path before shipping
+/// it, single-block ones included (the pre-P-3 behaviour) — a test knob.
+bool lzhVerifyEveryEmission = false;
+
+/// How many emissions [lzhCompress] round-tripped through the fast path
+/// (a test counter: the single-block skip is observable).
+int lzhSelfVerifies = 0;
 
 bool _referenceRoundTrips(Uint8List stream, Uint8List data) {
   final (back, err) = lzhReferenceDecodePartial(stream,

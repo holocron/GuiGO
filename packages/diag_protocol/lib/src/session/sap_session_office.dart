@@ -3,7 +3,7 @@ part of 'sap_session.dart';
 /// The Office documents of a [SapSession] (DOI, doi.dart): what each live
 /// `SAP.DocumentContainerControl.1` holds — the SO10 / SMARTFORMS SAPscript
 /// Word editor's RTF, a SAPRDEMO spreadsheet, the SFP Designer's XDP — and
-/// the container's activation event.
+/// the container's OnCloseDocument when the user leaves an in-place one.
 extension SapSessionOffice on SapSession {
   DoiState get _officeDoi => _w.doi;
 
@@ -81,59 +81,108 @@ extension SapSessionOffice on SapSession {
     if (gone.length > DoiState.maxDocs) gone.remove(gone.first);
   }
 
-  /// Raise the container's activation event for the document [shell]
-  /// shows — when the user first works in it (taps into the document
-  /// pane): `%_GC <shell> 2`, PARAMs 0..2 = 1, 1, 1, the event shell
-  /// holding the focus (`16/9/18`), the 16/15/1 source of the custom
-  /// control it sits in, and the realized size (120 / 300) of each
-  /// container up its chain the server did not size itself — the real SAP
-  /// GUI for Windows' gui[41] of a recorded session
-  /// (SO10's Word editor 118, container 117 `120` / `300`) and gui[15] of
-  /// a recorded session; a recorded session gui[19] (the chart 118)
-  /// carries no size. Once per opened document, and only when the
-  /// container registered event 2: the real GUI raised it on 3 of the 8
-  /// recorded opens and went idle into `/nex` without it on the SMARTFORMS
-  /// text node (a recorded session gui[47]), so it is
-  /// never sent unprompted. Returns the frames of the server's answer
-  /// (SO10: FreeObject of the two proxies, then the repaint); nothing is
-  /// sent (empty) when no activation is owed for [shell].
-  Future<List<Uint8List>> officeDocumentActivated(String shell) async {
-    if (answerDialect != GuiDialect.windows) return const [];
+  /// The user ENTERED the in-place document [shell] shows (tapped into its
+  /// pane): nothing goes on the wire — a click or a selection in the real
+  /// GUI's in-place Word sends nothing (a recorded session
+  /// redo DECODE §3) — but the document now owes its OnCloseDocument
+  /// ([officeCloseDocumentEvent]) to the user's next round, which leaves it
+  /// ([_leaveOfficeDocuments]): the real GUI's event round came right
+  /// before the SAP action each time (editor_selection_redo gui[41] then
+  /// `/nex`; text_html gui[15] then Save; connect_su53 gui[956] / [1234]
+  /// then F3; alv_excel_inplace gui[156] then a tree click). A document
+  /// never entered owes nothing (a recorded session: ten
+  /// text nodes left by tree clicks, no event). Only an in-place document
+  /// of a container that registered event 2, once per opened document, on
+  /// a Windows connection — and never the SFP Designer's (below).
+  /// Returns whether the document now owes its event to the next round.
+  bool officeDocumentEntered(String shell) {
+    if (answerDialect != GuiDialect.windows) return false;
     final sh = shell.trim();
     final st = _officeDoi;
-    if (!st.pendingActivation.contains(sh)) return const [];
-    // the SFP Designer's document is never "activated" back to SAP: its
-    // container's event 2 propagates the DESIGNER's close (C_OI_
-    // CONTAINER_CONTROL_PROXY's close semantics; SFP's handler closes its
-    // side), and the next pai_layout then calls has_changed on the dead
-    // proxy — rc_failed, forced CHANGED, the FPUIFB 051 Information modal
-    // ('Impossible de sauvegarder modifications de mise en forme en mode
-    // affich.!'). Live-proven on the test system (tool/sfp_popup_trace.dart): the
-    // event round answers CloseDocument + ReleaseDocument and the modal
-    // paint follows; without the event no has_changed round pops anything
-    // (it answers a clean 0/0 on the tab switches). In the real GUI no
-    // such round exists for the Designer — the clicks go to the Adobe
-    // window, and no SFP capture records one.
-    final current = st.containers[sh]?['current'];
-    if (current is Document &&
-        current.cls.toLowerCase().startsWith('pdfxmldesigner.')) {
-      st.pendingActivation.remove(sh);
-      return const [];
+    if (_closeEventDocument(st, sh) == null) return false;
+    st.entered
+      ..remove(sh)
+      ..add(sh);
+    _trace('office document $sh entered: its OnCloseDocument goes before '
+        'the next round');
+    return true;
+  }
+
+  /// The former first-touch entry, kept for tool/sfp_popup_trace.dart: it
+  /// only ENTERS the document now ([officeDocumentEntered]) and sends
+  /// nothing (empty) — the event rides the next round, as the real GUI's.
+  Future<List<Uint8List>> officeDocumentActivated(String shell) async {
+    officeDocumentEntered(shell);
+    return const [];
+  }
+
+  /// The open document of container [sh] whose OnCloseDocument is still
+  /// owed and would be raised on leaving it, else null.
+  Document? _closeEventDocument(DoiState st, String sh) {
+    if (!st.closeEventPending.contains(sh)) return null;
+    final doc = st.containers[sh]?['current'];
+    // an Office window's document closes with the window, not by leaving
+    // a pane (a recorded session gui[19]: the user closed Excel)
+    if (doc is! Document || doc.closed || doc.outOfPlace) return null;
+    // the SFP Designer's document never raises it: its container's event
+    // 2 makes SFP close its side (CloseDocument + ReleaseDocument), and
+    // the next pai_layout calls has_changed on the dead proxy — rc_failed,
+    // forced CHANGED, the FPUIFB 051 Information modal ('Impossible de
+    // sauvegarder modifications de mise en forme en mode affich.!'),
+    // live-proven on the test system (tool/sfp_popup_trace.dart). No SFP capture
+    // records the event (a recorded session: "none from the
+    // Designer itself before /nex"), and the user's clicks there go to
+    // the Adobe window — so the general rule does not cover it.
+    if (doc.cls.toLowerCase().startsWith('pdfxmldesigner.')) return null;
+    if (!(st.registeredEvents[sh]?.contains(officeCloseDocumentEvent) ??
+        false)) {
+      return null;
     }
-    if (!(st.registeredEvents[sh]?.contains(officeActivationEvent) ?? false)) {
-      st.pendingActivation.remove(sh);
-      return const [];
+    if (!officeDocuments.containsKey(sh)) return null;
+    return doc;
+  }
+
+  /// Whether a user round leaves an entered document ([SapSession._act]).
+  bool get _officeLeaveOwed => _officeDoi.entered.isNotEmpty;
+
+  /// The user's round leaves the in-place documents they entered: each
+  /// one's OnCloseDocument goes out first, as its own round — `%_GC
+  /// <shell> 2`, PARAMs = [doiCloseEventParams] (1, 1, 1 for the SAPscript
+  /// text), the event shell holding the focus (`16/9/18`), the 16/15/1
+  /// source of the custom control it sits in, and the realized size
+  /// (120 / 300) of each container up its chain the server did not size
+  /// itself — the real SAP GUI for Windows' gui[41] of a recorded session
+  /// editor_selection_redo (SO10's Word editor 118, container 117 `120` /
+  /// `300`) and gui[15] of a recorded session. The server answers it
+  /// (SO10: FreeObject of the two proxies, then the repaint; SMARTFORMS:
+  /// the Word editor's teardown) before the user's round goes out. The
+  /// typed values stay staged for that round ([_act] built it from them).
+  Future<void> _leaveOfficeDocuments() async {
+    final st = _officeDoi;
+    final left = st.entered.toList();
+    st.entered.clear();
+    for (final sh in left) {
+      final doc = _closeEventDocument(st, sh);
+      if (doc == null) continue;
+      st.closeEventPending.remove(sh);
+      final typed = List.of(_staged);
+      final typedOn = _stagedScreen;
+      _staged.clear();
+      _stagedScreen = null;
+      try {
+        await _sendCloseEvent(sh, doc);
+      } finally {
+        if (_staged.isEmpty && typed.isNotEmpty) {
+          _staged.addAll(typed);
+          _stagedScreen = typedOn;
+        }
+      }
     }
-    if (!officeDocuments.containsKey(sh)) return const [];
-    st.pendingActivation.remove(sh);
-    await _flushStagedFirst();
-    const params = ['1', '1', '1'];
-    final byPid = {for (final (i, p) in params.indexed) i: p};
-    _ea.recordEvent(sh, byPid);
-    // event 2 is ON_CLOSE_DOCUMENT to the server: its has_changed 1 is what
-    // the next CloseDocument answers, unless a save comes between
-    // (doi.dart [Document.closeEventChanged])
-    doiNoteCloseEvent(st, sh, byPid);
+  }
+
+  Future<List<Uint8List>> _sendCloseEvent(String sh, Document doc) {
+    final params = doiCloseEventParams(doc);
+    _ea.recordEvent(sh, {for (final (i, p) in params.indexed) i: p});
     final reg = _layoutState.registry;
     final sizes = <String, List<(String, String)>>{};
     _areaSizes(reg.parents[sh]).forEach((c, values) {
@@ -157,12 +206,13 @@ extension SapSessionOffice on SapSession {
         done[p] = v;
       }
     }
-    _trace('office document $sh activated: %_GC $sh $officeActivationEvent');
+    _trace('office document $sh left: %_GC $sh $officeCloseDocumentEvent '
+        '(${params.join(', ')})');
     return _act(
       cfwEventItems(
         ctx,
         shell: sh,
-        eventId: officeActivationEvent,
+        eventId: officeCloseDocumentEvent,
         params: params,
         sourcePath: _hostedSourcePath(sh),
         focusShell: sh,

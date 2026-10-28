@@ -12,6 +12,7 @@ import '../cfw/flush_call.dart' show GuiDialect;
 import '../codepages.dart';
 import '../framing/diag_frame.dart';
 import '../framing/envelope.dart';
+import '../framing/decode_worker.dart' show dyntAtomsOf;
 import '../items/dynt_atom.dart';
 import '../screen/field_routing.dart' show FieldRouting, windowsTabstripState;
 import 'actions.dart';
@@ -58,12 +59,26 @@ const Map<int, int> winSesEventarray = {0x01: 0x50, 0x02: 0x41};
 /// "utf-8" (the Java spelling is "4110" / "UTF8").
 final Uint8List winCodepageValue = _hexBytes('0000100e0134313130007574662d3800');
 
+/// The 16/4/15 value of every Windows round's identity block (u32 BE 93 =
+/// 0x5d): the reference GUI's CONNECTION-SIDE FLUSH COUNTER as the capture
+/// it was taken from had it — the oracle's rounds carry 0x5d, 0x6d (the
+/// wall answer's, login.dart wallFrameCounterValue), 0x5bd, 0x158 …, a
+/// counter the kernel ignores (reference client raw_services._GOS_415, pinned to
+/// its gui[15] oracle value for byte tests). Replayed as recorded, the
+/// bytes a live kernel accepts today; direction: a per-session counter
+/// shared with the wall answer once a recording-based A/B run grades a
+/// differing value as accepted (audit 2026-10-23 §6.5).
+const int winFrameCounterValue = 0x5d;
+
 /// The per-frame `16/04/*` identity atoms of a Windows client frame, in wire
 /// order (the Java set is 16/04/43 OS + 16/04/44 + 16/04/25 + 16/04/04).
 final List<(int, Uint8List)> winIdentity = [
   (9, wireText(emulatedGuiRelease)), // 16/04/09 "800"
   (29, wireText(emulatedGuiPatchLevel)), // 16/04/29 GUI patch level "18"
-  (15, _hexBytes('0000005d')), // 16/04/15 (u32 93)
+  (
+    15,
+    (ByteData(4)..setUint32(0, winFrameCounterValue)).buffer.asUint8List(),
+  ), // 16/04/15 [winFrameCounterValue]
   (25, _hexBytes('0000')), // 16/04/25
 ];
 
@@ -546,7 +561,7 @@ List<Uint8List> windowsActionItems(List<Uint8List> items,
       // atom ride the ONE Windows write builder too (reference client 7c4338e:
       // select_radio -> _windows_write_items element_kind=2; raw_checkbox
       // .set_checkbox element_kind=3)
-      for (final a in parseDyntAtoms(it.value).atoms) {
+      for (final a in dyntAtomsOf(it).atoms) {
         if (_choiceElementKinds.containsKey(a.etype)) {
           hasValueAtom = true;
           valueAtoms.add(a);
@@ -1813,7 +1828,11 @@ Uint8List? _windowsTableHeader(List<int> h) {
       if (area != null) {
         body.add(buildApplItem(12, 2, Uint8List.fromList(area.value)));
       }
-      tc.add((path: windowsChainLevels(routing), items: body));
+      tc.add((
+        path: windowsChainLevels(routing),
+        items: body,
+        header: Uint8List.fromList(header!.value),
+      ));
     }
   }
   return (
@@ -1954,7 +1973,7 @@ Uint8List _winSesItem(ActionContext ctx, {int eventArray = 0, int vkey = 0}) {
 /// whatever the paint order (a recorded session gui[124]).
 List<Uint8List> windowsCursorEcho(ActionContext ctx, List<int>? cursor) => [
       for (final t in ctx.paintedTableEcho)
-        if (windowsCursorInTable(cursor, t.path)) ...t.items,
+        if (windowsCursorInTable(cursor, t.path)) ...ctx.tableEchoItems(t),
       ...ctx.paintedTabstripEcho,
     ];
 

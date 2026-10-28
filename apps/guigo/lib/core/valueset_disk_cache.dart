@@ -49,7 +49,11 @@ class ValueSetDiskCache {
     _pending = Timer(const Duration(seconds: 2), flush);
   }
 
-  /// Write the cache now.
+  /// Write the cache now. A write the platform refuses (a full disk, a
+  /// preferences store gone read-only) is dropped — the cache is a
+  /// convenience, and the Timer in [_schedule] has no one to hand the
+  /// error to: it was an unhandled zone error (audit 2026-10-23 R-12).
+  /// The failure is kept in [lastWriteError] for a caller that cares.
   Future<void> flush() async {
     _pending?.cancel();
     _pending = null;
@@ -57,8 +61,17 @@ class ValueSetDiskCache {
     final keep = sets.length > maxSets
         ? sets.sublist(sets.length - maxSets)
         : sets;
-    await _prefs.setString(prefsKey, encode(keep));
+    try {
+      await _prefs.setString(prefsKey, encode(keep));
+      lastWriteError = null;
+    } on Object catch (e) {
+      lastWriteError = e;
+    }
   }
+
+  /// The error of the last [flush] that failed to write, null after a
+  /// write that went through.
+  Object? lastWriteError;
 
   /// The persisted form: a JSON list of `{n: id, e: [[key, text], …]}`.
   static String encode(Iterable<ValueSet> sets) => jsonEncode([
