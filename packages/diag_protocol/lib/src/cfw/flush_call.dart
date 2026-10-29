@@ -336,7 +336,7 @@ class FlushCall {
   /// tables stay valid), only the `_RESULT` types are re-typed. The
   /// collections the answer path WRITES (cached / set properties, the mint
   /// side channel) are the copy's own, so the answer's additions never show
-  /// up in this parse (audit #2: the answer re-parsed — re-inflating
+  /// up in this parse (the answer re-parsed — re-inflating
   /// every cell of — a call the frame's readers had just parsed).
   FlushCall withDialect(GuiDialect? dialect) {
     final c = FlushCall(raw)
@@ -379,7 +379,7 @@ void _typeResults(FlushCall call) {
 }
 
 /// Test seam: a value it holds true for fails [parseFlushCall] — no wire
-/// input makes the parse throw any more (audit 2026-10-17 P0-1..4),
+/// input makes the parse throw any more,
 /// and the readers' unparseable-call path stays pinned through this.
 bool Function(Uint8List rfc)? debugFailFlushParse;
 
@@ -392,7 +392,7 @@ FlushCall parseFlushCall(Uint8List rfc, {GuiDialect? dialect}) {
   final call = FlushCall(rfc)
     ..dialect = dialect
     // RFC_QUEUE: presence only (the answer gate) — its push blob is the DP
-    // cache's to inflate (audit 2026-10-17 N6)
+    // cache's to inflate
     ..columns = rfcColumns(rfc, except: const {'RFC_QUEUE'})
     ..svars = parseSvarsItems(rfc);
   final cols = call.columns;
@@ -521,7 +521,7 @@ String _name(Rec v, int start, int end) => start >= v.raw.length
 
 // bounded: CFW slots, object ids and shell handles fit an int32 — an
 // unbounded `\d+` let a 25-digit VARS slot through to `int.parse`, whose
-// FormatException left the flush unanswered (audit 2026-10-17 P0-4)
+// FormatException left the flush unanswered
 final RegExp _digitsRe = RegExp(r'^\d{1,9}$');
 
 bool _isDigits(String? s) => s != null && _digitsRe.hasMatch(s);
@@ -612,8 +612,7 @@ class _Derived {
 
 // keyed on the verb-object list, which [FlushCall.withDialect] shares: the
 // answer path's dialect copy reuses the tables the frame's readers derived
-// (keyed on the call, each copy derived them again: audit 2026-10-17
-// N12)
+// (keyed on the call, each copy derived them again)
 final Expando<_Derived> _derived = Expando('flush call derived tables');
 
 _Derived _derivedOf(FlushCall call) {
@@ -849,5 +848,5 @@ class DpPushBinding {
 }
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _letterRx = RegExp(r'[A-Za-z]');

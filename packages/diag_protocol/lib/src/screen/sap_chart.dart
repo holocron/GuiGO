@@ -193,7 +193,7 @@ String? _span(String doc, String tag) => _tagRx(tag).firstMatch(doc)?.group(1);
 
 /// `<tag…>…</tag>`, compiled once per tag: the tags are the dozen literals
 /// of this file's folds, not per-document data, and the chart fold runs
-/// per paint (audit 2026-10-23 P-2).
+/// per paint.
 RegExp _tagRx(String tag) => _tagRxs[tag] ??= RegExp(
   '<$tag(?:\\s[^>]*)?>(.*?)</$tag>',
   dotAll: true,
@@ -206,7 +206,6 @@ String _unescape(String s) {
   return s.replaceAllMapped(_unescapeRx, (m) {
     final e = m.group(1)!;
     // a reference past U+10FFFF (or too long to parse) stays as written
-    // (audit 2026-10-17 P0-3)
     if (e.startsWith('#')) {
       final v = e.startsWith('#x')
           ? int.tryParse(e.substring(2), radix: 16)
@@ -658,5 +657,5 @@ String? _documentOf(Uint8List seg) {
 }
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _unescapeRx = RegExp(r'&(#x[0-9a-fA-F]+|#\d+|\w+);');

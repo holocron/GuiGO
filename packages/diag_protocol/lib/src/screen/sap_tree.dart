@@ -32,7 +32,7 @@ class DpTable {
 /// numeric text; anything else is read as text. Null when the push carries
 /// no named FORMAT or no DATAASC rows.
 ///
-/// Memoized per [seg] object (audit 2026-10-23 P-5): a cached push is
+/// Memoized per [seg] object: a cached push is
 /// stable until evicted and a dozen side models decode the same segment
 /// per paint ([dpColumnCells] already memoizes the cells; this memoizes
 /// the row maps built from them). The result is SHARED — read it, never
@@ -80,8 +80,8 @@ DpTable? _decodeNamedDpTable(Uint8List seg) {
       dcells.length == dn &&
       dcells.every((c) => c.length <= dw)) {
     // one `dw * dn` buffer blank-filled once, each row copied in at its
-    // record offset — not a pad buffer per row plus the join (audit
-    // 2026-10-23 P-5); the same bytes
+    // record offset — not a pad buffer per row plus the join;
+    // the same bytes
     data = Uint8List(dw * dn)..fillRange(0, dw * dn, 0x20);
     for (var r = 0; r < dn; r++) {
       data.setRange(r * dw, r * dw + dcells[r].length, dcells[r]);
@@ -522,7 +522,7 @@ class SapTreeModel {
   // since — every insertion re-records it). A sibling chain names the node
   // placed just before (SE80's categories: RELATKEY 2 / 3 / 4 …, NEXT
   // sibling): its index is known without a scan, where `indexOf` per node
-  // made a k-sibling build O(k²) (audit #4).
+  // made a k-sibling build O(k²).
   List<SapTreeNode>? _lastList;
   SapTreeNode? _lastNode;
   int _lastIndex = -1;

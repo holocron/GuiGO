@@ -125,7 +125,7 @@ bool _build(Document doc, DpTable data, DpTable info) {
 }
 
 // Hoisted: [alvNumber] runs per numeric cell of every in-place sheet; a
-// RegExp built per call is compiled per call (audit 2026-10-17 N1).
+// RegExp built per call is compiled per call.
 // The blanks: whitespace, NBSP and the narrow NBSP of a French grouping.
 final RegExp _alvBlankRx = RegExp(r'[\s  ]');
 final RegExp _alvDecimalRx = RegExp(r'^\d+(\.\d+)?$');

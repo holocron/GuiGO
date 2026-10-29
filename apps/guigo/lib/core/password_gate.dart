@@ -28,7 +28,7 @@ Future<String?> releaseStoredPassword({
   // Keystore, iOS -34018) take the same way out as a failed gate: null,
   // the caller asks for the password. Outside this try they reached the
   // error view, whose Retry re-hit the store — a lockout no typed
-  // password could end (audit 2026-10-23 R-9)
+  // password could end
   try {
     if (!await hasStored()) return null;
   } catch (_) {

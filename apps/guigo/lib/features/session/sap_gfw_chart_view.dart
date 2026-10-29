@@ -60,7 +60,7 @@ Color? gfwSeriesOutline(SapChartSeries s) =>
 /// The GFW painters' texts: laid out through the view's [ChartLabelCache]
 /// when the painter holds one ([labels]), so a repaint — a pan frame of
 /// the time axis, a server turn rebuilding the screen — draws the labels
-/// without laying them out again (audit 2026-10-23 P-8); a painter built
+/// without laying them out again; a painter built
 /// on its own lays each out per paint.
 mixin _GfwText {
   ChartLabelCache? get labels;
@@ -280,7 +280,7 @@ class _GfwChartViewState extends State<GfwChartView> {
 
   /// The laid-out texts of the chart, kept across paints: a pan frame of
   /// the time axis, a rebuild with the same model, draws them and lays
-  /// none out again (audit 2026-10-23 P-8).
+  /// none out again.
   final _labels = ChartLabelCache();
 
   /// How many text layouts the chart made (tests read it).

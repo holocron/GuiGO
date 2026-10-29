@@ -42,7 +42,7 @@ class _SapFormViewState extends State<SapFormView>
 
   /// The laid-out texts of the pages, kept across paints: a tap on a
   /// field (the selection repaint) or a decoded image draws them, it lays
-  /// none out again (audit 2026-10-23 P-8).
+  /// none out again.
   final _labels = StyledLabelCache();
 
   /// How many text layouts the pages made (tests read it).
@@ -560,8 +560,8 @@ class _FormPainter extends CustomPainter {
   final ThemeData theme;
   final XfaElement? selected;
 
-  /// The view's laid-out texts, kept across paints (audit 2026-10-23
-  /// P-8); null lays each out per paint (a painter built on its own).
+  /// The view's laid-out texts, kept across paints;
+  /// null lays each out per paint (a painter built on its own).
   final StyledLabelCache? labels;
 
   /// [text] in [style] laid out for [rect] — one line when the rect is

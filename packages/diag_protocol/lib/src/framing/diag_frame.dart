@@ -75,7 +75,7 @@ class DecompressedFrame {
 
   /// The item walk of [body], built on its first read and shared by every
   /// later reader of this decode — with [decompressFrame]'s memo, ONE walk
-  /// per frame however many readers a turn runs (audit #8). The item list
+  /// per frame however many readers a turn runs. The item list
   /// is unmodifiable: it is shared.
   late final ItemWalk walk = _walkOnce();
 
@@ -90,7 +90,7 @@ class DecompressedFrame {
 /// OBJECT (weakly: it dies with the frame). A received frame is read by a
 /// dozen readers per turn — the turn-end test, the window router, the
 /// fold, the imode and step readers, the DP snoop, the automation fold, the
-/// trace — and each paid a full LZH inflate of it (audit #8); with the memo
+/// trace — and each paid a full LZH inflate of it; with the memo
 /// the first reader decodes and every other one shares the result.
 final Expando<DecompressedFrame> _decoded = Expando('decoded DIAG frame');
 
@@ -275,6 +275,6 @@ String? diagErrorInfo(Uint8List frame) {
 }
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _diagErrorInfoRx = RegExp(r'[\x00-\x08\x0b-\x1f]');
 final RegExp _whitespaceRunRx = RegExp(r'\s+');

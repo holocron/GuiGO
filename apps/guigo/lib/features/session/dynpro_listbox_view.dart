@@ -17,7 +17,7 @@ const bool showAllListboxKeys = true;
 /// the bare key until then — in a box with the dropdown arrow. The entry
 /// list opens as a popup under the box (the selected entry checked, the
 /// list virtualized: a cost-center set of hundreds of entries builds the
-/// rows in view, not every one — audit 2026-10-23 P-9 — and from
+/// rows in view, not every one and from
 /// [filterFrom] entries up a filter line narrows it, as the F4 dialog's
 /// does); a pick calls [onPick] with the entry's KEY. Display-only (a PROTECTED listbox, the
 /// change-mode-less screen) when [onPick] is null, the field is protected

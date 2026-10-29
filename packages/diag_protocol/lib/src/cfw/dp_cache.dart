@@ -96,9 +96,9 @@ class DpCache {
   /// ([dpDecodedBytes] per segment). Counted with [bytes] against
   /// [maxBytes] at every sweep: the ceiling once held the compressed
   /// segments alone while the inflated cells, several times their size,
-  /// sat uncounted beside them (audit perf1 dp-cache-decoded).
+  /// sat uncounted beside them.
   ///
-  /// Recomputed only when it can have changed (audit 2026-10-23 P-4): the
+  /// Recomputed only when it can have changed: the
   /// per-segment memos are pinned by readers outside the cache, so no
   /// running counter can see them land — but every pin bumps
   /// [_dpDecodeGen], and the entry set changes only through [_put] /
@@ -354,7 +354,7 @@ bool _sameBytes(Uint8List a, Uint8List b) {
 /// lookup of that url returns). Scanned once per value object: one
 /// received frame is snooped by the fold's tree pass and by the automation
 /// pass, and one completed call by every side model's own push cache
-/// (audit #8) — each scan re-parsed the queue column once per url.
+/// — each scan re-parsed the queue column once per url.
 final Expando<List<(String, Uint8List)>> _pushes = Expando('DP pushes');
 
 List<(String, Uint8List)> _pushesOf(Uint8List rfc) =>
@@ -453,7 +453,7 @@ DpContent? dpPutContent(Uint8List seg) {
 /// Bumped whenever a reader pins a new decoded memo on a segment
 /// ([dpPutContent], [dpColumnCells]) — the only events that change what
 /// [dpDecodedBytes] reports for a cached segment, so [DpCache.decodedBytes]
-/// recounts only when it moved (audit 2026-10-23 P-4). Isolate-local, as
+/// recounts only when it moved. Isolate-local, as
 /// the memos are.
 int _dpDecodeGen = 0;
 
@@ -842,7 +842,7 @@ String decodeRsField(Uint8List raw, int ftype) {
   if (raw.isEmpty) return '';
   if (ftype == 10 || ftype == 11) {
     // WCHAR / WSTRING -> UTF-16LE (code units gathered, one String built:
-    // `out +=` per unit was O(n²); audit zcode P-15)
+    // `out +=` per unit was O(n²))
     final units = <int>[];
     for (var i = 0; i + 1 < raw.length; i += 2) {
       final cu = raw[i] | (raw[i + 1] << 8);
@@ -871,7 +871,7 @@ String decodeRsField(Uint8List raw, int ftype) {
     return raw.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
   // CHAR / DATE / TIME / STRING / unknown -> text, up to the first NUL
-  // (sliced, not built char by char and transcoded back: audit P-15)
+  // (sliced, not built char by char and transcoded back)
   var end = 0;
   var ascii = true;
   while (end < raw.length && raw[end] != 0) {
@@ -963,7 +963,7 @@ List<int> _utf8DecodeLenient(Uint8List bytes) {
 }
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _digitsOnlyRx = RegExp(r'^\d+$');
 
 /// Whether [rfc] already decodes as one complete DP push (a DESURL with

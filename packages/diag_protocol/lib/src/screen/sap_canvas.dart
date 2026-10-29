@@ -265,8 +265,7 @@ const int _fmtRecord = 80;
         seg[ds + 1] == 0x02 &&
         bd.getUint16(ds + 2) == 8) {
       // bounded like dp_cache's descriptors: a ~200-B push declaring 4 GB
-      // rows had decodeCanvasPush pad every row to it (audit
-      // 2026-10-17 P0-5)
+      // rows had decodeCanvasPush pad every row to it
       final (w, n) = _boundedDims(bd.getUint32(ds + 4), bd.getUint32(ds + 8));
       for (var k = ds + 12; k < ds + 20 && k + 1 < seg.length; k++) {
         if (seg[k] == 0x03 && seg[k + 1] == 0x04) break; // inline rows
@@ -828,7 +827,7 @@ String? _metaTableId(CanvasPushTable? t) {
 bool _digits(String? s) => s != null && _digitsOnlyRx.hasMatch(s.trim());
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _canvasTextColumnRx = RegExp(r'^col_(\d+)$');
 final RegExp _canvasTextColumnRx2 = RegExp(r'^@\w{2,4}@$');
 final RegExp _digitsOnlyRx = RegExp(r'^\d{1,9}$');

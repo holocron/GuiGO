@@ -291,7 +291,7 @@ class SapSession {
   Duration? _pingSample; // the previous idle ping's gap (sap_session_liveness)
   Timer? _watchdog;
   int _parkedDropped = 0;
-  int _windowsRetired = 0; // audit 2026-10-23 R-2 (sap_session_liveness)
+  int _windowsRetired = 0;
 
   /// Time the logon spent waiting on the user (the multi-logon wall): not
   /// counted against connect's logon deadline.
@@ -675,7 +675,7 @@ class SapSession {
 
   /// Test hook: run the transport over [s] (a loopback or fake socket)
   /// without a connect — the writer's deadline ([TransportLimits.
-  /// writeDeadline], audit 2026-10-23 R-1) is exercised through it. The
+  /// writeDeadline]) is exercised through it. The
   /// socket is not listened to: nothing is read from it.
   void socketForTest(Socket s) {
     _sock = s;
@@ -710,7 +710,7 @@ class SapSession {
     if (state == SessionState.closed) throw SessionClosedError();
     // the deadline holds on EVERY read, buffered frames or not: a peer
     // that keeps a frame ahead of the reader never let the empty-inbox
-    // check below run (audit R-01)
+    // check below run
     if (!DateTime.now().isBefore(deadline)) {
       throw TimeoutException('no complete reply from server in time');
     }
@@ -734,8 +734,7 @@ class SapSession {
         : null;
     if (decoding != null) {
       // within the read's deadline: a wedged worker never holds the
-      // session — the reader then decodes inline through the memo (audit
-      // 2026-10-17 R5)
+      // session — the reader then decodes inline through the memo
       final left = deadline.difference(DateTime.now());
       if (left > Duration.zero) await decoding.timeout(left, onTimeout: () {});
       if (state == SessionState.closed) throw SessionClosedError();
@@ -824,7 +823,7 @@ class SapSession {
     final wire = niFrame(payload);
     s.add(wire);
     // bounded: a peer that stops reading is dropped, never waited on
-    // forever (audit 2026-10-23 R-1)
+    // forever
     await _flushWithin(s, wire.length);
     _lastWire = DateTime.now();
     _roundSent();
@@ -920,7 +919,7 @@ class SapSession {
       while (true) {
         final payload = await _nextPayload(deadline);
         // a turn that never ends is a broken peer: its frames are not
-        // buffered without bound (audit R-01)
+        // buffered without bound
         read++;
         readBytes += payload.length;
         if (read > limits.turnFrames || readBytes > limits.turnBytes) {
@@ -1051,7 +1050,7 @@ class SapSession {
         });
         // a fold that threw part-way still syncs the dialog step: a stale
         // ctx.step stamps every later action with a step the kernel
-        // silently discards (audit 2026-10-17 R3)
+        // silently discards
         if (!folded) {
           _guarded('step sync', () {
             _syncStep(run);
@@ -1230,7 +1229,7 @@ class SapSession {
   /// Whether the action-turn trace lines carry the per-item dump of every
   /// frame sent / received (`16/9/2(351) 10/1=…`). On in debug / JIT runs,
   /// off in a product build: the dump walks and stringifies every item of
-  /// every frame per turn for a line nobody reads there (audit zcode P-07);
+  /// every frame per turn for a line nobody reads there;
   /// the line then names frame sizes only.
   static bool traceItemDumps = !_productBuild;
 
@@ -1273,7 +1272,7 @@ class SapSession {
     tracePrinter?.call(line);
   }
 
-  // --- survived failures (audit #13) ------------------------------------------
+  // --- survived failures ------------------------------------------
 
   /// Owed answers (OLE flush calls) that could not be parsed or built and so
   /// went UNANSWERED — the kernel then waits in OLE_FLUSH_CALL and the next
@@ -1357,7 +1356,7 @@ class SapSession {
         : windowsConnectFrame(fixture[0], language: system.language));
     // the kernel's 0020 paint: where it places the credential fields
     // (login.dart loginPlanes — the recorded planes unless this paint
-    // differs; audit 2026-10-23 §5.2)
+    // differs)
     final connectReply = await recvTurn();
     _trace('connect reply');
     // GUI[1]: credential submit
@@ -1580,7 +1579,7 @@ class SapSession {
       final folded = foldAutomationFrame(f, _autoStream, step);
       // a chunked call the stream gave up on (past its byte cap) is an
       // answer the kernel waits for and never gets: counted and named
-      // like any other failed answer (audit 2026-10-23 R-6)
+      // like any other failed answer
       final gaveUp = _autoStream.takeAbandoned();
       if (gaveUp != null) {
         _noteAnswerFailure('automation stream', StateError(gaveUp));
@@ -1607,7 +1606,7 @@ class SapSession {
         final key = AnsweredCalls.keyOf('flush', closingStep, value);
         if (!_answeredFlushes.add(key)) continue;
         // ONE parse of the call feeds every side model and the answer
-        // (audit #8: it was parsed once per model, ~8x, each parse
+        // (it was parsed once per model, ~8x, each parse
         // re-inflating every cell); the models read nothing the answer
         // dialect changes (the _RESULT types). A call that does not parse
         // is NOT re-parsed by every model (each one's own parse failed on
@@ -1618,7 +1617,7 @@ class SapSession {
         var editorsTouched = const <String>{};
         try {
           // the frame readers' parse of this item, re-typed for the answer
-          // (no second decode of the call's cells; audit #2)
+          // (no second decode of the call's cells)
           parsed = flushCallOf(value, dialect: answerDialect);
         } catch (e) {
           parseError = e;
@@ -1852,8 +1851,7 @@ class SapSession {
       ..close = null; // a close read outside an action owes nothing now
     // the staged values this round carries (built from them already): off
     // the stage now, back on it if the send fails — a socket error on the
-    // send must not destroy typed input the server never saw (audit
-    // 2026-10-23 R-7)
+    // send must not destroy typed input the server never saw
     List<StagedField>? consumed;
     (String?, String?, int)? consumedScreen;
     if (consumesStaged) {
@@ -1938,7 +1936,6 @@ class SapSession {
       } catch (_) {
         // the typed values never reached the server: staged again, on the
         // screen they were typed on, unless the user typed meanwhile
-        // (audit 2026-10-23 R-7)
         if (consumed != null && _staged.isEmpty) {
           _staged.addAll(consumed);
           _stagedScreen = consumedScreen;
@@ -1985,7 +1982,7 @@ class SapSession {
             continue;
           }
           // silent past the server's own ping cadence: the connection is
-          // gone, not the dialog step slow (audit 2026-10-17 R2)
+          // gone, not the dialog step slow
           if (_sockError == null && _silentTooLong()) {
             final lost = ConnectionLostError(_silenceMessage());
             _abortTransport(lost);
@@ -2057,7 +2054,7 @@ class SapSession {
       // "follow the next step-bearing frame" ends with the closing turn —
       // left set (a client close answered by no frame), it hijacked the
       // conversation to whichever window the server pushed to minutes
-      // later (audit 2026-10-23 R-4)
+      // later
       _modes
         ..actionCommand = null
         ..awaitingReply = false
@@ -2134,8 +2131,8 @@ class SapSession {
   /// staged round, the bootstrap's turns) runs as part of it.
   Future<T> _exclusive<T>(String what, Future<T> Function() body) {
     if (identical(Zone.current[_lockKey], this)) return body();
-    // the queue behind the running action is bounded (audit 2026-10-23
-    // R-5): a call past the depth is refused now, with the reason, instead
+    // the queue behind the running action is bounded:
+    // a call past the depth is refused now, with the reason, instead
     // of replaying as a stale round minutes later; the running one and
     // the queued ones are untouched
     final depth = limits.actionQueueDepth;
@@ -2349,7 +2346,7 @@ class SapSession {
       }
       if (!it.isAppl || it.id != 8 || (it.sid != 0 && it.sid != 1)) continue;
       // tested on the view: only the rare pull is copied, not every OLE
-      // flush value of every frame (audit 2026-10-17 N8)
+      // flush value of every frame
       if (!isClientTablePull(it.value)) continue;
       final v = Uint8List.fromList(it.value);
       final url = clientTablePullUrl(v);
@@ -2656,7 +2653,7 @@ class SapSession {
     // ceiling refuses leaves the old tree as it is). Every other push is
     // applied INTO the model the window holds, as the real tree control
     // grows on an expansion; re-applying every retained table per batch
-    // was O(nodes) per push (audit perf5 tree-reapply), and a view keys on
+    // was O(nodes) per push, and a view keys on
     // the object plus [SapTreeModel.revision]
     var restart = false;
     for (final url in fresh) {

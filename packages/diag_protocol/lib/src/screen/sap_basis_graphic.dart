@@ -377,8 +377,7 @@ Map<String, String> _options(List<BasisToken> tokens) {
 /// twice in one number or is followed by exactly three digits groups
 /// thousands (`153.470` under logon FR is 153 470), any other one is the
 /// decimal mark; both in one number: the later is the decimal.
-// Compiled once, not per number / per `$INDX` row of the netplan parse
-// (audit 2026-10-23 P-2).
+// Compiled once, not per number / per `$INDX` row of the netplan parse.
 final RegExp _nonDigitRx = RegExp(r'[^0-9]');
 final RegExp _blankRunRx = RegExp(r'\s+');
 

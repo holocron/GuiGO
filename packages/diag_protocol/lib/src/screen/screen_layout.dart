@@ -1147,8 +1147,8 @@ class _Facts {
   }
 
   /// parent -> children, built once per compose (the registry holds still
-  /// while it runs): [subtree] asked for it per call, per dock and cell
-  /// (audit #15). Read-only.
+  /// while it runs): [subtree] asked for it per call, per dock and cell.
+  /// Read-only.
   Map<String, List<String>> children() => _children;
 
   late final Map<String, List<String>> _children = () {
@@ -3443,7 +3443,7 @@ List<(int, int, int)> _fieldBoxes(ScreenModel m) => [
 ];
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _letterRx = RegExp('[A-Za-z]');
 final RegExp _whitespaceRx = RegExp(r'\s');
 final RegExp _trailingZerosRx = RegExp(r'0+$');

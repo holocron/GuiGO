@@ -42,8 +42,7 @@ const List<List<int>> defaultChartValues = [
 bool isExcelChartClass(String cls) =>
     _excelChartClassRx.hasMatch(cls.trim().toLowerCase());
 
-// hoisted: a RegExp built per call is compiled per call (audit
-// 2026-10-17 N1)
+// hoisted: a RegExp built per call is compiled per call
 final RegExp _excelChartClassRx = RegExp(r'^excel\.chart(\.\d+)?$');
 
 /// [doc] (a created `Excel.Chart`) as Excel makes it: the chart sheet

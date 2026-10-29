@@ -13,8 +13,7 @@ const String okCodepage = '4110';
 /// decodes latin-1 (never throws). The table was once declarative only —
 /// [wireDecode] routed every non-4110 id through latin-1, so cp1252's
 /// 0x80..0x9f (`€ ‚ ƒ … ™`) and the whole Mac Roman upper half came out
-/// as C1 controls / Latin-1 letters while the table implied otherwise
-/// (audit 2026-10-23 §6.7).
+/// as C1 controls / Latin-1 letters while the table implied otherwise.
 const Map<String, String> codepageCodecs = {
   '4110': 'utf-8',
   '1100': 'latin-1',

@@ -1,6 +1,6 @@
 /// Work counters of the receive path: how often a frame is really decoded,
 /// its item list really walked, and an OLE_FLUSH_CALL really parsed. The
-/// decode-once contract (audit #8) is that every reader of one frame in a
+/// decode-once contract is that every reader of one frame in a
 /// turn shares ONE decode and ONE walk ([decompressFrame] memoizes both on
 /// the frame object), and that one completed flush call is parsed once for
 /// all the side models it feeds. Tests and benchmarks read these; nothing

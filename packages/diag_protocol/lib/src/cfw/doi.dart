@@ -26,8 +26,8 @@ import 'tree_header_names.dart' show collapseInlineRow;
 const String macroRefusedRc = '30';
 const String macroRefusedText =
     'macro not executed: no macro engine on this client';
-// The two sheet names GuiGo answers without a document to read them from
-// (audit 2026-10-23 §6.4). They are NOT two defaults of one kind: the first
+// The two sheet names GuiGo answers without a document to read them from.
+// They are NOT two defaults of one kind: the first
 // is a document's OWN name, the second the emulated Office's. Both are
 // replayed byte-for-byte against their recordings (doi_replay_test,
 // xxl_word_demos_replay_test), so neither is a free choice — the
@@ -544,7 +544,7 @@ List<List<String>> doiPushRows(Uint8List seg) => _pushRows[seg] ??=
 
 /// [doiPushRows] per cached segment: a push's rows are read by every
 /// verb that names it (Ranges / RangeDef / Content per range read), and a
-/// cached segment never changes (audit 2026-10-17 N7).
+/// cached segment never changes.
 final Expando<List<List<String>>> _pushRows = Expando('DOI push rows');
 
 List<List<String>> _doiPushRows(Uint8List seg) {
@@ -629,7 +629,7 @@ class DoiState {
   final Map<String, Uint8List> templates = {};
 
   /// How many documents (created, and saved serializations) are kept —
-  /// the oldest out first (audit #12: a long session never grows them).
+  /// the oldest out first (a long session never grows them).
   static const int maxDocs = 64;
 
   /// How many entries each handle-keyed map (containers, proxies, DP
@@ -813,7 +813,7 @@ void applyOneTable(Document doc, DocRange rg, Uint8List seg) {
 /// The [n] row cells of a `03 04`-per-row DATAASC column, each padded with
 /// blanks back to the record width [w], as ONE `w * n` buffer: one
 /// allocation and one fill for the table instead of a padded copy per row
-/// plus the join (audit 2026-10-23 P-5). Same bytes as padding each row.
+/// plus the join. Same bytes as padding each row.
 Uint8List _padRows(List<Uint8List> cells, int w, int n) {
   final out = Uint8List(w * n)..fillRange(0, w * n, 0x20);
   for (var r = 0; r < n; r++) {
@@ -823,8 +823,8 @@ Uint8List _padRows(List<Uint8List> cells, int w, int n) {
   return out;
 }
 
-// Hoisted out of the row x column loop of [applyOneTable] (audit
-// 2026-10-23 P-2): a D cell's `yyyymmdd`, an N cell's digits.
+// Hoisted out of the row x column loop of [applyOneTable]:
+// a D cell's `yyyymmdd`, an N cell's digits.
 final RegExp _yyyymmddRx = RegExp(r'^\d{8}$');
 final RegExp _nDigitsRx = RegExp(r'^\d{1,15}$');
 
@@ -872,7 +872,7 @@ num? _oneTableNumber(Uint8List raw, int dec, int type) {
 /// as `A1` / `XFD1048576` / `R1C1`). `22` fails (a recorded session
 /// disabled gui[57]: InsertRange2 6), `ert` passes (a recorded session
 /// srv[61]: 0).
-// [excelNameValid]'s rules, compiled once (audit 2026-10-23 P-2).
+// [excelNameValid]'s rules, compiled once.
 final RegExp _excelNameRx =
     RegExp(r'^[\p{L}_\\][\p{L}\p{N}._\\?]*$', unicode: true);
 final RegExp _r1c1Rx = RegExp(r'^R\d*C\d*$');
@@ -2330,7 +2330,7 @@ String _leU32Str(int v) => String.fromCharCodes([
     ]);
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _digitsOnlyRx = RegExp(r'^\d{1,9}$');
 final RegExp _docForSourceRx = RegExp(r'^doc(\d+)$');
 final RegExp _dpgetInurlRx = RegExp('SAPR3://[0-9A-Fa-f]+');

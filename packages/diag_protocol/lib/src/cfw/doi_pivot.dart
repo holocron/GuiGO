@@ -52,7 +52,6 @@ String? applyInsertFull2(
   final data = [for (final r in dataTitles) title(r)];
   // the wire's column counts clamped to a sheet's width: unbounded, one
   // InsertFull2 ran a billion-iteration key loop and a 16 GB sum list
-  // (audit 2026-10-17 P0-6)
   final nKeys = min(keyCols > 0 ? keyCols : keys.length, Document.maxRangeCols);
   final nData = min(dataCols > 0 ? dataCols : data.length, Document.maxRangeCols);
   if (nKeys <= 0 || nData <= 0 || dataRows <= 0) return null;

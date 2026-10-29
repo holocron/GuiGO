@@ -116,7 +116,7 @@ class EaSession {
   /// retention verdict of [dpCache] and the pushes [evictDeadPushes] drops.
   final Map<String, String> dpUrlShell = {};
 
-  // --- bounds (audit #12: no map grows for the logon's whole life) ---------
+  // --- bounds (no map grows for the logon's whole life) ---------
 
   /// The caps the session's registries are held under, oldest out first
   /// (the [frontendRfcLog] pattern). Generous: a long session holds far
@@ -265,8 +265,8 @@ class EaSession {
 class AutomationStream {
   AutomationStream({this.maxPendingBytes = defaultMaxPendingBytes});
 
-  /// The bytes a pending stream may gather before it is abandoned (audit
-  /// 2026-10-23 R-6): sid-4 continuations accumulate until a sid-0/1
+  /// The bytes a pending stream may gather before it is abandoned:
+  /// sid-4 continuations accumulate until a sid-0/1
   /// closer, and a kernel that streams chunks which each end their own
   /// turn would grow the stream for the logon's life. The largest joined
   /// call of the corpora is well under a megabyte; a flush over the cap is
@@ -431,7 +431,7 @@ AutomationFrame foldAutomationFrame(
       // the item's own view, not a copy: the decode is memoized on the frame
       // (immutable once walked), the stream builder copies when it joins,
       // and the frame's OLE item parse ([_itemCall], keyed on this object)
-      // is the parse the answer reuses ([flushCallOf]; audit #2)
+      // is the parse the answer reuses ([flushCallOf])
       final v = it.value;
       // a stream-form PAINT: its sid-4 head and raw sid-4 continuations are
       // receipted like call chunks, its sid-6 tail is not (stream_paint.dart;
@@ -1173,7 +1173,7 @@ const String windowsPlatformExAnswer = '14';
 const String getColumnWidthAnswer = '31';
 
 List<Uint8List> _rowsOf(Uint8List b, int w) {
-  // a zero width spun forever (audit 2026-10-17 P0-2)
+  // a zero width spun forever
   if (w <= 0) return const [];
   return [
     for (var i = 0; i * w < b.length; i++)
@@ -1264,7 +1264,7 @@ void _capOldest(Map<Object?, Object?> m, int max) {
 /// The dialect-less parse of one OLE item of a received frame, shared by
 /// that frame's fact readers — [shellsTornDownIn] at the fold and
 /// [recordControlFactsFromFrame] at the automation pass parsed every item
-/// each (audit #8). Keyed on the item value: the frame's shared walk
+/// each. Keyed on the item value: the frame's shared walk
 /// ([DecompressedFrame.walk]) hands both readers the same object. Readers
 /// only: the answer parses its own call. An item that does not parse (a
 /// corrupt / hostile call) is null to both, memoized as such: the readers
@@ -1401,6 +1401,6 @@ Set<String> shellsTornDownIn(Iterable<Uint8List> frames) {
 final _unusedImport = 0;
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _letterRx = RegExp(r'[A-Za-z]');
 final RegExp _digitsOnlyRx = RegExp(r'^\d{1,9}$');

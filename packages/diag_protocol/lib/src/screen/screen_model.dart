@@ -1021,7 +1021,7 @@ const int maxListCols = 1280;
 const int maxListRows = 1024;
 
 /// One classic-list line being painted: the code unit, SFE and run per
-/// column (-1 = unpainted) — audit #15: a Map entry and a one-char String
+/// column (-1 = unpainted) a Map entry and a one-char String
 /// per cell (12k of them for a 200 x 60 list) per repaint.
 class _ListRow {
   final List<int> units = [];
@@ -1112,7 +1112,7 @@ bool framesPaintDynpro(Iterable<Uint8List> frames) {
 }
 
 /// [framesPaintDynpro]'s verdict per frame object, memoized like its walk
-/// (the fold asks it twice per turn; audit zcode P-05).
+/// (the fold asks it twice per turn).
 final Expando<bool> _framePaintsDynpro = Expando('frame paints dynpro');
 
 bool _paintsDynproFrame(Uint8List f) {
@@ -1174,7 +1174,7 @@ class _PlacedAtom {
   /// Spelled once per atom (it was re-interpolated per key, per access).
   late final String scope = '$container@$top,$left';
 
-  // The field-assembly keys of [_buildFields] as records (audit #15: 6–8
+  // The field-assembly keys of [_buildFields] as records (6–8
   // interpolated strings per atom per repaint): the same identities as the
   // `scope:area:block:…` strings they replace.
 
@@ -1610,8 +1610,8 @@ void _foldAppl(ScreenModel m, DiagItem it, _FoldState st) {
         st.expectPages = false;
       }
       // atoms ride 9/2 (dynpro paint) and 9/16 (tabstrip paint, APPL4);
-      // a frame the decode worker decoded arrives with them parsed
-      // (audit 2026-10-23 P-1), an inline-decoded one parses them here
+      // a frame the decode worker decoded arrives with them parsed,
+      // an inline-decoded one parses them here
       if (it.sid == 2 || it.sid == 16) {
         final host = st.path.host;
         for (final a in dyntAtomsOf(it).atoms) {

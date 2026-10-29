@@ -29,8 +29,7 @@ import 'table_controls.dart' show TcPlaneItem;
 
 /// The classic dynpro window height in rows — the geometry the window
 /// root's 16/12/6 carries on a default-sized SAP GUI (26 rows), the row
-/// filter of [RoutingFrame.rootOpen]'s last resort (audit 2026-10-23 §6.3;
-/// the reference client's ContainerTree reads the same height).
+/// filter of [RoutingFrame.rootOpen]'s last resort.
 const int classicScreenRows = 26;
 
 /// A field's write plane, resolved from its paint ([RoutingFrame.routingFor]).
@@ -134,7 +133,7 @@ class RoutingFrame {
   // The frame-level facts every field's [routingFor] reads — the root
   // open, the fallback scroll geometry (an O(geometries²) distinct scan),
   // each group's layer base — derived once per frame state, not once per
-  // field (audit #15); any fold into the frame drops them.
+  // field; any fold into the frame drops them.
   bool _rootKnown = false;
   Uint8List? _root;
   bool _scrollKnown = false;
@@ -211,7 +210,7 @@ class RoutingFrame {
       // item, else the classic height; a classic-height one stands in when
       // the window's own count matches none. That height was a bare `0x1a`
       // here, so a session resized past 26 rows lost its nested-write
-      // routing silently (audit 2026-10-23 §6.3). A paint with a 26-row
+      // routing silently. A paint with a 26-row
       // window resolves exactly as before: the same unique geometry, or
       // none when several share the height.
       final winRows = w != null && w.length >= 16

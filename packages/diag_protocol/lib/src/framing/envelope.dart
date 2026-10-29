@@ -158,9 +158,9 @@ final Uint8List eomBytes = Uint8List.fromList([itemEom]);
 
 /// Whether [haystack] holds [needle]'s code units (latin-1 bytes) as a
 /// contiguous run — the allocation-free marker test (`OLE_FLUSH_CALL`,
-/// `DP_GET`, `<SVARS>` …). It replaces `String.fromCharCodes(value)
-/// .contains(needle)`, which copied a whole multi-MB call value into a String
-/// for one substring test (audit #8 / zcode P-08). Same answer for every
+/// `DP_GET`, `<SVARS>` …). It replaces `String.fromCharCodes(value).
+/// contains(needle)`, which copied a whole multi-MB call value into a String
+/// for one substring test. Same answer for every
 /// input: a code unit over 0xff never matches a byte, as it never matched a
 /// latin-1 char either.
 bool containsBytes(Uint8List haystack, String needle) =>

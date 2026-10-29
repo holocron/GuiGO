@@ -1072,7 +1072,7 @@ String _text(Uint8List b) {
 }
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _parseCalendarDateRx = RegExp(r'^\d{8}$');
 final RegExp _fieldShowsDateRx = RegExp(r'^(?:\d{2}[./-]\d{2}[./-]\d{4}|\d{4}[./-]\d{2}[./-]\d{2})$');
 final RegExp _selectionDatesRx = RegExp(r'(?<!\d)\d{8}(?!\d)');

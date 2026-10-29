@@ -882,8 +882,7 @@ List<List<String>> barChartTableRows(Uint8List seg) {
 // ---------------------------------------------------------------------------
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call — [barChartDate] runs per date value of a stream
-// (audit 2026-10-17 N1).
+// compiled per call — [barChartDate] runs per date value of a stream.
 final RegExp _digitRunRx = RegExp(r'\d+');
 final RegExp _dateLayoutRx = RegExp(r'YYYY|MM|DD');
 final RegExp _blankRunRx = RegExp(r'\s+');

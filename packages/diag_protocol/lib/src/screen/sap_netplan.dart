@@ -1385,7 +1385,7 @@ class SapNetPlanTracker {
 }
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _pullUrlRx = RegExp(
     'SAPR3://[0-9A-Za-z]+',
   );

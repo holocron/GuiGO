@@ -83,7 +83,7 @@ const int tableInlineMax = cellSeg; // <= 250 B -> inline 03 04 rows
 // The RFC_TR container's token tags (two bytes, `<a> <b>` — spelled here as
 // the u16 `0xaabb`, the frontend_rfc.dart rfcTag* convention). The flush
 // call's reply and the DP / DOI / stream / listbox answers are all this
-// grammar (audit 2026-10-23 §6.6) — dp_cache.dart, doi.dart,
+// grammar — dp_cache.dart, doi.dart,
 // stream_paint.dart, html_viewer.dart and listbox_valueset.dart read and
 // write it through these names too.
 // ---------------------------------------------------------------------------

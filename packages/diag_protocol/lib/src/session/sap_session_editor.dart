@@ -1242,5 +1242,5 @@ final RegExp _editLineBreakRx = RegExp('\r\n|\r|\n');
 final Expando<SapTextEditorTracker> _editorTrackers = Expando('editorTracker');
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _pendingEditorControlsRx = RegExp(r'<CONTROL SHELLID\s*="([^"]*)"');

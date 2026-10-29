@@ -233,7 +233,7 @@ class RawInflate {
   /// fresh one (zlib's reset keeps only the allocations). Hand it back with
   /// [release]. [dictionary]'s bytes must not change while the process runs
   /// (its native copy is kept; the LZH zero window is constant).
-  /// Audit #9 / zcode P-06: every frame and every `03 05` cell built a
+  /// every frame and every `03 05` cell built a
   /// fresh context, 64 KB buffer and 32 KB dictionary copy.
   factory RawInflate.pooled({int windowBits = -15, Uint8List? dictionary}) {
     for (var i = _pool.length - 1; i >= 0; i--) {

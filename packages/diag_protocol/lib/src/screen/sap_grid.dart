@@ -192,7 +192,7 @@ class SapGridModel {
   /// grid's pane by). Memoized per rows list and per row: a built model's
   /// rows never change, and a build after an on-demand fetch shares the
   /// untouched row lists ([SapGridAssembler.build]) — the layout's scan
-  /// trimmed every cell of every row per composition (audit zcode P-03).
+  /// trimmed every cell of every row per composition.
   int get nonEmptyRowCount => _nonEmptyRows[rows] ??= () {
         var n = 0;
         for (final r in rows) {
@@ -324,8 +324,7 @@ class SapGridAssembler {
   String? owner;
 
   /// Bumped by every change [build] reads ([handles] is compared by
-  /// content): the built model is reused until the next one (audit #15 —
-  /// [SapSession.grids] rebuilt every grid, sorting every line, per read).
+  /// content): the built model is reused until the next one.
   int _version = 0;
   SapGridModel? _built;
   int _builtVersion = -1;
@@ -405,8 +404,7 @@ class SapGridAssembler {
   int _firstVisibleRow = 1;
 
   /// The [_version] bumps a scroll alone made: a build whose version moved
-  /// by these only reuses the derived maps of the last one (audit
-  /// 2026-10-17 N4).
+  /// by these only reuses the derived maps of the last one.
   int _scrollBumps = 0;
 
   bool get hasCatalog => _names.isNotEmpty;
@@ -445,8 +443,7 @@ class SapGridAssembler {
   /// Rows [first]..[last] (1-based) arrived whole in a DATAREQUEST reply
   /// whose line span covered them — a cell the provider omitted is ''.
   /// At most [maxCoveredSpan] rows from [first] are marked: the span is
-  /// the request's, which a wire count drove to ~10^9 rows (audit
-  /// 2026-10-17 P0-8).
+  /// the request's, which a wire count drove to ~10^9 rows.
   void markRowsCovered(int first, int last) {
     _version++;
     if (last - first >= maxCoveredSpan) last = first + maxCoveredSpan - 1;
@@ -598,7 +595,7 @@ class SapGridAssembler {
     return true;
   }
 
-  // The materialized whole rows, kept across builds (audit #3: every
+  // The materialized whole rows, kept across builds (every
   // build — a firstVisibleRow / DATAREQUEST hop — re-sorted every line and
   // copied every cell of every loaded row; an SE16-class grid a few
   // thousand rows in copied > 1 M cell references per 40-row scroll hop).

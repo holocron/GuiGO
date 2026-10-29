@@ -153,7 +153,7 @@ class NetPlanSplit extends NetPlanCell {
 }
 
 // Hoisted: the field-name test ran per CHARACTER of a layout expression,
-// compiling a RegExp each time (audit 2026-10-17 N1).
+// compiling a RegExp each time.
 final RegExp _fieldCharRx = RegExp(r'[A-Za-z0-9_]');
 final RegExp _blankRunRx = RegExp(r'\s+');
 

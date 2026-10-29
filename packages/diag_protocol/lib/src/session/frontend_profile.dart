@@ -67,7 +67,7 @@ final Uint8List winCodepageValue = _hexBytes('0000100e0134313130007574662d3800')
 /// its gui[15] oracle value for byte tests). Replayed as recorded, the
 /// bytes a live kernel accepts today; direction: a per-session counter
 /// shared with the wall answer once a recording-based A/B run grades a
-/// differing value as accepted (audit 2026-10-23 §6.5).
+/// differing value as accepted.
 const int winFrameCounterValue = 0x5d;
 
 /// The per-frame `16/04/*` identity atoms of a Windows client frame, in wire
@@ -1574,8 +1574,7 @@ bool _sameBytes(List<int> a, List<int> b) {
   return true;
 }
 
-// hoisted: a RegExp built per call is compiled per call (audit
-// 2026-10-17 N1)
+// hoisted: a RegExp built per call is compiled per call
 final RegExp _pageNameRx = RegExp(r'([A-Z_][A-Z0-9_]{2,})\x00');
 
 /// The client 16/9/15 for a tabstrip (reference client mode_envelope

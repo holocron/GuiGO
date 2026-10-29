@@ -271,7 +271,7 @@ class _SessionScreenState extends State<SessionScreen>
     _turnTick.addListener(_onTurnFrame);
     FocusManager.instance.addListener(_reclaimKeys);
     // the atlas failing to load (a missing asset) leaves the icons as
-    // text, not the app in an unhandled zone error (audit 2026-10-23 R-12)
+    // text, not the app in an unhandled zone error
     SapIconAtlas.load().then(
       (a) {
         if (mounted) setState(() => _icons = a);
@@ -422,7 +422,7 @@ class _SessionScreenState extends State<SessionScreen>
     // died under it, its connect timed out): answered 'cancel' and
     // dropped, as dispose does — left pending it parked that attempt's
     // connect, and _syncModalRoute read it as a modal to draw over the
-    // new logon, read-only and undismissable (audit 2026-10-23 R-11)
+    // new logon, read-only and undismissable
     final staleWall = _wallCompleter;
     if (staleWall != null && !staleWall.isCompleted) {
       staleWall.complete(WallOption.cancelLogon);
@@ -444,7 +444,7 @@ class _SessionScreenState extends State<SessionScreen>
       // the editors' view capacities are the previous logon's documents':
       // the kernel reuses shell ids across logons, so a same-screen
       // re-logon applied the old document's lines to the new one's
-      // LastVisibleLine (audit 2026-10-23 R-13)
+      // LastVisibleLine
       _editorViewLines.clear();
       _editorRegionLines.clear();
     });
@@ -515,7 +515,7 @@ class _SessionScreenState extends State<SessionScreen>
       // after the session is up and not awaited by it: a secure store
       // that refuses the write (Android Keystore after a restore, iOS
       // -34018) used to fail the logon SAP had just accepted, every Retry
-      // re-hitting it (audit 2026-10-23 R-10)
+      // re-hitting it
       if (!fromStore && _args.entry.storePassword && pw.isNotEmpty) {
         unawaited(_storeAcceptedPassword(pw));
       }
@@ -539,7 +539,7 @@ class _SessionScreenState extends State<SessionScreen>
   }
 
   /// Store the password SAP accepted ([_connectOnce]); a store failure is
-  /// a snack bar, never the logon's (audit 2026-10-23 R-10). The refused
+  /// a snack bar, never the logon's. The refused
   /// stored password stays marked refused until a write went through.
   Future<void> _storeAcceptedPassword(String pw) async {
     try {
@@ -621,8 +621,7 @@ class _SessionScreenState extends State<SessionScreen>
     session.browserLaunches.listen((launch) async {
       if (!mounted || !_current(session)) return;
       // the platform's own failure (no handler for the scheme, a plugin
-      // error) is a notice, not an unhandled zone error (audit
-      // 2026-10-23 R-12)
+      // error) is a notice, not an unhandled zone error
       String? why;
       try {
         why = await BrowserPlatform.openOrExplain(launch);
@@ -638,7 +637,7 @@ class _SessionScreenState extends State<SessionScreen>
     // already (ShellExecute 42), nothing waits on the user
     session.frontendFileOpens.listen((file) async {
       if (!mounted || !_current(session)) return;
-      String? why; // audit 2026-10-23 R-12: a viewer failure is a notice
+      String? why; // a viewer failure is a notice
       try {
         why = await openFrontendFile(file);
       } on Object catch (e) {
@@ -665,7 +664,7 @@ class _SessionScreenState extends State<SessionScreen>
       // the socket died under the multi-logon wall: the wall is answered
       // 'cancel' so the connect parked on it ends (and _connecting with
       // it — Retry was a silent no-op meanwhile) and dropped, so no stale
-      // completer outlives this logon (audit 2026-10-23 R-11)
+      // completer outlives this logon
       final wall = _wallCompleter;
       if (wall != null && !wall.isCompleted) {
         wall.complete(WallOption.cancelLogon);
@@ -2153,7 +2152,7 @@ class _SessionScreenState extends State<SessionScreen>
   /// with a key stable across compositions of the same window (kind,
   /// shell, container — a repeat, two gauges of one container, numbered
   /// in order): a sash drag's re-layout finds each one's built content by
-  /// it (audit 2026-10-23 P-7).
+  /// it.
   static List<_NestedRegion> _nestedOn(List<ScreenRegion> all, CellRect? dyn) {
     if (dyn == null) return const [];
     final seen = <String, int>{};
@@ -2199,7 +2198,7 @@ class _SessionScreenState extends State<SessionScreen>
   /// session's live composition; the screen's own state does not change
   /// until the finger lifts ([_sashDragEnded]) — a setState per step bumped
   /// the generation, recomposed the window and rebuilt EVERY pane with its
-  /// hosted trees, grids and editors (audit 2026-10-23 P-7; the
+  /// hosted trees, grids and editors (the
   /// ScreenComposer.onDockResize pattern: layout follows the finger, the
   /// state the lift).
   final ValueNotifier<(SapSession, int)?> _sashDrag = ValueNotifier(null);
@@ -2278,7 +2277,7 @@ class _SessionScreenState extends State<SessionScreen>
           // the nested regions' content, built ONCE per pane build and
           // keyed by region: a sash drag hands the same widgets to new
           // overlay rects, so the hosted trees / grids / pictures re-lay
-          // out and never rebuild (audit 2026-10-23 P-7)
+          // out and never rebuild
           final border = BoxDecoration(
             border: Border.all(
               color: Theme.of(context).colorScheme.outlineVariant,
@@ -2397,7 +2396,7 @@ class _SessionScreenState extends State<SessionScreen>
     String? editorShell; // the ABAP editor the pane shows
     // the generation's snapshot ([_viewOf]): every pane of a composed
     // window read every model afresh — each read rebuilds every tree and
-    // grid of the session (audit #15)
+    // grid of the session
     final view = _session == null ? null : _viewOf(_session!);
     if (shell != null) {
       final tree = view?.trees[shell];
@@ -4753,7 +4752,7 @@ class _SessionView {
   };
 
   /// The composed base window / popup: a composition walks the whole
-  /// control registry (audit #15), so once per generation, not per build.
+  /// control registry, so once per generation, not per build.
   late final ({List<ScreenRegion> regions, List<SplitterSash> sashes}) _base =
       session.baseComposition;
   late final List<ScreenRegion> regions = _base.regions;

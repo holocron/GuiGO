@@ -52,7 +52,7 @@ class ValueSetDiskCache {
   /// Write the cache now. A write the platform refuses (a full disk, a
   /// preferences store gone read-only) is dropped — the cache is a
   /// convenience, and the Timer in [_schedule] has no one to hand the
-  /// error to: it was an unhandled zone error (audit 2026-10-23 R-12).
+  /// error to: it was an unhandled zone error.
   /// The failure is kept in [lastWriteError] for a caller that cares.
   Future<void> flush() async {
     _pending?.cancel();

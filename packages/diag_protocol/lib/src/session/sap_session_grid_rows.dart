@@ -62,7 +62,7 @@ extension SapSessionGridRows on SapSession {
     // the Java GUI asks 36 rows of SE16's 503-cell rows (a recorded session)
     final optRows = opt != null && opt > 0 ? -(-opt ~/ stride) : 0;
     // capped: the OptPacket is a wire number — a hostile one asked ~10^9
-    // lines and marked them all covered (audit 2026-10-17 P0-8)
+    // lines and marked them all covered
     var want = count ?? (optRows > _minFetchRows ? optRows : _minFetchRows);
     if (want > maxFetchRows) want = maxFetchRows;
     var last = fromRow + (want < 1 ? 1 : want) - 1;

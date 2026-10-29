@@ -71,8 +71,7 @@ extension SapSessionListbox on SapSession {
     );
     await _send(clientFrame(items));
     // the reply: the push(es), then the repaint — within one deadline, not
-    // per turn: 60 turns of 10 s each held the session 10 minutes (audit
-    // 2026-10-17 N12)
+    // per turn: 60 turns of 10 s each held the session 10 minutes
     final until = DateTime.now().add(const Duration(minutes: 2));
     for (var i = 0; i < 60; i++) {
       final left = until.difference(DateTime.now());

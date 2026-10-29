@@ -1,7 +1,7 @@
 part of 'sap_session.dart';
 
-/// The ceilings the transport holds a peer to (audit 2026-10-13 R-01, R-02,
-/// R-04, R-12). The NI deframer bounds ONE frame (64 MB); these bound what
+/// The ceilings the transport holds a peer to.
+/// The NI deframer bounds ONE frame (64 MB); these bound what
 /// a peer can make the client buffer or read in aggregate. A breach is a
 /// broken or hostile peer, never a real kernel: the transport is dropped
 /// and the session fails visibly ([NiProtocolException], [SapSession.closed]).
@@ -69,8 +69,7 @@ class TransportLimits {
   /// traffic says nothing about the idle cadence and is not learned; nor
   /// is one idle gap alone — two consecutive pings must agree (an
   /// unsolicited push shortly before a ping measured a "cadence" of
-  /// seconds, and a ping read on resume after a suspension one of hours:
-  /// audit 2026-10-17 R1).
+  /// seconds, and a ping read on resume after a suspension one of hours).
   final Duration watchdogPeriod;
   final int silentPingIntervals;
   final Duration minPingInterval;
@@ -81,18 +80,18 @@ class TransportLimits {
 
   /// How long a watchdog trip waits before it condemns the connection:
   /// a tick overdue after the app was suspended runs before the socket
-  /// delivers what queued meanwhile (audit 2026-10-17 R6).
+  /// delivers what queued meanwhile.
   final Duration silenceRecheck;
 
-  /// How long one socket flush may take before the peer is declared gone
-  /// (audit 2026-10-23 R-1): a dispatcher that ACKs TCP but stops reading
+  /// How long one socket flush may take before the peer is declared gone:
+  /// a dispatcher that ACKs TCP but stops reading
   /// (a wedged work process, a hung relay) holds the write forever — no
   /// receive deadline can start on a request that never left, and `busy`
   /// disables the idle watchdog meanwhile. A real kernel drains a frame
   /// in milliseconds; a request-stream chunk is under 30 kB.
   final Duration writeDeadline;
 
-  /// Windows the mode table holds open at once (audit 2026-10-23 R-2):
+  /// Windows the mode table holds open at once:
   /// every window owns a full per-window state (its DP cache, trees,
   /// grids, editors), and a stream cycling fresh mode bytes would retain
   /// one per byte. A real kernel caps a logon at six modes. Past the cap
@@ -100,8 +99,8 @@ class TransportLimits {
   /// its parked frames dropped — before the new one is born.
   final int openWindows;
 
-  /// External calls that may wait behind the running action (audit
-  /// 2026-10-23 R-5): a UI that enqueues per keystroke while the first
+  /// External calls that may wait behind the running action:
+  /// a UI that enqueues per keystroke while the first
   /// action stalls (up to the 10-minute dialog step) would otherwise
   /// replay hundreds of stale rounds afterwards. A call past the depth is
   /// refused at once ([ActionQueueFullError]); a call made from inside the
@@ -109,15 +108,15 @@ class TransportLimits {
   final int actionQueueDepth;
 
   /// The bytes a window's chunked automation call may gather before its
-  /// sid-0 closer ([AutomationStream.maxPendingBytes]; audit 2026-10-23
-  /// R-6): a kernel streaming chunks that never close would balloon the
+  /// sid-0 closer ([AutomationStream.maxPendingBytes]):
+  /// a kernel streaming chunks that never close would balloon the
   /// stream for the logon's life. Past it the stream is abandoned and
   /// counted as an answer failure.
   final int automationStreamBytes;
 }
 
 /// An external call was refused because [TransportLimits.actionQueueDepth]
-/// calls already wait behind the running action (audit 2026-10-23 R-5).
+/// calls already wait behind the running action.
 class ActionQueueFullError extends StateError {
   ActionQueueFullError(super.message);
 }
@@ -161,7 +160,7 @@ extension SapSessionLiveness on SapSession {
     // an action in flight (a 6–9 min report the server is still computing
     // on, probed on resume from the background): its own wait judges the
     // silence, as the idle watchdog leaves it to — the probe reports the
-    // socket state only (audit 2026-10-23 R-3). The logon ladder is not
+    // socket state only. The logon ladder is not
     // such an action: it runs under its own deadline, and a peer gone
     // silent under it is condemned here as before.
     if (busy && !_bootstrapping) return true;
@@ -190,16 +189,15 @@ extension SapSessionLiveness on SapSession {
   int get parkedFramesDropped => _parkedDropped;
 
   /// Background windows retired to make room for a newborn one
-  /// ([TransportLimits.openWindows]; audit 2026-10-23 R-2).
+  /// ([TransportLimits.openWindows]).
   int get windowsRetired => _windowsRetired;
 
   /// The bytes of the unread inbox as the ceiling counts them
-  /// ([TransportLimits.inboxBytes]; a requeued frame counts again —
-  /// audit 2026-10-23 R-8).
+  /// ([TransportLimits.inboxBytes]; a requeued frame counts again).
   int get bufferedInboxBytes => _inboxBytes;
 
-  /// Flush [s] within [TransportLimits.writeDeadline] (audit 2026-10-23
-  /// R-1): a peer that stops reading holds the flush forever — it is
+  /// Flush [s] within [TransportLimits.writeDeadline]:
+  /// a peer that stops reading holds the flush forever — it is
   /// declared gone like a silent one ([ConnectionLostError], the transport
   /// dropped, [closed] fired). [bytes] names the write in the message.
   Future<void> _flushWithin(Socket s, int bytes) async {
@@ -280,7 +278,7 @@ extension SapSessionLiveness on SapSession {
   /// hand-back's parked frames, a request stream's non-receipt, the frames
   /// behind a route's NI_PONG): counted again — [_inboxTaken] counted it
   /// out when it was first read, and a re-add that did not re-count left
-  /// the ceiling soft after every hand-back (audit 2026-10-23 R-8). No
+  /// the ceiling soft after every hand-back. No
   /// ceiling check here: the frames were buffered within it once, and the
   /// next listener add judges the total.
   void _inboxRequeue(Uint8List payload) {
@@ -418,7 +416,7 @@ extension _SapSessionParked on SapSession {
   }
 
   /// Room in the mode table for a window about to be born
-  /// ([TransportLimits.openWindows]; audit 2026-10-23 R-2): while the table
+  /// ([TransportLimits.openWindows]): while the table
   /// is full, the OLDEST background window (birth order; never the live
   /// one, the newborn's parent) is retired — closed on the client side
   /// like a `0m 09` of a background window, its parked frames dropped,

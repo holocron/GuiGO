@@ -1053,7 +1053,7 @@ class BarChartPainter extends CustomPainter {
     if (cache == null) tp.dispose();
   }
 
-  /// A drag frame repaints the whole surface (audit 2026-10-23 P-10):
+  /// A drag frame repaints the whole surface:
   /// the table (dy), the header ribbon (dx) and the time area (dx and
   /// dy) are three regions of ONE picture, culled to the visible span and
   /// rows and drawn from cached label layouts ([labels]), so the frame

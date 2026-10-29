@@ -178,7 +178,7 @@ String clientOsVersion(String operatingSystem, String operatingSystemVersion) {
 }
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _clientOsVersionRx = RegExp(r'^Version\s+');
 final RegExp _clientOsVersionRx2 = RegExp(r'\(Build\s+');
 final RegExp _clientOsVersionRx3 = RegExp(r'[^\x20-\x7e]');

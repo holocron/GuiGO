@@ -61,7 +61,7 @@ class _ConnectionListScreenState extends State<ConnectionListScreen> {
       ),
     );
     if (saved == null) return;
-    // the entry first (audit 2026-10-23 R-14): the list on the screen is
+    // the entry first: the list on the screen is
     // what the store holds, or the store's failure is told and the screen
     // keeps the entry as it was — a password saved for an edit that was
     // never stored would have been the stale entry's
@@ -115,8 +115,7 @@ class _ConnectionListScreenState extends State<ConnectionListScreen> {
 
   /// Run a store write; false, with [what] and the error on a snack bar,
   /// when it threw. A store error used to be an unhandled zone error (the
-  /// menu drops these futures) while the list kept stale data
-  /// (audit 2026-10-23 R-14).
+  /// menu drops these futures) while the list kept stale data.
   Future<bool> _stored(Future<void> Function() write, String what) async {
     try {
       await write();
@@ -166,7 +165,7 @@ class _ConnectionListScreenState extends State<ConnectionListScreen> {
       for (final x in _entries)
         if (x.id != e.id) x,
     ];
-    // the entry first, its password after (audit 2026-10-23 R-14): the
+    // the entry first, its password after: the
     // other order erased the password and, when saveAll failed, left the
     // entry — without its password. A password delete that fails leaves
     // an orphan in the secure store, told, not an entry
@@ -193,7 +192,7 @@ class _ConnectionListScreenState extends State<ConnectionListScreen> {
       cancelLabel: 'Cancel',
     );
     if (pw == null || pw.isEmpty || !mounted) return;
-    // audit 2026-10-23 R-14: a refused write is told, not thrown away
+    // a refused write is told, not thrown away
     if (!await _stored(
       () => store.savePassword(e.id, pw),
       'Could not store the password',

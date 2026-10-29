@@ -3998,7 +3998,7 @@ List<Rect> _tcCellRects(
 /// control's rows and grid lines, the scroll origin and each column's
 /// place and width, O(columns) — not the columns x lines rectangles,
 /// which every turn built twice (the new list, and the old one to compare
-/// against) for a control that had not changed (audit 2026-10-23 P-10).
+/// against) for a control that had not changed.
 class _TcGridPainter extends CustomPainter {
   _TcGridPainter(
     this.tc,

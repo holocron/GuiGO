@@ -3,7 +3,7 @@
 /// session's side folds (grids, charts, NetPlans, canvases, the tree
 /// binder, the editor) each asked "does this turn name a program?" and
 /// every action round "does it paint?" by re-scanning every item of every
-/// frame — per frame, per fold, per round (audit #6 / zcode P-05). A
+/// frame — per frame, per fold, per round. A
 /// frame's items never change once walked, so one scan answers them all.
 library;
 

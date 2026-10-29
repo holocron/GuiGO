@@ -185,7 +185,7 @@ int? rtfVisibleCharCount(Uint8List rtf) {
   return n;
 }
 
-// hoisted: [_cut] runs per traced verb value (audit 2026-10-17 N1)
+// hoisted: [_cut] runs per traced verb value
 final RegExp _blankRunRx = RegExp(r'\s+');
 
 String _cut(String v) {

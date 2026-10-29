@@ -311,7 +311,7 @@ Uint8List listCursorValue(int line, int col) => Uint8List.fromList([
 bool isSapGraphicsClass(String cls) => _isSapGraphicsClassRx.hasMatch(cls.trim());
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _isSapGraphicsClassRx = RegExp(
   r'^SAPGUI\.(?:NetPlan|BarChart)Graphics\.\d+$',
   caseSensitive: false,

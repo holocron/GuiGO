@@ -32,7 +32,7 @@ class Rec {
       : String.fromCharCodes(raw, start, end < raw.length ? end : raw.length);
 
   // The fields are decoded once per record: a flush's PARAMS / VARS rows
-  // are read by every side model of the call (audit #8) and a record's
+  // are read by every side model of the call and a record's
   // bytes never change.
   late final String name =
       width == paramsW ? _t(8, 39).trimRight() : _t(0, 32).trimRight();
@@ -90,7 +90,7 @@ String _argText(Uint8List b) {
 
 /// Slice a decompressed SVARS blob into fixed-width records — none for a
 /// non-positive [width] (a wire descriptor of 0 divided by zero, the flush
-/// went unanswered: audit 2026-10-17 P0-1).
+/// went unanswered).
 List<Rec> parseSvars(Uint8List b, int width) {
   if (width <= 0) return const [];
   final n = b.length ~/ width;
@@ -143,8 +143,7 @@ String? _nameBefore(Uint8List b, int end) {
 /// from the preceding `03 02` descriptor, blob LZH-decoded. A column named
 /// in [except] is recorded with an EMPTY blob, never inflated — its
 /// presence is all the caller reads (a DP push's RFC_QUEUE, multi-MB, is
-/// inflated by the DP cache, not by every flush parse: audit
-/// 2026-10-17 N6).
+/// inflated by the DP cache, not by every flush parse).
 Map<String, SvarsColumn> rfcColumns(Uint8List rfc,
     {Set<String>? only, Set<String>? except}) {
   final out = <String, SvarsColumn>{};
@@ -318,7 +317,7 @@ Uint8List buildReplySvars(Uint8List callsv, Map<int, Object> outValues, int widt
   final out = BytesBuilder(copy: false);
   // the value field of a VARS row: everything past the 42-B header — none
   // for a (hostile) narrower row, whose padRight/substring went negative
-  // and left the flush unanswered (audit 2026-10-17 P0-2)
+  // and left the flush unanswered
   final vw = width > 42 ? width - 42 : 0;
   for (final r in recs) {
     final isOut = r.name == '_RESULT' || r.name == '_RESULT_QUEUEONLY';
@@ -367,7 +366,7 @@ void _blank(BytesBuilder out, int width) {
 List<String> parseSvarsItems(Uint8List rfc) {
   // the first `<SVARS>` and the first `</SVARS>` after it bound the match
   // `<SVARS>(.*?)</SVARS>` finds (non-greedy, dotAll): only that region is stringified,
-  // not the whole multi-MB call value per parse (audit #8)
+  // not the whole multi-MB call value per parse
   final open = indexOfBytes(rfc, '<SVARS>');
   if (open < 0) return [];
   final close = indexOfBytes(rfc, '</SVARS>', open + 7);
@@ -390,7 +389,7 @@ String _xmlUnescape(String s) => s
 /// The character a decimal `&#N;` reference [m] (group 1: the digits)
 /// names — the reference left as it stands when N is no code point: a
 /// 25-digit or past-U+10FFFF reference threw out of the flush parse and
-/// left the flush unanswered (audit 2026-10-17 P0-3).
+/// left the flush unanswered.
 String _xmlCharRef(Match m) {
   final v = int.tryParse(m.group(1)!);
   return v != null && v <= 0x10FFFF ? String.fromCharCode(v) : m.group(0)!;

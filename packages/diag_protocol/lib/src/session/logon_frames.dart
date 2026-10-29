@@ -225,7 +225,7 @@ Uint8List dpTailWords(int a, int b) {
 /// The two connection words of the DP head's tail ([dpTailWords]): the
 /// reference fixture's — one recording rig's process words (the Java GUI's
 /// own heap pointers, by their shape), replayed identically for every
-/// user and session (audit 2026-10-23 §6.1). Kept because they are the
+/// user and session. Kept because they are the
 /// bytes the kernel accepts today: the Windows GUI's own head carries
 /// zeros there and is refused on a foreign connection, so "nothing" is
 /// not an option and no live oracle has yet graded a synthesized pair.
@@ -612,8 +612,8 @@ class LogonGeometry {
 }
 
 /// The SAPMSYST 0020 logon dynpro: RSYST-BCODE's plane (login.dart
-/// loginPlanes0020, the live paint's when [logonItems] is handed one —
-/// audit 2026-10-23 §5.2), the cursor's and the OK event's field.
+/// loginPlanes0020, the live paint's when [logonItems] is handed one),
+/// the cursor's and the OK event's field.
 LoginPlane _bcode(Map<String, LoginPlane> planes) =>
     planes['RSYST-BCODE'] ?? loginPlanes0020['RSYST-BCODE']!;
 
@@ -657,8 +657,8 @@ Uint8List logonMetricsXml(
 /// windowsFirstRoundAtoms: mode 0's first round IS the logon submit, so no
 /// later round of the logon window owes them), 16/4/23 TOOLBAR_HEIGHT,
 /// 16/4/22 SCROLLBAR_WIDTH, the Windows codepage, the logon-only identity
-/// 16/4/31 / 32 / 33 / 37 (the [profile]'s EmulatedGuiProfile
-/// .logonIdentity; the host's — EmulatedGuiProfile.host — when null) then
+/// 16/4/31 / 32 / 33 / 37 (the [profile]'s EmulatedGuiProfile.
+/// logonIdentity; the host's — EmulatedGuiProfile.host — when null) then
 /// the per-frame
 /// [winIdentity], the OK event, 16/12/8 the window pixels (the session
 /// window's — [window], the reference 853 x 1880 unless sized), the
@@ -676,7 +676,7 @@ Uint8List logonMetricsXml(
 /// [paint]: the connect reply's frames (the kernel's 0020 paint) — the
 /// credential atoms, the cursor and the OK event then address the fields
 /// where THAT paint places them when it differs from the recorded planes
-/// (login.dart [loginPlanes], audit 2026-10-23 §5.2); null, or a paint
+/// (login.dart [loginPlanes]); null, or a paint
 /// agreeing with the table, submits at the recorded planes.
 List<Uint8List> logonItems({
   String? client,

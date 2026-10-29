@@ -269,7 +269,7 @@ Uint8List valueHelpSelectOptionsAnswer(
   }
   final (_, (dw, _), _) = dpColumnCells(request, 'DATAASC');
   // clamped: [end] sums wire u32s — a hostile FORMAT asked for gigabytes
-  // per row (audit 2026-10-17 P0-7); the real record is 573 B
+  // per row; the real record is 573 B
   final width = min(dw > 0 ? dw : end, maxSelectOptionsRecord);
   final data = Uint8List(width * rows.length)
     ..fillRange(0, width * rows.length, 0x20);

@@ -540,5 +540,5 @@ int _indexOf(Uint8List hay, List<int> needle) {
 }
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _clientTablePullUrlRx = RegExp('SAPR3://[0-9A-Za-z]+');

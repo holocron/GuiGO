@@ -251,7 +251,7 @@ class LzhInflater {
             declared + 1 < limit ? declared + 1 : limit, _deflateBound(head.length)),
         limit);
     // pooled: a reset context, not a fresh one + 32 KB dictionary copy per
-    // object (every frame and every `03 05` cell; audit #9 / P-06)
+    // object (every frame and every `03 05` cell)
     _inf = RawInflate.pooled(windowBits: -15, dictionary: zeroWindowDict);
     _feed(Uint8List.sublistView(head, csHeaderLen));
   }
@@ -1208,7 +1208,7 @@ Uint8List _fixedHuffmanLiteral(Uint8List data) {
 /// rejects exactly the STORED-block misalignment the verify exists for; a
 /// rejected emission is re-encoded (fixed Huffman, then literals). An
 /// emission that is one Huffman block cannot hold one and ships unverified
-/// ([_needsSelfVerify], audit 2026-10-23 P-3). Debug builds
+/// ([_needsSelfVerify]). Debug builds
 /// (asserts on) also cross-check every accepted emission with the pure-Dart
 /// reference decoder. Without native zlib the literal encoder is the whole
 /// compressor, and its output is verified with the reference decoder — a
@@ -1275,7 +1275,7 @@ Uint8List lzhCompress(Uint8List data, {int level = 6}) {
 /// first block is also its last (BFINAL, bit 0) and is Huffman-coded (BTYPE
 /// 01 / 10) cannot hold a STORED block anywhere: it is shipped unverified,
 /// trusting the deflater as every multi-block emission's verified bytes
-/// trust it (audit 2026-10-23 P-3). An emission whose first block is not
+/// trust it. An emission whose first block is not
 /// final may hold a STORED block further on, which only a decode finds:
 /// it is verified as before — the per-payload gate is not a per-encoder
 /// verdict (an incompressible payload gets a STORED block from any level

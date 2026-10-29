@@ -718,7 +718,6 @@ String _unescape(String s) =>
     s.replaceAllMapped(_unescapeRx, (m) {
       final e = m.group(1)!;
       // a reference past U+10FFFF (or too long to parse) stays as written
-      // (audit 2026-10-17 P0-3)
       if (e.startsWith('#')) {
         final v = e.startsWith('#x')
             ? int.tryParse(e.substring(2), radix: 16)
@@ -1009,7 +1008,7 @@ Uint8List? _partFor(String src, String base, Map<String, Uint8List> parts) {
 }
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _titleOfRx = RegExp(
         r'<title[^>]*>(.*?)</title>',
         caseSensitive: false,

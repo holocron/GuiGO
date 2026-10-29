@@ -152,7 +152,7 @@ class StreamPaintAssembler {
       if (!it.isAppl || it.id != 8) continue;
       // the item's view: [_buf] copies what it keeps, and the classifier
       // keeps nothing (a copy per id-8 value, the big non-paint ones
-      // discarded, was the double copy of audit #10)
+      // discarded, was the double copy)
       final v = it.value;
       switch (_state.feed(it.sid, v)) {
         case PaintPart.head:

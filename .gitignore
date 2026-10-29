@@ -44,7 +44,6 @@ apps/guigo/android/key.properties
 tools/
 **/tool/
 .zcode/
-*audit*.md
 **/failures/
 *.log
 .env*

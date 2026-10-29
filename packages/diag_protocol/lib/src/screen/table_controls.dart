@@ -351,7 +351,7 @@ bool _indexArrayAt(Uint8List b, int n, int off) {
 }
 
 /// Whether an [_indexArrayAt] array starts at some offset in [from]..[to]
-/// — in ONE pass per byte parity (audit #15: a probe per offset re-read
+/// — in ONE pass per byte parity (a probe per offset re-read
 /// up to n words each, quadratic on a hostile header). The words 1, 2, …,
 /// n are distinct, so a broken run can only restart on a word 1.
 bool _indexArrayIn(Uint8List b, int n, int from, int to) {
@@ -668,7 +668,7 @@ class TcBuilder {
     if (recs.isEmpty) return null;
     final named = recs[lineTypes[line]];
     if (named != null) return named;
-    // one pass, no sorted key copy per painted line (audit #10): the
+    // one pass, no sorted key copy per painted line: the
     // greatest line <= [line], else the smallest
     int? below, first;
     for (final l in recs.keys) {
@@ -767,7 +767,7 @@ class TcBuilder {
 }
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _parseTcTooltipsRx = RegExp(
   r'<DefaultTooltip>(.*?)</DefaultTooltip>',
   dotAll: true,

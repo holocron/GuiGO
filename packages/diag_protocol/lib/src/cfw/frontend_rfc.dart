@@ -383,5 +383,5 @@ List<Uint8List> frontendRfcReplyItems(int step, Uint8List reply,
     ];
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _controlCharsRx = RegExp(r'[\x00-\x1f]');

@@ -1,5 +1,4 @@
-/// A fixed-capacity, append-only line log: the session's trace (audit #12 —
-/// the trace grew for the logon's whole life).
+/// A fixed-capacity, append-only line log: the session's trace.
 library;
 
 import 'dart:collection';

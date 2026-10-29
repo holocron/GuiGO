@@ -403,5 +403,5 @@ Uint8List _charCellGeometry(ActionContext ctx) {
 }
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _pageNameRx = RegExp(r'([A-Z_][A-Z0-9_]{2,})\x00');

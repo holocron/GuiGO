@@ -28,7 +28,7 @@ class LoginPlane {
 
 /// The SAPMSYST/0020 logon paint (block=1 col=20; LANGU is at ROW 5, not 4):
 /// the RECORDED planes of the kernel logon dynpro's four input fields, the
-/// first-round default of the credential submit (audit 2026-10-23 §5.2).
+/// first-round default of the credential submit.
 /// Provenance: the reference client fixture's 0020 paint; the same cells on every
 /// kernel of the corpus (a recorded session srv[0] paints
 /// RSYST-MANDT / BNAME / LANGU at rows 0 / 2 / 5, col 20, mlen 3 / 12 / 2).
@@ -94,7 +94,7 @@ bool _samePlane(LoginPlane a, LoginPlane b) =>
 /// recorded table, the first-round default — with a field's plane
 /// replaced by the live one where the 0020 [paint] (the connect reply's
 /// frames) places that field ELSEWHERE; null / no logon paint / a paint
-/// agreeing with the table leaves the table (audit 2026-10-23 §5.2).
+/// agreeing with the table leaves the table.
 Map<String, LoginPlane> loginPlanes(List<Uint8List>? paint) {
   if (paint == null) return loginPlanes0020;
   final live = loginPlanesFromPaint(paint);
@@ -360,13 +360,13 @@ const int _winWallOptionWidth = 0x4e;
 /// 11, OPT3 at 16 in a recorded session raw[2] and the the test system
 /// paint, a recorded session srv[0]); a live wall's rows come
 /// from its MULTI_LOGON_OPT atoms ([readWall]), this pair rides only an
-/// answer built without a paint (audit 2026-10-23 §6.2).
+/// answer built without a paint.
 const int _wallDefaultOnRow = 0x0b, _wallDefaultOffRow = 0x10;
 
 /// The wall popup of the reference wall paint: 18 visible rows x 82 cols
 /// (its 16/12/7 `0012 0052`, a recorded session srv[0]) —
 /// what the recorded answer's SES dims and SCROLL_INFOS2 below are the
-/// echo of (audit 2026-10-23 §6.2).
+/// echo of.
 const (int, int) recordedWallPopupCells = (18, 82);
 
 /// The recorded wall answer's SES dims (value bytes 14 / 15: the popup's
@@ -394,8 +394,7 @@ const List<int> recordedWallScrollInfos = [17, 80, 17, 80, 0, 0, 18, 82];
 /// connection-side flush counter, which varies per frame in the oracle
 /// (0x5d, 0x6d, 0x5bd, 0x158 — reference client raw_services._GOS_415) and the
 /// kernel ignores. Replayed as recorded; direction: one per-session
-/// counter for both once an A/B run pins that the kernel ignores it
-/// (audit 2026-10-23 §6.5).
+/// counter for both once an A/B run pins that the kernel ignores it.
 const int wallFrameCounterValue = 109;
 
 /// The kernel cell the wall answer's SES dims are sized with when the
@@ -432,7 +431,7 @@ Uint8List _u32be(List<int> vals) {
 /// selection (chosen on, previously-on siblings cleared) and the cursor
 /// on the chosen row.
 ///
-/// The popup figures (audit 2026-10-23 §6.2): the recorded answer's
+/// The popup figures: the recorded answer's
 /// ([recordedWallSesDims], [recordedWallPopupXy], [recordedWallScrollInfos])
 /// are the first-round default — the bytes a live kernel accepts today;
 /// the live paint's ([wall]'s popup geometry and SES, [readWall]) replace

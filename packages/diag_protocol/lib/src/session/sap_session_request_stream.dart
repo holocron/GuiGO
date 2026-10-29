@@ -95,7 +95,7 @@ extension _SapSessionRequestStream on SapSession {
       }
       final ackAt = chunkAckStep(frame);
       if (ackAt == null) {
-        _inboxRequeue(payload); // counted again (audit 2026-10-23 R-8)
+        _inboxRequeue(payload); // counted again
         final err = diagErrorInfo(frame);
         throw _StreamAnsweredOtherwise('request stream: the server answered '
             'chunk ${k + 1}/$n with a frame that is no 16/8/5 receipt'

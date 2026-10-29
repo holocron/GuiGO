@@ -11,7 +11,7 @@ import 'features/session/type_ahead.dart';
 Future<void> main() async {
   // every error nobody caught — a framework error in a build, a dropped
   // future's failure, a platform callback's — is logged, never fatal:
-  // the app stays up with its session (audit 2026-10-23 R-12). The
+  // the app stays up with its session. The
   // binding is initialized inside the zone too: runApp in another zone
   // than the binding's is a framework warning
   runZonedGuarded<void>(
@@ -33,7 +33,7 @@ Future<void> main() async {
 /// ([logUncaught]); the framework's keeps its own report
 /// ([FlutterError.presentError]: the red box in debug, the console dump)
 /// and the platform's reports the error handled so the engine does not
-/// terminate the isolate (audit 2026-10-23 R-12).
+/// terminate the isolate.
 void installErrorHandlers() {
   final present = FlutterError.onError ?? FlutterError.presentError;
   FlutterError.onError = (details) {

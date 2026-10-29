@@ -140,8 +140,8 @@ extension SapSessionLayout on SapSession {
   /// action that opened it — the covered window's docks and grids stay in
   /// [regions]). Empty without a popup.
   ///
-  /// A second [composeScreen] per generation beside [baseComposition]
-  /// (audit 2026-10-23 P-10 asked for one pass): kept apart on purpose —
+  /// A second [composeScreen] per generation beside [baseComposition]:
+  /// kept apart on purpose —
   /// the two compose a different screen model ([baseScreen] / [screen]),
   /// window, area and shell set, so no facts, boxes or carve are shared
   /// between them and one walk would do both pipelines in turn. A view
@@ -249,8 +249,8 @@ extension SapSessionLayout on SapSession {
   /// by the tables pushed since (the memoized list leads this one: an
   /// expansion's children, an update push), rebuilt only when the list
   /// restarted (a root push dropped the earlier node tables, an ended
-  /// internal mode took its pushes away) — audit #15: every read of
-  /// [trees] re-applied every push of every tree; audit perf5: every push
+  /// internal mode took its pushes away) every read of
+  /// [trees] re-applied every push of every tree: every push
   /// rebuilt the tree from every table. A view keys on the object and its
   /// [SapTreeModel.revision].
   SapTreeModel _treeModelOf(
@@ -402,7 +402,7 @@ extension SapSessionLayout on SapSession {
         _gridAsm.remove(sh);
       }
       // …and so do the cached pushes of its controls; the registries stay
-      // bounded (audit #12)
+      // bounded
       _ea
         ..evictDeadPushes()
         ..capControlRegistry();
@@ -1256,5 +1256,5 @@ String? areaContainerPx(
 };
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _digitsOnlyRx = RegExp(r'^\d{1,9}$');

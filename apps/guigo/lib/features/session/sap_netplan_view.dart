@@ -10,7 +10,7 @@ import 'sap_graph_view.dart' show jnetColor;
 /// paints: the net plan's and the Adobe form's painters lay a label out
 /// once and draw it on every repaint after — a zoom click, a field tap
 /// (`shouldRepaint` on zoom / selection) draws the page's texts without
-/// laying any of them out again (audit 2026-10-23 P-8). The chart
+/// laying any of them out again. The chart
 /// painters' [ChartLabelCache] (sap_chart_view.dart) is the same pattern
 /// keyed on text, colour, size and width alone; this one keys on the
 /// whole [TextStyle], the alignment, the line count and the min / max
@@ -113,8 +113,7 @@ class _SapNetPlanViewState extends State<SapNetPlanView> {
   }
 
   /// The laid-out texts of the graph, kept across paints: a zoom click
-  /// or a scroll frame draws them, it lays none out again (audit
-  /// 2026-10-23 P-8).
+  /// or a scroll frame draws them, it lays none out again.
   final _labels = StyledLabelCache();
 
   /// How many text layouts the graph made (tests read it).
@@ -989,8 +988,8 @@ class NetPlanPainter extends CustomPainter {
   final NetPlanScene scene;
   final double zoom;
 
-  /// The view's laid-out texts, kept across paints (audit 2026-10-23
-  /// P-8); null lays each out per paint (a painter built on its own).
+  /// The view's laid-out texts, kept across paints;
+  /// null lays each out per paint (a painter built on its own).
   final StyledLabelCache? labels;
 
   /// The overview's frame of the visible part (control points).

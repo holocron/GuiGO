@@ -324,5 +324,5 @@ String _clip(String s, [int n = 60]) {
 }
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _digitsOnlyRx = RegExp(r'^\d{1,9}$');

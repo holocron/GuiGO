@@ -203,5 +203,5 @@ Set<String> foldGridPacketCall(
 }
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _letterRx = RegExp('[A-Za-z]');

@@ -4,7 +4,7 @@
 /// the result seeds the frame's decode memo ([seedFrameDecode]), so every
 /// reader of the frame — the router, the fold, the answer builders — gets
 /// the memo hit it gets today, with nothing on the UI isolate but a few
-/// microseconds of view building per frame (audit #1 / zcode P-01).
+/// microseconds of view building per frame.
 ///
 /// The worker runs THIS package's own [decompressFrame] and walk on a copy
 /// of the frame bytes: the seeded decode is byte for byte the inline one
@@ -29,7 +29,7 @@
 /// (tests force the worker path with it); [FrameDecodeMode.inline] never
 /// offloads.
 ///
-/// DYNT atoms (audit 2026-10-23 P-1): the worker also parses the atom list
+/// DYNT atoms: the worker also parses the atom list
 /// of every 18/9/2 and 18/9/16 item of the frame ([parseDyntAtoms]) and
 /// ships the parse as flat ints plus a string table; [_Result.seed]
 /// rebuilds the [DyntAtom]s as views into the seeded body and memoizes
@@ -77,8 +77,7 @@ abstract final class FrameDecodeOffload {
   static int fallbacks = 0;
 
   /// DYNT atom items (18/9/2, 18/9/16) whose parsed atoms the worker
-  /// shipped and [dyntAtomsOf] handed out without parsing (audit
-  /// 2026-10-23 P-1).
+  /// shipped and [dyntAtomsOf] handed out without parsing.
   static int atomItemsSeeded = 0;
 
   /// DYNT atom items [dyntAtomsOf] parsed inline on the caller's isolate
@@ -210,8 +209,8 @@ class _Result {
   }
 }
 
-/// The parsed DYNT atoms of a frame on the wire between the isolates
-/// (audit 2026-10-23 P-1): one record of [_intsPerAtomItem] ints per atom
+/// The parsed DYNT atoms of a frame on the wire between the isolates:
+/// one record of [_intsPerAtomItem] ints per atom
 /// item (its index in the walk, its first atom's record, its atom count,
 /// its unparsed trailing span — body offsets, -1 none), [_intsPerAtom] ints
 /// per atom (every scalar field of [DyntAtom], its own-bytes and value
@@ -379,8 +378,8 @@ final Expando<DyntAtomWalk> _seededAtoms = Expando('seeded DYNT atoms');
 
 /// The DYNT atom parse of [it] (an 18/9/2 or 18/9/16 item): the one the
 /// decode worker shipped with the frame when it decoded it, else
-/// [parseDyntAtoms] run here — the same walk either way (audit 2026-10-23
-/// P-1). The shipped walk is shared by every caller: do not mutate it.
+/// [parseDyntAtoms] run here — the same walk either way.
+/// The shipped walk is shared by every caller: do not mutate it.
 DyntAtomWalk dyntAtomsOf(DiagItem it) {
   final seeded = _seededAtoms[it];
   if (seeded != null) {
@@ -588,7 +587,6 @@ void _workerMain(SendPort reply) {
       }
       final t = walk.trailing;
       // the DYNT atom parse of the paint items, off the UI isolate too
-      // (audit 2026-10-23 P-1)
       final atoms = _AtomsWire.encode(walk.items, body);
       reply.send([
         id,

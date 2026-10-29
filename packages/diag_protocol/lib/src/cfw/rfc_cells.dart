@@ -39,7 +39,7 @@ List<Cell0305> find0305Cells(Uint8List b) {
   // segment-header offsets of chains that broke: a set that grows with the
   // breaks, not an n-byte shadow of the value allocated at the first break
   // (an MB-scale copy per parse of a multi-MB VARS value whose only break
-  // is a stray `03 05` in the data; audit 2026-10-23 P-5)
+  // is a stray `03 05` in the data)
   Set<int>? broken;
   final heads = <int>[];
   var i = 0;

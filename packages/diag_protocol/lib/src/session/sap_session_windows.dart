@@ -231,7 +231,7 @@ class _WindowState {
   /// what a `WidthInChar` read answers (sap_session_tree.dart)
   final Map<String, int> headerWidths = {};
   /// The window's chunked-call assembly, bounded by
-  /// [TransportLimits.automationStreamBytes] (audit 2026-10-23 R-6).
+  /// [TransportLimits.automationStreamBytes].
   final AutomationStream autoStream;
   final StreamPaintAssembler streamPaints = StreamPaintAssembler();
   final AnsweredCalls answeredFlushes = AnsweredCalls();
@@ -638,7 +638,6 @@ extension SapSessionWindows on SapSession {
 
   _WindowState _bornWindow(int mode, int step) {
     // room first: the table holds [TransportLimits.openWindows] at most
-    // (audit 2026-10-23 R-2, sap_session_liveness.dart)
     _retireForBirth();
     final parent = _modes.live;
     final origin = _modes.actionCommand == _ModeCommand.open
@@ -714,7 +713,7 @@ extension SapSessionWindows on SapSession {
       ..awaitingReply = false
       ..handedBack = true;
     if (win.queue.isEmpty) return false;
-    _inboxRequeue(payload); // counted again (audit 2026-10-23 R-8)
+    _inboxRequeue(payload); // counted again
     for (final p in win.queue.reversed) {
       _inboxRequeue(p);
     }

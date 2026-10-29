@@ -18,7 +18,7 @@
 /// always kept so an immediate re-read of an oversize call is still
 /// caught. A pure-Dart SHA-256 once stood in for the shed bytes (~16 MB/s
 /// on the UI isolate: every large flush past the budget froze the app for
-/// 100+ ms — audit perf1 answered-calls); forgetting can only re-answer a
+/// 100+ ms); forgetting can only re-answer a
 /// long-past call, never conflate two.
 library;
 

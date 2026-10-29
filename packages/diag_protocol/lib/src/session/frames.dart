@@ -24,8 +24,8 @@ const int msgInfoCompressed = 0x01;
 
 /// The uncompressed item stream of a compressed client frame over the
 /// kernel's request buffer, as [clientFrame] built it: the request stream
-/// plans its chunks from it instead of inflating the frame again (audit
-/// 2026-10-17 N3). Null for any other frame.
+/// plans its chunks from it instead of inflating the frame again.
+/// Null for any other frame.
 Uint8List? clientFrameBody(Uint8List frame) => _oversizeBodies[frame];
 
 final Expando<Uint8List> _oversizeBodies = Expando('oversize client bodies');

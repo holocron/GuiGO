@@ -938,7 +938,7 @@ String? databinText(Uint8List seg) {
   }
   var raw = b.takeBytes();
   // dpPutContent's bound of the DATABIN content, without decoding (and
-  // joining) the column a second time (audit #10): TOTALSIZE, else the
+  // joining) the column a second time: TOTALSIZE, else the
   // declared dims — when no DATAASC column takes precedence
   final total = name == 'DATABIN' && dpColumnCells(seg, 'DATAASC').$3.isEmpty
       ? (dpTotalSize(seg) > 0
@@ -1310,6 +1310,6 @@ List<int> _le64(int n) => [
 ];
 
 // Patterns hoisted out of their call sites: a RegExp built per call is
-// compiled per call (audit #7 / zcode P-12).
+// compiled per call.
 final RegExp _markerLinesRx = RegExp(r'\d+');
 final RegExp _splitEditorLinesRx = RegExp('\r\n|\r|\n');
