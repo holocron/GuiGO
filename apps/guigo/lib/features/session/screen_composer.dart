@@ -84,14 +84,16 @@ class ScreenComposer extends StatefulWidget {
   final bool resizable;
   final Object? resizeKey;
 
-  /// A column divider between the panes of ONE docking container
-  /// ([ComposedPane.dock]) and the dynpro was dragged: [cols] = the dock's
-  /// new width in window cells, called when the finger lifts. The server
+  /// A divider between the panes of ONE docking container
+  /// ([ComposedPane.dock]) and the dynpro was dragged: [cells] = the dock's
+  /// new extent in window cells — its width for a column divider (a left /
+  /// right dock), its height for a row divider (a top / bottom dock) —
+  /// called when the finger lifts. The server
   /// lays the dynpro area out again to the reported extent
   /// (a recorded session KEY DECODE 1-3); once the panes come back
   /// at the new geometry the divider's own offset is dropped — the server's
   /// layout is trusted, not drawn shifted a second time.
-  final void Function(String dock, double cols)? onDockResize;
+  final void Function(String dock, double cells)? onDockResize;
 
   /// The dividers the program fixed (SetRowSash / SetColumnSash movable or
   /// visible false), as zero-width lines in window cells: a divider on one
@@ -162,6 +164,7 @@ class PaneSash {
     this.after, {
     this.maxBefore,
     this.maxAfter,
+    this.segment = 0,
   });
   final bool vertical;
   final double at;
@@ -176,15 +179,44 @@ class PaneSash {
   /// panes on that side give room.
   final double? maxBefore, maxAfter;
 
-  String get key => '${vertical ? 'v' : 'h'}:${at.toStringAsFixed(2)}';
+  /// Which stretch of its edge the divider is (0 = the first): two panes
+  /// meeting the same line apart are two dividers ([paneSashes]).
+  final int segment;
+
+  String get key =>
+      '${vertical ? 'v' : 'h'}:${at.toStringAsFixed(2)}'
+      '${segment == 0 ? '' : '#$segment'}';
 }
 
 const double _eps = 0.01;
 
+/// The stretch along a divider's line where panes [b] (ending at it) and
+/// [a] (starting at it) touch in [rects], or null.
+(double, double)? _touch(List<Rect> rects, int b, int a, bool vertical) {
+  final rb = rects[b], ra = rects[a];
+  final s = math.max(vertical ? rb.top : rb.left, vertical ? ra.top : ra.left);
+  final e = math.min(
+    vertical ? rb.bottom : rb.right,
+    vertical ? ra.bottom : ra.right,
+  );
+  return e - s > _eps ? (s, e) : null;
+}
+
 /// The dividers of a pane layout: every edge where one pane ends and a
-/// neighbour that overlaps it along the edge begins.
-List<PaneSash> paneSashes(List<Rect> rects) {
+/// neighbour that overlaps it along the edge begins — ONE divider per line
+/// holding every pane that ends or starts on it (a dock's edge moves all
+/// of the dock's cells: the live iPad SE80 Repository Browser's header
+/// rows, one of which faces no pane across the edge, stayed behind when
+/// they were not part of it, and every narrowing came back at the dock's
+/// width — 2026-10-29), except a boundary INSIDE one docking container
+/// ([docks]: both panes of the same dock) lying on the same line as
+/// another divider: that one is its own divider (the Parameters band's
+/// lower edge ran on the row of a cell boundary inside the Repository
+/// Browser, and the one divider made of both drew its line over the tree
+/// and dragged the tree's cells with the band).
+List<PaneSash> paneSashes(List<Rect> rects, {List<String?>? docks}) {
   final out = <PaneSash>[];
+  String? d(int k) => docks != null && k < docks.length ? docks[k] : null;
   for (final vertical in [true, false]) {
     final edges = <double>{
       for (final r in rects) vertical ? r.right : r.bottom,
@@ -197,26 +229,50 @@ List<PaneSash> paneSashes(List<Rect> rects) {
         if (((vertical ? r.left : r.top) - at).abs() < _eps) after.add(i);
       }
       if (before.isEmpty || after.isEmpty) continue;
-      // the stretch where both sides touch
-      double lo = double.infinity, hi = -double.infinity;
+      // the touching pairs, by divider: the dock a boundary lies inside,
+      // or '' for every other one
+      final groups = <String, (List<double>, Set<int>, Set<int>)>{};
       for (final b in before) {
         for (final a in after) {
-          final rb = rects[b], ra = rects[a];
-          final s = math.max(
-            vertical ? rb.top : rb.left,
-            vertical ? ra.top : ra.left,
-          );
-          final e = math.min(
-            vertical ? rb.bottom : rb.right,
-            vertical ? ra.bottom : ra.right,
-          );
-          if (e - s > _eps) {
-            lo = math.min(lo, s);
-            hi = math.max(hi, e);
-          }
+          final t = _touch(rects, b, a, vertical);
+          if (t == null) continue;
+          final db = d(b);
+          final key = db != null && db == d(a) ? db : '';
+          final g = groups[key] ??= ([t.$1, t.$2], <int>{}, <int>{});
+          g.$1[0] = math.min(g.$1[0], t.$1);
+          g.$1[1] = math.max(g.$1[1], t.$2);
+          g.$2.add(b);
+          g.$3.add(a);
         }
       }
-      if (hi > lo) out.add(PaneSash(vertical, at, lo, hi, before, after));
+      if (groups.isEmpty) continue;
+      // a pane on the line that touches no pane across it moves with the
+      // line's divider all the same (the panes not inside one dock)
+      final outer = groups[''];
+      if (outer != null) {
+        for (final b in before) {
+          if (!groups.values.any((g) => g.$2.contains(b))) outer.$2.add(b);
+        }
+        for (final a in after) {
+          if (!groups.values.any((g) => g.$3.contains(a))) outer.$3.add(a);
+        }
+      }
+      var segment = 0;
+      for (final key in ['', ...groups.keys.where((k) => k.isNotEmpty)]) {
+        final g = groups[key];
+        if (g == null) continue;
+        out.add(
+          PaneSash(
+            vertical,
+            at,
+            g.$1[0],
+            g.$1[1],
+            [for (final b in before) if (g.$2.contains(b)) b],
+            [for (final a in after) if (g.$3.contains(a)) a],
+            segment: segment++,
+          ),
+        );
+      }
     }
   }
   return out;
@@ -297,7 +353,10 @@ List<PaneSash> dockEdgeSashes(List<ComposedPane> panes, List<PaneSash> have) {
 /// ([paneSashes]) and the docking containers' free edges
 /// ([dockEdgeSashes]).
 List<PaneSash> composerSashes(List<ComposedPane> panes) {
-  final meet = paneSashes([for (final p in panes) p.cells]);
+  final meet = paneSashes(
+    [for (final p in panes) p.cells],
+    docks: [for (final p in panes) p.main ? null : p.dock],
+  );
   return [...meet, ...dockEdgeSashes(panes, meet)];
 }
 
@@ -467,24 +526,29 @@ class _ScreenComposerState extends State<ScreenComposer> {
       _offsets.clear();
       _reported.clear();
     } else if (_reported.isNotEmpty && !identical(old.panes, widget.panes)) {
-      // the panes came back laid out to the reported dock: the divider
-      // moved there, its offset would shift it a second time
-      final now = {for (final sh in composerSashes(widget.panes)) sh.key};
-      _reported.removeWhere((k) {
-        if (now.contains(k)) return false;
+      // the panes came back after the report: laid out to the reported
+      // dock (the divider moved there, its offset would shift it a second
+      // time) — or to whatever the session / server laid out instead, which
+      // is the window's geometry now. A divider that came back where it was
+      // kept its offset: the panes were DRAWN past their regions, and every
+      // divider crossing them (the Parameters band's under SE80's widened
+      // Repository Browser, live iPad 2026-10-29) ran over the dock
+      for (final k in _reported) {
         _offsets.remove(k);
-        return true;
-      });
+      }
+      _reported.clear();
     }
   }
 
   /// The drag of divider [sh] ended at [rects]: a dock edge (the panes of
   /// one docking container on one side, the dynpro — or nothing, a free
-  /// edge — on the other) is reported with the dock's width — the span of
-  /// all its panes.
+  /// edge — on the other) is reported with the dock's extent across the
+  /// divider — the span of all its panes: a column divider its width, a
+  /// row divider (a top / bottom dock: SE80's class-editor Parameters
+  /// grid above the method's dynpro) its height.
   void _dragEnded(PaneSash sh, List<Rect> rects) {
     final report = widget.onDockResize;
-    if (report == null || !sh.vertical) return;
+    if (report == null) return;
     final panes = widget.panes;
     String? dockOf(List<int> side) {
       final docks = {for (final i in side) panes[i].dock};
@@ -500,8 +564,8 @@ class _ScreenComposerState extends State<ScreenComposer> {
     var lo = double.infinity, hi = -double.infinity;
     for (var i = 0; i < panes.length; i++) {
       if (panes[i].dock != dock) continue;
-      lo = math.min(lo, rects[i].left);
-      hi = math.max(hi, rects[i].right);
+      lo = math.min(lo, sh.vertical ? rects[i].left : rects[i].top);
+      hi = math.max(hi, sh.vertical ? rects[i].right : rects[i].bottom);
     }
     if (hi <= lo) return;
     _reported.add(sh.key);
@@ -626,8 +690,32 @@ class _ScreenComposerState extends State<ScreenComposer> {
         : (sh.vertical
               ? rects[sh.after.first].left * cw
               : rects[sh.after.first].top * ch);
-    final from = sh.from * (sh.vertical ? ch : cw);
-    final len = (sh.to - sh.from) * (sh.vertical ? ch : cw);
+    // the stretch the divider's panes touch AS DRAWN (their dividers'
+    // offsets applied), not as laid out: a moved neighbour divider changes
+    // it. A free dock edge spans its own panes.
+    var lo = double.infinity, hi = -double.infinity;
+    void span(double s, double e) {
+      lo = math.min(lo, s);
+      hi = math.max(hi, e);
+    }
+
+    if (sh.before.isEmpty || sh.after.isEmpty) {
+      for (final i in [...sh.before, ...sh.after]) {
+        final r = rects[i];
+        span(sh.vertical ? r.top : r.left, sh.vertical ? r.bottom : r.right);
+      }
+    } else {
+      for (final b in sh.before) {
+        for (final a in sh.after) {
+          if (_touch(rects, b, a, sh.vertical) case (final s, final e)) {
+            span(s, e);
+          }
+        }
+      }
+    }
+    if (hi <= lo) (lo, hi) = (sh.from, sh.to);
+    final from = lo * (sh.vertical ? ch : cw);
+    final len = (hi - lo) * (sh.vertical ? ch : cw);
     final active = _dragging == sh.key;
     // always visible (SAP GUI's sash), a grip in its middle; bold while
     // dragged

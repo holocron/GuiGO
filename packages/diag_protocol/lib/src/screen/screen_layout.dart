@@ -340,7 +340,7 @@ class ControlRegistry {
   /// [draggedDelta] pair the pane is drawn at it; once it re-lays out, the
   /// dragged dock takes what the new area leaves beside the others
   /// (_dockedBoxes).
-  final Map<String, int> draggedCols = {};
+  final Map<String, int> draggedCells = {};
 
   /// shell -> the cached props its RegisterCachedProp verbs registered,
   /// in registration order (the CONTROLS report's order)
@@ -383,7 +383,7 @@ class ControlRegistry {
       requested,
       reportedDelta,
       draggedDelta,
-      draggedCols,
+      draggedCells,
       cachedProps,
       flushedSizes,
       controlLinks,
@@ -475,7 +475,7 @@ class ControlRegistry {
       created.add(LayoutControl(program, step, shell, cls));
       _createdChanged();
       requested.remove(shell); // a re-created shell starts a new history
-      draggedCols.remove(shell); // … at the extent the server asks
+      draggedCells.remove(shell); // … at the extent the server asks
       flushedSizes.remove(shell); // … and owes its realized size again
       props[shell]?.remove(propVisible); // … and visible (see [hidden])
       if (_digits.hasMatch(par)) parents[shell] = par;
@@ -931,9 +931,22 @@ class LayoutInputs {
     this.sinceStep,
     this.dockFraction,
     this.splitterHeld = const {},
+    this.anchoredAreas = const {},
   });
 
   final ScreenModel screen;
+
+  /// The dynpro areas (container name) anchored to the AREA's bottom /
+  /// right edge: an area some paint of this screen laid out to the area's
+  /// last row (column) or past it — SE80's class-editor ABAP editor, r1 17
+  /// rows in the first 18-row area (live iPad 2026-10-29). Such an area is
+  /// drawn down to the area's edge however the area moves: the server's
+  /// answers to the dock rounds re-laid the AREA (16/12/7: 18 -> 25 rows)
+  /// but declared the editor at its first 17 rows again — the frontend is
+  /// what fills the window with it — and the cell under the Parameters band
+  /// never grew past its first height ("the lower cell is not resized
+  /// bigger than its initial size"). (bottom, right).
+  final Map<String, (bool, bool)> anchoredAreas;
 
   /// The AREASIZE pairs (16/12/7: window, area), null without one.
   final (int, int)? window;
@@ -1057,6 +1070,12 @@ class _Facts {
   /// AREASIZE pair (see _dockedBoxes), else null
   int? areaCols;
   int? areaRows;
+
+  /// the docks drawn at the extent the USER dragged them to
+  /// ([ControlRegistry.draggedCells]): the area is ours until the server
+  /// repaints — the dynpro's custom-control areas follow it (composeScreen)
+  /// and no content sizing overrides the drag (_contentSizedDocks)
+  final Set<String> userSized = {};
   final Map<String, String?> gen = {};
   final Map<String, int> genStep = {};
 
@@ -1462,6 +1481,7 @@ Map<String, _Box> _dockedBoxes(
     // a pane the user dragged is ours until the server lays the area out
     // to it (a repaint at another delta)
     final dragged = fx.reg.draggedDelta[h] == delta;
+    if (dragged) fx.userSized.add(h);
     if (!provisional && !dragged) {
       b.width = delta;
     } else {
@@ -1482,7 +1502,7 @@ Map<String, _Box> _dockedBoxes(
   // 400). Every side dock carries a sash on its inner edge (the Java GUI's
   // docklayout.Docker mSash, on the right edge of a LEFT dock and the left
   // edge of a RIGHT one): a dock the user dragged ([ControlRegistry
-  // .draggedCols]) is drawn at its dragged width while the server still
+  // .draggedCells]) is drawn at its dragged width while the server still
   // paints the pair of the drag, and takes what the server's re-laid-out
   // area leaves beside the other docks once it moved — the lone-dock rule
   // above, per dock.
@@ -1490,12 +1510,13 @@ Map<String, _Box> _dockedBoxes(
     final delta = winCols - areaCols;
     final dragged = [
       for (final h in horiz)
-        if (fx.reg.draggedCols[h] != null) h,
+        if (fx.reg.draggedCells[h] != null) h,
     ];
     for (final h in dragged) {
       final b = out[h]!;
       if (fx.reg.draggedDelta[h] == delta) {
-        b.width = math.max(fx.reg.draggedCols[h]!, 1);
+        b.width = math.max(fx.reg.draggedCells[h]!, 1);
+        fx.userSized.add(h);
       } else if (dragged.length == 1) {
         var others = 0;
         for (final k in horiz) {
@@ -1521,7 +1542,14 @@ Map<String, _Box> _dockedBoxes(
     }
     areaCols = fx.areaCols!;
   }
-  if (vert.length == 1 && winRows > areaRows && areaRows > 0) {
+  // (not for a band the user dragged: its painted delta is the server's
+  // answer to the drag, never an earlier request's placeholder — a band
+  // asked 110 then 290 px and dragged to 4 rows came back at 290 / 29 =
+  // 10, the earlier request's 4 taken for stale)
+  if (vert.length == 1 &&
+      winRows > areaRows &&
+      areaRows > 0 &&
+      fx.reg.draggedCells[vert.single] == null) {
     // the reference client's committed_extent on the vertical axis (37e6240): the
     // painted window-minus-area is the pane's height unless it is the
     // server's STALE placeholder of an EARLIER 120 request while a later
@@ -1552,6 +1580,60 @@ Map<String, _Box> _dockedBoxes(
     }
     if (b.side == 'top') b.top = -b.height;
   }
+  // A top / bottom dock's edge dragged (SapSession.resizeDock on a 470 = 2
+  // / 4 dock — SE80's class-editor Parameters grid, dock 166 above the
+  // method's dynpro, live the test system 2026-10-28): the side-dock rule on the
+  // vertical axis. No capture holds a band dock's drag (the corpus's band
+  // docks report their 120 only at creation: a recorded session
+  // 118 / a recorded session 117 `120 = 21` then `53`), so
+  // it is taken by symmetry with the recorded side-dock drag
+  // (a recorded session KEY DECODE 1-3): drawn at the dragged rows
+  // while the server still paints the pair of the drag; once its area
+  // moved, the dragged dock takes what the new area leaves beside the
+  // other band docks.
+  if (vert.isNotEmpty && winRows > 0 && areaRows > 0) {
+    final delta = winRows - areaRows;
+    final dragged = [
+      for (final h in vert)
+        if (fx.reg.draggedCells[h] != null) h,
+    ];
+    var changed = false;
+    for (final h in dragged) {
+      final b = out[h]!;
+      if (fx.reg.draggedDelta[h] == delta) {
+        b.height = math.max(fx.reg.draggedCells[h]!, 1);
+        fx.userSized.add(h);
+        changed = true;
+      } else if (dragged.length == 1 && delta > 0) {
+        var others = 0;
+        for (final k in vert) {
+          if (k != h) others += out[k]!.height;
+        }
+        if (delta - others >= 1) {
+          b.height = delta - others;
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      // the area is what the bands leave of the window (never below 1 row)
+      var used = 0;
+      for (final k in vert) {
+        final b = out[k]!;
+        b.height = math.min(b.height, math.max(winRows - 1 - used, 1));
+        used += b.height;
+      }
+      areaRows = winRows - used;
+      fx.areaRows = areaRows;
+      for (final k in vert) {
+        final b = out[k]!;
+        b.top = b.side == 'bottom' ? areaRows : -b.height;
+      }
+      for (final k in horiz) {
+        out[k]!.height = areaRows;
+      }
+    }
+  }
   for (final (sideKey, edge) in [('bottom', areaRows), ('top', 0)]) {
     final group = [
       for (final e in out.entries)
@@ -1575,6 +1657,51 @@ Map<String, _Box> _dockedBoxes(
       if (b.side == 'top' || b.side == 'bottom') {
         b.left = -leftW;
         b.width = areaCols + leftW + rightW;
+      }
+    }
+  }
+  // Both axes docked: each pane's extent ALONG its side is what the panes
+  // attached before it left free (the frontend's working-pane layout,
+  // _carveWindow's attach walk). The carve places the panes so, but the
+  // splitter cells inside a pane are laid out in the box given here: SE80's
+  // class editor attaches the Repository Browser dock 118 (left) before the
+  // Parameters dock 163 (top) — the browser spans all 31 window rows — yet
+  // its box took the AREA's 18 rows, so its toolbar / tree cells ended there
+  // and a blank band ran under the tree to the window's bottom (live iPad
+  // landscape 2026-10-28). The DBA cockpit's message strip, attached before
+  // its tree, keeps the tree to the area's rows (docking_attach_order_test).
+  final sides = out.values.where((b) => b.side == 'left' || b.side == 'right');
+  final bands = out.values.where((b) => b.side == 'top' || b.side == 'bottom');
+  if (sides.isNotEmpty &&
+      bands.isNotEmpty &&
+      winRows >= areaRows &&
+      winCols >= areaCols &&
+      areaRows > 0 &&
+      areaCols > 0) {
+    final attach = out.keys.toList()
+      ..sort((a, b) => (fx.order[a] ?? 0).compareTo(fx.order[b] ?? 0));
+    // the area's origin in the window: every top band above it, every
+    // left pane before it, whenever attached
+    var topAll = 0, leftAll = 0;
+    for (final b in out.values) {
+      if (b.side == 'top') topAll += b.height;
+      if (b.side == 'left') leftAll += b.width;
+    }
+    var freeTop = 0, freeLeft = 0, freeRows = winRows, freeCols = winCols;
+    for (final k in attach) {
+      final b = out[k]!;
+      if (b.side == 'left' || b.side == 'right') {
+        b
+          ..height = math.max(freeRows, 1)
+          ..top = freeTop - topAll;
+        freeCols -= b.width;
+        if (b.side == 'left') freeLeft += b.width;
+      } else {
+        b
+          ..width = math.max(freeCols, 1)
+          ..left = freeLeft - leftAll;
+        freeRows -= b.height;
+        if (b.side == 'top') freeTop += b.height;
       }
     }
   }
@@ -1920,7 +2047,10 @@ Map<String, _Box> _contentSizedDocks(_Facts fx, Map<String, _Box> boxes) {
         }
       }
     }
-    if (rows > 0 && b.height < 2 + math.min<int>(rows, 4)) {
+    // a pane the user dragged keeps the extent of the drag
+    if (rows > 0 &&
+        b.height < 2 + math.min<int>(rows, 4) &&
+        !fx.userSized.contains(k)) {
       final newH = 2 + math.min<int>(rows, 4);
       out[k] = b.copy()
         ..height = newH
@@ -3023,7 +3153,87 @@ List<ScreenRegion> composeScreen(
       boxesOut[sh] = at(b.top, b.left, b.height, b.width);
     });
   }
-  return _clipToArea(regions);
+  return _clipToArea(_followDraggedArea(regions, fx, area));
+}
+
+/// [regions] with the dynpro areas anchored to the area's edges
+/// ([LayoutInputs.anchoredAreas]) following the area DRAWN — the server's
+/// pair, a dock drag the session realizes before the server answers (SE80's
+/// class-editor ABAP editor under the Parameters band, dock 164 470 = 2:
+/// blank rows under it when the band shrank, cut off when it grew — live
+/// iPad 2026-10-28), or an area the server re-laid without growing the
+/// areas it declares again (2026-10-29): a region in an anchored area that
+/// reaches the area's painted bottom (right) edge reaches the drawn one.
+List<ScreenRegion> _followDraggedArea(
+  List<ScreenRegion> regions,
+  _Facts fx,
+  (int, int)? area,
+) {
+  final anchors = fx.inputs.anchoredAreas;
+  if (anchors.isEmpty || area == null) return regions;
+  final dyn = regions.where((r) => r.kind == 'dynpro').firstOrNull?.rect;
+  if (dyn == null) return regions;
+  const eps = 0.01;
+  final bottom = dyn.row + dyn.rows, right = dyn.col + dyn.cols;
+  // the anchored areas in window cells
+  final boxes = <(CellRect, bool, bool)>[
+    for (final e in anchors.entries)
+      if (fx.inputs.screen.containers[e.key] case final c?)
+        if (e.value.$1 || e.value.$2)
+          (
+            CellRect(
+              dyn.row + c.row,
+              dyn.col + c.col,
+              c.height.toDouble(),
+              c.width.toDouble(),
+            ),
+            e.value.$1,
+            e.value.$2,
+          ),
+  ];
+  if (boxes.isEmpty) return regions;
+  return [
+    for (final r in regions)
+      if (r.kind == 'dynpro' || r.kind == 'sash')
+        r
+      else
+        _anchored(r, boxes, bottom, right, eps),
+  ];
+}
+
+ScreenRegion _anchored(
+  ScreenRegion r,
+  List<(CellRect, bool, bool)> boxes,
+  double bottom,
+  double right,
+  double eps,
+) {
+  var rows = r.rect.rows, cols = r.rect.cols;
+  for (final (b, toBottom, toRight) in boxes) {
+    final inside =
+        r.rect.row >= b.row - eps &&
+        r.rect.col >= b.col - eps &&
+        r.rect.row < b.row + b.rows - eps &&
+        r.rect.col < b.col + b.cols - eps;
+    if (!inside) continue;
+    if (toBottom && r.rect.row + r.rect.rows >= b.row + b.rows - eps) {
+      rows = math.max(bottom - r.rect.row, 1);
+    }
+    if (toRight && r.rect.col + r.rect.cols >= b.col + b.cols - eps) {
+      cols = math.max(right - r.rect.col, 1);
+    }
+  }
+  if (rows == r.rect.rows && cols == r.rect.cols) return r;
+  return ScreenRegion(
+    kind: r.kind,
+    shell: r.shell,
+    container: r.container,
+    rect: CellRect(r.rect.row, r.rect.col, rows, cols),
+    rung: r.rung,
+    reason: r.reason,
+    gauge: r.gauge,
+    gaugeText: r.gaugeText,
+  );
 }
 
 /// The values a splitter axis holds once the user dragged its cells to

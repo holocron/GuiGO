@@ -2119,8 +2119,10 @@ class SapSession {
   /// repaint moves the painted delta (then that delta is trusted again,
   /// [provisionalDockDelta]), and the round goes out now on an idle,
   /// live main window — else it is owed to the next paint (an action
-  /// running, typed values staged, a popup up). Top / bottom docks (`120`)
-  /// are not modelled. Returns whether a round went out.
+  /// running, typed values staged, a popup up). A top / bottom dock
+  /// (470 = 2 / 4) takes [cols] as its ROWS and reports its `120` (rows x
+  /// METRICS Y2) — by symmetry: no capture holds a band dock's drag.
+  /// Returns whether a round went out.
   Future<bool> resizeDock(String dock, double cols) =>
       _resizeDock(dock, cols);
 

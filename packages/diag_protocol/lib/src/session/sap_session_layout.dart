@@ -83,6 +83,7 @@ extension SapSessionLayout on SapSession {
     final s = (screen?.modalLevel ?? 0) > 0 ? baseScreen : screen;
     if (s == null || s.program == null) return const [];
     final st = _layoutState;
+    _noteContainersArea();
     final tables = [
       ..._layoutTables((_) => true),
       // a designer canvas is drawn in its splitter cell like a table (the
@@ -119,6 +120,7 @@ extension SapSessionLayout on SapSession {
         sinceStep: st.baseSinceStep ?? _progSinceStep,
         dockFraction: st.dockFraction,
         splitterHeld: st.sashHeld,
+        anchoredAreas: st.anchors,
       ),
       sashes: sashes,
       boxesOut: boxes,
@@ -450,38 +452,53 @@ extension SapSessionLayout on SapSession {
   }
 
   /// [SapSession.resizeDock]
-  Future<bool> _resizeDock(String dock, double cols) async {
+  Future<bool> _resizeDock(String dock, double cells) async {
     final st = _layoutState;
     final w = st.window, a = st.area;
     final side = st.registry.props[dock]?[propDockSide];
-    if (w == null || a == null || w.$2 <= 1) {
+    if (w == null || a == null || w.$2 <= 1 || w.$1 <= 1) {
       _trace('dock $dock resize ignored: no AREASIZE painted');
       return false;
     }
-    if (!isSideDock(side)) {
-      _trace('dock $dock resize ignored: not a left / right dock');
+    // a left / right dock's extent is columns, a top / bottom one's rows
+    // (its `120`): the same drag on the other axis
+    final bool cols;
+    if (isSideDock(side)) {
+      cols = true;
+    } else if (isBandDock(side)) {
+      cols = false;
+    } else {
+      _trace('dock $dock resize ignored: no dock side');
       return false;
     }
-    final sideDocks = [
+    final winCells = cols ? w.$2 : w.$1, areaCells = cols ? a.$2 : a.$1;
+    final axisDocks = [
       for (final d in _shownDocks())
-        if (isSideDock(st.registry.props[d]?[propDockSide])) d,
+        if (cols
+            ? isSideDock(st.registry.props[d]?[propDockSide])
+            : isBandDock(st.registry.props[d]?[propDockSide]))
+          d,
     ];
     // a lone side dock is the session's sash ([dockFraction]); beside
     // other side docks (SMARTFORMS' tree and Form Painter) it is this
-    // dock's own width, and the others keep theirs
-    final lone = sideDocks.length == 1 && sideDocks.single == dock;
-    // the area keeps a column: a lone dock may take the window less one,
-    // one beside others the area it shares with them less one
-    var room = w.$2 - 1;
+    // dock's own width, and the others keep theirs; a top / bottom dock
+    // is always its own height (no remembered share models it)
+    final lone = cols && axisDocks.length == 1 && axisDocks.single == dock;
+    // the area keeps a cell: a lone dock may take the window less one, one
+    // beside others the area it shares with them less one
+    var room = winCells - 1;
     if (!lone) {
       final boxes = <String, CellRect>{};
       final regs = _composeBase(boxes: boxes);
       for (final r in regs) {
-        if (r.kind == 'dynpro') room = r.rect.cols.toInt() - 1;
+        if (r.kind == 'dynpro') {
+          room = (cols ? r.rect.cols : r.rect.rows).toInt() - 1;
+        }
       }
-      room += boxes[dock]?.cols.toInt() ?? 0;
+      final b = boxes[dock];
+      room += (b == null ? 0 : (cols ? b.cols : b.rows)).toInt();
     }
-    final c = cols.round().clamp(1, room < 1 ? 1 : room);
+    final c = cells.round().clamp(1, room < 1 ? 1 : room);
     // once per paint: the same extent again before the server answered
     // (its step unchanged) owes nothing new
     final mark = '$dock:$c@$step';
@@ -491,8 +508,8 @@ extension SapSessionLayout on SapSession {
     }
     if (lone) st.dockFraction = c / w.$2;
     st.reportedDocks = null; // the realized extent changed: owed again
-    st.registry.draggedDelta[dock] = w.$2 - a.$2;
-    st.registry.draggedCols[dock] = c;
+    st.registry.draggedDelta[dock] = winCells - areaCells;
+    st.registry.draggedCells[dock] = c;
     // the dynpro area every later round reports (16/12/8) is the window
     // less the dragged pane until the server re-lays out (the reference client's
     // docked_layout.realized_area_px: the user's drag wins on its axis)
@@ -501,11 +518,15 @@ extension SapSessionLayout on SapSession {
     } else {
       for (final r in regions) {
         if (r.kind == 'dynpro') {
-          ctx.dockedCells = (ctx.dockedCells.$1, w.$2 - r.rect.cols.toInt());
+          ctx.dockedCells = cols
+              ? (ctx.dockedCells.$1, w.$2 - r.rect.cols.toInt())
+              : (w.$1 - r.rect.rows.toInt(), ctx.dockedCells.$2);
         }
       }
     }
-    _trace('dock $dock dragged to $c of ${w.$2} cols');
+    _trace(
+      'dock $dock dragged to $c of $winCells ${cols ? 'cols' : 'rows'}',
+    );
     String? refusal() {
       if (answerDialect != GuiDialect.windows) return 'not Windows';
       if (state != SessionState.ready && !offlineReplay) {
@@ -782,28 +803,63 @@ extension SapSessionLayout on SapSession {
       final values = <(String, String)>[];
       for (final p in props) {
         if (p != propControlHeight && p != propControlWidth) continue;
-        // a side dock's width the server set but we realize differently
-        // (dockFraction): reported, like gui[15]'s 135 300 = 845; beside
-        // other side docks the width the user dragged it to (the real
-        // GUI's 300 = px of its sash, 8 px per col — a recorded session)
+        // a dock extent the CLIENT realizes (a lone side dock's
+        // dockFraction share — gui[15]'s 135 300 = 845 —, a dock the user
+        // dragged beside others, a dragged top / bottom band) in the px of
+        // the window this session reports (16/12/8 / 16/12/9: its own
+        // winPx for its rows x cols). The server lays the area out as the
+        // window less THAT: the live iPad SE80 rounds read 300 / 120 so —
+        // dock 118 `300 = 440` (55 cols x 8) and the server painted a
+        // 105-col area, 168 - 440 x 168 / 1180; dock 163 `120 = 232` (8
+        // rows x 29) and it painted 21 rows, 31 - 232 x 31 / 699 (steps 55 /
+        // 56, 2026-10-28) — at 8 px per col / 29 per row the panes we drew
+        // and the area it painted disagreed by 8 cols and 2 rows.
         final f = _layoutState.dockFraction;
+        int pxCols(num c) => window == null || window.$2 <= 0
+            ? (c * 8).round()
+            : (c * ctx.winPxWidth / window.$2).round();
+        int pxRows(num r) => window == null || window.$1 <= 0
+            ? (r * metricY2).round()
+            : (r * ctx.winPxHeight / window.$1).round();
         if (docking && p == propControlWidth && isSideDock(side)) {
-          final dragged = reg.draggedCols[sh];
+          final dragged = reg.draggedCells[sh];
           if (sideDockCount > 1) {
-            if (dragged != null && '${dragged * 8}' != set[propControlWidth]) {
-              values.add((p, '${dragged * 8}'));
+            if (dragged != null && '${pxCols(dragged)}' != set[propControlWidth]) {
+              values.add((p, '${pxCols(dragged)}'));
             }
           } else if (f != null && window != null) {
-            final v = (f * window.$2 * 8).round();
+            final v = pxCols(f * window.$2);
             if ('$v' != set[propControlWidth]) values.add((p, '$v'));
           }
           continue;
+        }
+        // a top / bottom dock the user dragged: its rows, by symmetry with
+        // a side dock's 300 (no capture holds a band dock's drag)
+        if (docking && p == propControlHeight && isBandDock(side)) {
+          final dragged = reg.draggedCells[sh];
+          if (dragged != null) {
+            final v = '${pxRows(dragged)}';
+            if (v != set[propControlHeight]) values.add((p, v));
+            continue;
+          }
         }
         if (set.containsKey(p)) continue;
         String? v;
         final g = linked[sh];
         if (g != null) {
-          v = areaContainerPx(g, p);
+          // an area anchored to the area's edge is drawn to the edge of the
+          // area reported (screen_layout._followDraggedArea): reported so
+          final anchor = _layoutState.anchors[g.name];
+          int? rows, cols;
+          if (anchor != null && anchor.$1) {
+            final r = area.rows.toInt() - g.row;
+            rows = r < 1 ? 1 : r;
+          }
+          if (anchor != null && anchor.$2) {
+            final c = area.cols.toInt() - g.col;
+            cols = c < 1 ? 1 : c;
+          }
+          v = areaContainerPx(g, p, rows: rows, cols: cols);
         } else if (docking && set[propVisible] != '0') {
           if (isSideDock(side) && p == propControlHeight) {
             v = '${area.rows.toInt() * 13 + 17}';
@@ -818,6 +874,34 @@ extension SapSessionLayout on SapSession {
       }
     }
     return out;
+  }
+
+  /// Record which dynpro areas of the base screen are anchored to the
+  /// AREA's bottom / right edge ([LayoutInputs.anchoredAreas]): an area
+  /// some paint of this screen (program / dynpro) laid out to the area's
+  /// last row (column) or past it, checked against the pair in force.
+  /// Once anchored it stays so for the screen: the server's answers to the
+  /// dock rounds re-lay the AREA but declare the class editor's ABAP
+  /// editor at its first 17 rows again (live iPad 2026-10-29) — at 25
+  /// rows it no longer reaches the edge, yet it is the area that fills it.
+  void _noteContainersArea() {
+    final st = _layoutState;
+    final s = (screen?.modalLevel ?? 0) > 0 ? null : screen;
+    final a = st.area;
+    if (s == null || a == null) return;
+    final key = '${s.program}/${s.dynpro}';
+    if (st.anchorScreen != key) {
+      st
+        ..anchorScreen = key
+        ..anchors.clear();
+    }
+    for (final c in s.containers.values) {
+      if (c.width <= 0 || c.height <= 0) continue;
+      final old = st.anchors[c.name];
+      final b = c.row + c.height >= a.$1 || (old?.$1 ?? false);
+      final r = c.col + c.width >= a.$2 || (old?.$2 ?? false);
+      if (b || r) st.anchors[c.name] = (b, r);
+    }
   }
 
   /// The last AREASIZE (16/12/7) pairs of a turn: (window, area), per
@@ -842,6 +926,7 @@ extension SapSessionLayout on SapSession {
             st
               ..window = w
               ..area = a;
+            _noteContainersArea();
             // the docked panes' cells: what every later main-window round
             // reports beside the window as the dynpro area (16/12/8)
             ctx.dockedCells = _shownDocks().isEmpty
@@ -932,6 +1017,28 @@ extension SapSessionLayout on SapSession {
     if (out.isEmpty) return null;
     _trace('sash drag: ${[for (final c in out) c.$1].join(', ')} resized');
     return windowsControlBlocks(out);
+  }
+
+  /// TESTS ONLY: fold [verbs] into the layout registry as if a server flush
+  /// call had carried them at the current step — the controls of a screen
+  /// no single capture holds (the live iPad SE80 class editor's Repository
+  /// Browser dock beside the class editor's band, band_dock_drag_test).
+  void debugFoldLayoutVerbs(List<LayoutVerb> verbs) {
+    final st = _layoutState;
+    st.registry.foldCall(
+      verbs,
+      program: screen?.program,
+      step: clockStep,
+      shellOfHandle: (h) => _ea.shellAlias[h],
+      isLive: _live,
+    );
+    for (final v in verbs) {
+      final sh = (v.args['#1'] ?? '').trim();
+      if (v.verb.startsWith('CreateControl') && _digitsOnlyRx.hasMatch(sh)) {
+        st.imodes.stamp(sh, step: clockStep);
+        _ea.destroyedControls.remove(sh);
+      }
+    }
   }
 
   /// Fold one answered flush call into the layout registry and bind its
@@ -1074,6 +1181,12 @@ class _LayoutState {
   (int, int)? window;
   (int, int)? area;
 
+  /// the base screen's dynpro areas anchored to the area's bottom / right
+  /// edge, for the screen (program / dynpro) [anchorScreen]
+  /// (SapSessionLayout._noteContainersArea)
+  final Map<String, (bool, bool)> anchors = {};
+  String? anchorScreen;
+
   /// the active popup's AREASIZE pair (see _mirrorAreaPairs)
   (int, int)? modalWindow;
   (int, int)? modalArea;
@@ -1129,10 +1242,16 @@ final Expando<int> _frameClock = Expando('frameClock');
 /// cols x 8, rows x 13.64 — the layout round's CONTROLS report and the
 /// calendar pick's container block (a recorded session gui[6], where
 /// the real GUI's own metrics give 141 / 327 for the 12 x 40 area). Null
-/// for any other prop.
-String? areaContainerPx(ScreenContainer g, String prop) => switch (prop) {
-  propControlWidth => '${g.width * 8}',
-  propControlHeight => '${(g.height * 13.64 + 0.5).floor()}',
+/// for any other prop. [rows] / [cols]: the extent the area is drawn at
+/// when it is not the painted one (a dock drag stretched it).
+String? areaContainerPx(
+  ScreenContainer g,
+  String prop, {
+  int? rows,
+  int? cols,
+}) => switch (prop) {
+  propControlWidth => '${(cols ?? g.width) * 8}',
+  propControlHeight => '${((rows ?? g.height) * 13.64 + 0.5).floor()}',
   _ => null,
 };
 
